@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mi Asistente Contable</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --ink:#1B2430;
+    --paper:#F7F5EF;
+    --brass:#A9762F;
+    --brass-light:#EADFC7;
+    --slate:#5B6472;
+    --line:#DBD5C6;
+    --ok:#3F7D58;
+    --ok-bg:#E7F0EA;
+    --alert:#AE4A34;
+    --alert-bg:#F6E7E2;
+    --card:#FFFFFF;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"IBM Plex Sans","Segoe UI",Arial,sans-serif;
+    background:var(--paper);color:var(--ink);line-height:1.5;
+  }
+  .app{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+
+  /* Encabezado */
+  .masthead{display:flex;align-items:baseline;justify-content:space-between;
+    border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:28px}
+  .masthead h1{font-family:Georgia,"Times New Roman",serif;font-size:26px;font-weight:700;letter-spacing:.2px}
+  .masthead .folio{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--slate)}
+  .crumb{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--slate);margin-bottom:18px}
+  .crumb button{background:none;border:none;color:var(--brass);font-weight:600;cursor:pointer;font-size:13px;padding:0}
+  .crumb button:hover{text-decoration:underline}
+
+  /* Menu de modulos */
+  .menu-list{border-top:1px solid var(--line)}
+  .menu-item{display:flex;align-items:center;gap:18px;padding:20px 6px;border-bottom:1px solid var(--line);
+    cursor:pointer;transition:background .12s}
+  .menu-item:hover{background:var(--brass-light)}
+  .menu-item .num{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--brass);min-width:28px}
+  .menu-item .txt h2{font-size:17px;font-weight:600}
+  .menu-item .txt p{font-size:13px;color:var(--slate);margin-top:2px}
+  .menu-item .arrow{margin-left:auto;color:var(--slate);font-size:18px}
+  .menu-item.disabled{opacity:.45;cursor:default}
+  .menu-item.disabled:hover{background:none}
+
+  /* Modulo */
+  .stage{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:22px;margin-bottom:18px}
+  .stage h3{font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:10px;margin-bottom:4px}
+  .stage h3 .tag{font-family:"IBM Plex Mono",monospace;font-size:11px;background:var(--ink);color:var(--paper);
+    padding:2px 7px;border-radius:4px}
+  .stage p.desc{font-size:13px;color:var(--slate);margin-bottom:14px}
+  .dropzones{display:grid;gap:14px}
+  .dz-grid2{grid-template-columns:1fr 1fr}
+  .dropzones.grid2{display:grid;grid-template-columns:1fr 1fr}
+  .dz{border:1.5px dashed var(--line);border-radius:8px;padding:14px;display:flex;align-items:center;gap:12px;
+    background:#FCFBF8}
+  .dz.filled{border-style:solid;border-color:var(--ok);background:var(--ok-bg)}
+  .dz .ico{font-size:20px}
+  .dz .info{flex:1;min-width:0}
+  .dz .info .lbl{font-size:12.5px;font-weight:600;color:var(--ink)}
+  .dz .info .expected{font-size:11.5px;color:var(--brass);margin-top:2px}
+  .dz .info .sub{font-size:11.5px;color:var(--slate);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .dz input[type=file]{display:none}
+  .dz .btn-sel{font-size:12px;background:var(--ink);color:#fff;border:none;padding:7px 12px;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .dz .btn-sel:hover{background:#333f4f}
+
+  .run-bar{display:flex;align-items:center;gap:14px;margin:22px 0}
+  .btn-run{background:var(--brass);color:#fff;border:none;font-size:14px;font-weight:700;padding:12px 22px;
+    border-radius:8px;cursor:pointer}
+  .btn-run:disabled{background:#CBBFA0;cursor:not-allowed}
+  .btn-run:not(:disabled):hover{background:#8f611f}
+  .run-note{font-size:12.5px;color:var(--slate)}
+
+  .opts{display:flex;gap:22px;align-items:center;font-size:12.5px;color:var(--slate);flex-wrap:wrap}
+  .opts label{display:flex;align-items:center;gap:6px}
+  .opts input[type=number]{width:60px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-family:inherit}
+
+  /* Resultados */
+  .results-head{display:flex;justify-content:space-between;align-items:baseline;margin:30px 0 14px}
+  .results-head h2{font-family:Georgia,serif;font-size:20px}
+  .summary-bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .chip{font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;background:var(--brass-light);color:var(--ink)}
+  .chip.ok{background:var(--ok-bg);color:var(--ok)}
+  .chip.alert{background:var(--alert-bg);color:var(--alert)}
+
+  .step-block{border:1px solid var(--line);border-radius:10px;margin-bottom:16px;overflow:hidden;background:var(--card)}
+  .step-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;
+    background:#F2EEE4;cursor:pointer;user-select:none}
+  .step-head h4{font-size:14px;font-weight:700}
+  .step-head .count{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--slate)}
+  .step-body{padding:4px 18px 14px}
+  .finding{display:flex;gap:12px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid var(--line)}
+  .finding:last-child{border-bottom:none}
+  .finding input[type=checkbox]{margin-top:3px;width:16px;height:16px;accent-color:var(--ok)}
+  .finding.done .ftxt{text-decoration:line-through;color:var(--slate)}
+  .ftxt{font-size:13px}
+  .ftxt .amt{font-family:"IBM Plex Mono",monospace;font-weight:600}
+  .ftxt .src{display:block;font-size:11.5px;color:var(--slate);margin-top:2px}
+  .empty-ok{font-size:13px;color:var(--ok);padding:12px 4px;font-weight:600}
+
+  .btn-export{background:none;border:1px solid var(--ink);color:var(--ink);font-size:12.5px;font-weight:600;
+    padding:7px 14px;border-radius:6px;cursor:pointer}
+  .btn-export:hover{background:var(--ink);color:#fff}
+
+  footer.note{font-size:11.5px;color:var(--slate);margin-top:30px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+var STATE = {
+  view:"menu",
+  files:{
+    reporte:null, diarioCaja:null, diarioBanistmo:null, diarioStg:null,
+    estBanistmo:null, estStg:null, retVisa:null
+  },
+  parsed:{},
+  options:{ ventanaDias:3, tolerancia:0.01 },
+  results:null,
+  checks:{}
+};
+
+/* ---------------- Utilidades ---------------- */
+function normTxt(s){
+  if(s===null||s===undefined) return "";
+  s = String(s);
+  s = s.normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+  return s.toUpperCase().replace(/\s+/g," ").trim();
+}
+function money(v){
+  if(v===null||v===undefined||v==="") return 0;
+  if(typeof v==="number") return v;
+  var s = String(v).replace(/B\/\.?/gi,"").replace(/\$/g,"").replace(/,/g,"").trim();
+  var neg = false;
+  if(s.indexOf("(")===0){ neg=true; s=s.replace(/[()]/g,""); }
+  if(s.indexOf("-")===0){ neg=true; s=s.replace("-",""); }
+  var n = parseFloat(s);
+  if(isNaN(n)) return 0;
+  return neg ? -n : n;
+}
+function toISODate(v, mdY){
+  if(v===null||v===undefined||v==="") return null;
+  if(v instanceof Date && !isNaN(v)) {
+    return v.getFullYear()+"-"+String(v.getMonth()+1).padStart(2,"0")+"-"+String(v.getDate()).padStart(2,"0");
+  }
+  var s = String(v).trim();
+  var m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if(m){
+    var a = parseInt(m[1],10), b = parseInt(m[2],10), y = m[3];
+    var mm, dd;
+    if(mdY){ mm=a; dd=b; } else { dd=a; mm=b; }
+    return y+"-"+String(mm).padStart(2,"0")+"-"+String(dd).padStart(2,"0");
+  }
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return m[0].slice(0,10);
+  return null;
+}
+function daysBetween(iso1, iso2){
+  if(!iso1||!iso2) return Infinity;
+  var d1 = new Date(iso1+"T00:00:00"), d2 = new Date(iso2+"T00:00:00");
+  return Math.abs((d1-d2)/86400000);
+}
+function readWorkbook(file, cb){
+  var reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      var data = new Uint8Array(e.target.result);
+      var wb = XLSX.read(data, {type:"array", cellDates:true});
+      var sheet = wb.Sheets[wb.SheetNames[0]];
+      var rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:true, defval:null});
+      cb(rows);
+    }catch(err){ alert("No se pudo leer el archivo: "+err.message); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+function findHeaderRow(rows, tokens){
+  for(var i=0;i<rows.length;i++){
+    var row = rows[i];
+    if(!row) continue;
+    var norm = row.map(function(c){return normTxt(c);});
+    var hits = 0;
+    for(var t=0;t<tokens.length;t++){
+      if(norm.some(function(c){return c.indexOf(normTxt(tokens[t]))!==-1;})) hits++;
+    }
+    if(hits >= Math.min(3, tokens.length)) return i;
+  }
+  return -1;
+}
+function colIdx(headerRow, token){
+  for(var i=0;i<headerRow.length;i++){
+    if(normTxt(headerRow[i]).indexOf(normTxt(token))!==-1) return i;
+  }
+  return -1;
+}
+
+/* ---------------- Parsers por fuente ---------------- */
+
+// 1) Reporte consolidado de caja (manual, por cajera)
+// Soporta dos formatos:
+//  a) Encabezado en 2 filas: fila de grupo (VISA/CLAVE/ACH/CHEQUE) + fila de sub-encabezado (Fecha, Cajera, Sr.George, Banistmo, Total)
+//  b) Encabezado en 1 fila combinada (formato anterior: "Visa\nSr.George")
+function parseReporteConsolidado(rows){
+  var subIdx = findHeaderRow(rows, ["Fecha","Cajera","Sr.George","Banistmo"]);
+  if(subIdx===-1) throw new Error("No se encontró el encabezado esperado en el reporte consolidado de caja.");
+  var subRow = rows[subIdx];
+  var cFecha = colIdx(subRow,"Fecha");
+  var cCajera = colIdx(subRow,"Cajera");
+  var mapCols = [];
+
+  // Intento (a): dos filas de encabezado, con rellenado hacia adelante de la fila de grupo (celdas combinadas)
+  var groupRow = rows[subIdx-1] || [];
+  var metodosValidos = ["VISA","CLAVE","ACH","CHEQUE"];
+  var filledGroup = [];
+  var last = "";
+  for(var i=0;i<subRow.length;i++){
+    var g = groupRow[i];
+    if(g!==null && g!==undefined && normTxt(g)!=="") last = normTxt(g);
+    filledGroup[i] = last;
+  }
+  for(var i=0;i<subRow.length;i++){
+    var sub = normTxt(subRow[i]);
+    if(sub==="TOTAL" || sub==="") continue; // evitar subtotal por grupo
+    var metodo = null;
+    for(var m=0;m<metodosValidos.length;m++){
+      if(filledGroup[i].indexOf(metodosValidos[m])!==-1){ metodo = metodosValidos[m]; break; }
+    }
+    if(!metodo) continue;
+    var banco = null;
+    if(sub.indexOf("GEORGE")!==-1) banco="STG";
+    else if(sub.indexOf("BANISTMO")!==-1) banco="Banistmo";
+    if(banco) mapCols.push({metodo:metodo, banco:banco, col:i});
+  }
+
+  // Intento (b, fallback): formato anterior con metodo+banco en la misma celda
+  if(mapCols.length===0){
+    function findPairCol(metodo, bancoTag){
+      for(var i=0;i<subRow.length;i++){
+        var raw = normTxt(subRow[i]);
+        if(raw.indexOf(normTxt(metodo))!==-1 && raw.indexOf(normTxt(bancoTag))!==-1) return i;
+      }
+      return -1;
+    }
+    mapCols = [
+      {metodo:"VISA", banco:"STG", col: findPairCol("Visa","George")},
+      {metodo:"VISA", banco:"Banistmo", col: findPairCol("Visa","Banistmo")},
+      {metodo:"CLAVE", banco:"STG", col: findPairCol("Clave","George")},
+      {metodo:"CLAVE", banco:"Banistmo", col: findPairCol("Clave","Banistmo")},
+      {metodo:"ACH", banco:"STG", col: findPairCol("ACH","George")},
+      {metodo:"ACH", banco:"Banistmo", col: findPairCol("ACH","Banistmo")},
+      {metodo:"CHEQUE", banco:"STG", col: findPairCol("Cheque","George")},
+      {metodo:"CHEQUE", banco:"Banistmo", col: findPairCol("Cheque","Banistmo")}
+    ].filter(function(m){return m.col>=0;});
+  }
+
+  var out = [];
+  for(var r=subIdx+1;r<rows.length;r++){
+    var row = rows[r];
+    if(!row) continue;
+    var fechaRaw = row[cFecha];
+    if(fechaRaw===null||fechaRaw===undefined||normTxt(fechaRaw)==="" ) continue;
+    if(normTxt(fechaRaw).indexOf("TOTAL")!==-1) continue;
+    var iso = toISODate(fechaRaw, false);
+    if(!iso) continue;
+    var cajera = cCajera>=0 ? row[cCajera] : "";
+    mapCols.forEach(function(m){
+      var val = money(row[m.col]);
+      if(val){
+        out.push({fecha:iso, cajera:cajera, banco:m.banco, metodo:m.metodo, monto:val, fila:r+1});
+      }
+    });
+  }
+  return out;
+}
+
+// 2) Diario (navegador contabilidad) generico: Caja General / Banistmo / STG
+function parseDiario(rows, accountFilter){
+  var hIdx = findHeaderRow(rows, ["Fecha","Descripcion","Debito","Credito"]);
+  if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el navegador de diario.");
+  var cAccount = colIdx(rows[hIdx],"Account");
+  var cFecha = colIdx(rows[hIdx],"Fecha");
+  var cRef = colIdx(rows[hIdx],"Referencia");
+  var cDesc = colIdx(rows[hIdx],"Descripcion");
+  var cDeb = colIdx(rows[hIdx],"Debito");
+  var cCred = colIdx(rows[hIdx],"Credito");
+  var out = [];
+  var lastAccount = "";
+  for(var r=hIdx+1;r<rows.length;r++){
+    var row = rows[r];
+    if(!row) continue;
+    if(normTxt(row.join(" ")).indexOf("SALDO TOTAL")!==-1) continue;
+    if(normTxt(row.join(" ")).indexOf("MOVIMIENTO MOSTRADO")!==-1) continue;
+    if(normTxt(row.join(" ")).indexOf("BALANCE FINAL")!==-1) continue;
+    var acc = cAccount>=0 ? row[cAccount] : null;
+    if(acc) lastAccount = acc;
+    var fechaRaw = cFecha>=0 ? row[cFecha] : null;
+    var iso = toISODate(fechaRaw, false);
+    if(!iso) continue; // fila secundaria (glosa de detalle), no es movimiento
+    var desc = cDesc>=0 ? String(row[cDesc]||"") : "";
+    var deb = money(row[cDeb]);
+    var cred = money(row[cCred]);
+    if(accountFilter && lastAccount && normTxt(lastAccount).indexOf(normTxt(accountFilter))===-1) continue;
+    out.push({fecha:iso, cuenta:lastAccount, referencia: cRef>=0?row[cRef]:"", descripcion:desc, debito:deb, credito:cred, fila:r+1});
+  }
+  return out;
+}
+
+// 3) Estado de cuenta bancario (Banistmo o STG)
+function parseEstadoCuenta(rows, tipo){
+  var tokens = tipo==="banistmo" ? ["Fecha","Descripcion","Debito","Credito","Saldo"] : ["Fecha","Descripcion","Debitos","Creditos","Balance"];
+  var hIdx = findHeaderRow(rows, tokens);
+  if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el estado de cuenta.");
+  var cFecha = colIdx(rows[hIdx],"Fecha");
+  var cDesc = colIdx(rows[hIdx],"Descripcion");
+  var cDeb = tipo==="banistmo" ? colIdx(rows[hIdx],"Debito") : colIdx(rows[hIdx],"Debitos");
+  var cCred = tipo==="banistmo" ? colIdx(rows[hIdx],"Credito") : colIdx(rows[hIdx],"Creditos");
+  var out = [];
+  for(var r=hIdx+1;r<rows.length;r++){
+    var row = rows[r];
+    if(!row) continue;
+    var iso = toISODate(cFecha>=0?row[cFecha]:null, false);
+    if(!iso) continue;
+    var desc = cDesc>=0 ? String(row[cDesc]||"") : "";
+    out.push({fecha:iso, descripcion:desc, debito:money(row[cDeb]), credito:money(row[cCred]), fila:r+1});
+  }
+  return out;
+}
+
+// 4) Retenciones VISA STG (detalle transaccional con subtotales)
+function parseRetencionesVisa(rows){
+  var hIdx = findHeaderRow(rows, ["Fecha","Monto Bruto","Ret. Imp","Comision","ITBMS"]);
+  if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el informe de retenciones VISA.");
+  var cSuc = colIdx(rows[hIdx],"Sucursal");
+  var cFecha = colIdx(rows[hIdx],"Fecha");
+  var cBruto = colIdx(rows[hIdx],"Monto Bruto");
+  var cRet = colIdx(rows[hIdx],"Ret. Imp");
+  var cCom = colIdx(rows[hIdx],"Comision");
+  var cItbms = colIdx(rows[hIdx],"ITBMS");
+  var porDia = {};
+  for(var r=hIdx+1;r<rows.length;r++){
+    var row = rows[r];
+    if(!row) continue;
+    var sucVal = cSuc>=0 ? normTxt(row[cSuc]) : "";
+    if(sucVal.indexOf("SUB TOTAL")!==-1 || sucVal.indexOf("COMERCIO")!==-1) continue;
+    var iso = toISODate(cFecha>=0?row[cFecha]:null, true); // formato MM/DD/YYYY
+    if(!iso) continue;
+    var bruto = money(row[cBruto]);
+    var ret = money(row[cRet]);
+    var com = money(row[cCom]);
+    var itbms = money(row[cItbms]);
+    if(!porDia[iso]) porDia[iso] = {fecha:iso, bruto:0, retenciones:0};
+    porDia[iso].bruto += bruto;
+    porDia[iso].retenciones += (ret+com+itbms); // vienen en negativo
+  }
+  var out = [];
+  Object.keys(porDia).forEach(function(k){
+    var d = porDia[k];
+    d.neto = d.bruto + d.retenciones; // retenciones ya es negativo
+    out.push(d);
+  });
+  return out;
+}
+
+/* ---------------- Motor de conciliacion ---------------- */
+
+function sumBy(arr, keyFn, valFn){
+  var m = {};
+  arr.forEach(function(x){
+    var k = keyFn(x);
+    m[k] = (m[k]||0) + valFn(x);
+  });
+  return m;
+}
+
+// Paso 1: Reporte consolidado (por banco/dia) vs Diario Caja General (por dia, clasificado por banco via texto)
+function clasificarBancoPorTexto(desc){
+  var n = normTxt(desc);
+  if(n.indexOf("BTS")!==-1 || n.indexOf("BANISTMO")!==-1) return "Banistmo";
+  if(n.indexOf("STG")!==-1) return "STG";
+  return null;
+}
+function paso1(reporte, diarioCaja, tolerancia){
+  var repPorBancoDia = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
+  // Solo se toman las lineas de DEBITO (el desglose individual por banco/metodo);
+  // las lineas de CREDITO suelen venir combinadas (ej. Visa+Clave juntos) y duplicarian el total.
+  var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.debito>0; });
+  var cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
+    function(x){ return x.debito; });
+
+  var claves = {};
+  Object.keys(repPorBancoDia).forEach(function(k){claves[k]=true;});
+  Object.keys(cajaPorBancoDia).forEach(function(k){claves[k]=true;});
+
+  var hallazgos = [];
+  Object.keys(claves).sort().forEach(function(k){
+    var parts = k.split("|"); var banco = parts[0], fecha = parts[1];
+    var a = repPorBancoDia[k]||0, b = cajaPorBancoDia[k]||0;
+    var diff = Math.round((a-b)*100)/100;
+    if(Math.abs(diff) > tolerancia){
+      hallazgos.push({
+        fecha:fecha, banco:banco,
+        texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
+               " vs. diario Caja General B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
+    }
+  });
+  return hallazgos;
+}
+
+// Paso 2: Diario Caja General (por banco/dia) vs Diario del banco (Banistmo/STG)
+function paso2(diarioCaja, diarioBanistmo, diarioStg, tolerancia){
+  var hallazgos = [];
+  [{nombre:"Banistmo", diarioBanco:diarioBanistmo},{nombre:"STG", diarioBanco:diarioStg}].forEach(function(cfg){
+    var cajaFiltrada = diarioCaja.filter(function(x){return clasificarBancoPorTexto(x.descripcion)===cfg.nombre && x.debito>0;});
+    var cajaPorDia = sumBy(cajaFiltrada, function(x){return x.fecha;}, function(x){return x.debito;});
+    var bancoPorDia = sumBy(cfg.diarioBanco, function(x){return x.fecha;}, function(x){return x.debito;}); // ingresos al banco = debito en el diario del banco
+    var claves = {};
+    Object.keys(cajaPorDia).forEach(function(k){claves[k]=true;});
+    Object.keys(bancoPorDia).forEach(function(k){claves[k]=true;});
+    Object.keys(claves).sort().forEach(function(fecha){
+      var a = cajaPorDia[fecha]||0, b = bancoPorDia[fecha]||0;
+      var diff = Math.round((a-b)*100)/100;
+      if(Math.abs(diff) > tolerancia){
+        hallazgos.push({
+          fecha:fecha, banco:cfg.nombre,
+          texto: "Diferencia " + cfg.nombre + " " + fecha + ": diario Caja General B/ " + a.toFixed(2) +
+                 " vs. diario " + cfg.nombre + " B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ") — posible en tránsito",
+          fuente: "Diario Caja General / Diario " + cfg.nombre
+        });
+      }
+    });
+  });
+  return hallazgos;
+}
+
+// Paso 3: Diario del banco vs Estado de cuenta real (matching 1:1 por monto +- tolerancia, ventana de dias, excluyendo ABORTED)
+function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia){
+  var usadosB = new Array(origenB.length).fill(false);
+  var sinPar = [];
+  origenA.forEach(function(a, idxA){
+    if(normTxt(a.descripcion||a.referencia).indexOf("ABORTED")!==-1) return; // excluir silenciosamente
+    var montoA = a[campoA];
+    if(!montoA) return;
+    var mejor = -1, mejorDist = Infinity;
+    origenB.forEach(function(b, idxB){
+      if(usadosB[idxB]) return;
+      if(normTxt(b.descripcion).indexOf("ABORTED")!==-1) return;
+      var montoB = b[campoB];
+      if(Math.abs(montoA-montoB) <= tolerancia){
+        var dist = daysBetween(a.fecha, b.fecha);
+        if(dist <= ventanaDias && dist < mejorDist){ mejor = idxB; mejorDist = dist; }
+      }
+    });
+    if(mejor>=0){ usadosB[mejor] = true; }
+    else { sinPar.push(a); }
+  });
+  return sinPar;
+}
+function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventanaDias, tolerancia){
+  var hallazgos = [];
+  [
+    {nombre:"Banistmo", diario:diarioBanistmo, estado:estBanistmo},
+    {nombre:"STG", diario:diarioStg, estado:estStg}
+  ].forEach(function(cfg){
+    var faltanEnBanco = matchUnoAUno(
+      cfg.diario.filter(function(x){return x.debito>0;}), "debito",
+      cfg.estado.filter(function(x){return x.credito>0;}), "credito",
+      ventanaDias, tolerancia
+    );
+    faltanEnBanco.forEach(function(f){
+      hallazgos.push({
+        fecha:f.fecha, banco:cfg.nombre,
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
+        fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
+      });
+    });
+    var faltanEnDiario = matchUnoAUno(
+      cfg.estado.filter(function(x){return x.credito>0;}), "credito",
+      cfg.diario.filter(function(x){return x.debito>0;}), "debito",
+      ventanaDias, tolerancia
+    );
+    faltanEnDiario.forEach(function(f){
+      hallazgos.push({
+        fecha:f.fecha, banco:cfg.nombre,
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + (f.descripcion||"").trim(),
+        fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
+      });
+    });
+  });
+  return hallazgos;
+}
+
+// Paso 4: Retenciones VISA (neto por dia) vs Remision V/Mc del estado de cuenta STG (ventana de dias)
+function paso4(retVisa, estStg, ventanaDias, tolerancia){
+  var remisiones = estStg.filter(function(x){ return normTxt(x.descripcion).indexOf("REMISION")!==-1 && normTxt(x.descripcion).indexOf("V/MC")!==-1; });
+  var usadas = new Array(remisiones.length).fill(false);
+  var hallazgos = [];
+  retVisa.forEach(function(d){
+    var mejor=-1, mejorDist=Infinity;
+    remisiones.forEach(function(r, idx){
+      if(usadas[idx]) return;
+      if(Math.abs(r.credito - d.neto) <= tolerancia){
+        // El deposito bancario ocurre el mismo dia del cierre o hasta N dias despues, nunca antes.
+        if(r.fecha < d.fecha) return;
+        var dist = daysBetween(d.fecha, r.fecha);
+        if(dist<=ventanaDias && dist<mejorDist){ mejor=idx; mejorDist=dist; }
+      }
+    });
+    if(mejor>=0){ usadas[mejor]=true; }
+    else {
+      hallazgos.push({
+        fecha:d.fecha, banco:"STG",
+        texto:"VISA " + d.fecha + ": venta bruta B/ " + d.bruto.toFixed(2) + " menos retenciones B/ " + Math.abs(d.retenciones).toFixed(2) +
+              " = neto esperado B/ " + d.neto.toFixed(2) + " sin depósito 'Remisión V/Mc' correspondiente en el estado de cuenta STG",
+        fuente:"Informe de retenciones VISA STG / Estado de cuenta STG"
+      });
+    }
+  });
+  return hallazgos;
+}
+
+/* ---------------- UI ---------------- */
+var app = document.getElementById("app");
+
+function render(){
+  if(STATE.view==="menu") return renderMenu();
+  if(STATE.view==="modulo1") return renderModulo1();
+}
+
+function renderMenu(){
+  app.innerHTML =
+    '<div class="masthead"><h1>Mi Asistente Contable</h1><span class="folio">Menú de módulos</span></div>' +
+    '<div class="menu-list" id="menuList"></div>' +
+    '<footer class="note">Cada módulo procesa los archivos en tu navegador. Nada se guarda entre sesiones.</footer>';
+  var list = document.getElementById("menuList");
+  var mods = [
+    {id:"modulo1", nombre:"Conciliador de Caja General", desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG", enabled:true},
+    {id:"modulo2", nombre:"Revisión de movimientos pendientes", desc:"Próximamente", enabled:false},
+    {id:"modulo3", nombre:"Conciliador de auxiliares", desc:"Próximamente", enabled:false}
+  ];
+  mods.forEach(function(m, i){
+    var el = document.createElement("div");
+    el.className = "menu-item" + (m.enabled?"":" disabled");
+    el.innerHTML = '<span class="num">'+String(i+1).padStart(2,"0")+'</span>' +
+      '<div class="txt"><h2>'+m.nombre+'</h2><p>'+m.desc+'</p></div>' +
+      (m.enabled ? '<span class="arrow">→</span>' : '');
+    if(m.enabled){ el.onclick = function(){ STATE.view = m.id; render(); }; }
+    list.appendChild(el);
+  });
+}
+
+function dzHtml(key, label, esperado){
+  var f = STATE.files[key];
+  return '<div class="dz'+(f?" filled":"")+'" data-key="'+key+'">' +
+    '<div class="ico">'+(f?"✓":"📄")+'</div>' +
+    '<div class="info">' +
+      '<div class="lbl">'+label+'</div>' +
+      '<div class="expected">Archivo esperado: <b>'+esperado+'</b></div>' +
+      '<div class="sub">'+(f?("Subido: "+f.name):"Sin subir")+'</div>' +
+    '</div>' +
+    '<label class="btn-sel">'+(f?"Cambiar":"Subir")+'<input type="file" accept=".xlsx,.xls" data-key="'+key+'"></label>' +
+    '</div>';
+}
+
+function renderModulo1(){
+  app.innerHTML =
+    '<div class="masthead"><h1>Mi Asistente Contable</h1><span class="folio">Módulo 01</span></div>' +
+    '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador de Caja General</span></div>' +
+
+    '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
+    '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
+    '<div class="dropzones grid2">' +
+      dzHtml("reporte","Reporte consolidado de caja","Reporte_rango_-_[SUCURSAL]_-_[FECHA].xls (o .xlsx)") +
+      dzHtml("diarioCaja","Diario Caja General","Navegador_Contabilidad_Excel — cuenta [1.1.8] Caja General") +
+    '</div></div>' +
+
+    '<div class="stage"><h3><span class="tag">PASO 2</span> Diario Caja General → Diario bancario</h3>' +
+    '<p class="desc">Valida que el traslado a cada banco se registró en la cuenta correspondiente.</p>' +
+    '<div class="dropzones grid2">' +
+      dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
+      dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
+    '</div></div>' +
+
+    '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real</h3>' +
+    '<p class="desc">Conciliación bancaria clásica: excluye partidas "ABORTED" automáticamente.</p>' +
+    '<div class="dropzones grid2">' +
+      dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
+      dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
+    '</div></div>' +
+
+    '<div class="stage"><h3><span class="tag">PASO 4</span> Validación VISA STG</h3>' +
+    '<p class="desc">Venta bruta − retención − comisión − ITBMS = depósito neto esperado en el banco.</p>' +
+    '<div class="dropzones">' + dzHtml("retVisa","Informe de retenciones VISA STG","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") + '</div></div>' +
+
+    '<div class="opts">' +
+      '<label>Ventana de días para emparejar <input type="number" id="ventana" value="'+STATE.options.ventanaDias+'" min="0"></label>' +
+      '<label>Tolerancia B/ <input type="number" id="tolerancia" value="'+STATE.options.tolerancia+'" step="0.01" min="0"></label>' +
+    '</div>' +
+
+    '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar conciliación</button>' +
+    '<span class="run-note" id="runNote">Sube los 7 archivos para habilitar.</span></div>' +
+
+    '<div id="resultsArea"></div>';
+
+  document.getElementById("backBtn").onclick = function(){ STATE.view="menu"; render(); };
+  document.querySelectorAll('input[type=file]').forEach(function(inp){
+    inp.addEventListener("change", function(e){
+      var key = e.target.getAttribute("data-key");
+      var file = e.target.files[0];
+      if(file){ STATE.files[key] = file; renderModulo1(); if(STATE.results) renderResultados(); }
+    });
+  });
+  var ventInp = document.getElementById("ventana");
+  var tolInp = document.getElementById("tolerancia");
+  ventInp.addEventListener("change", function(){ STATE.options.ventanaDias = parseFloat(ventInp.value)||0; });
+  tolInp.addEventListener("change", function(){ STATE.options.tolerancia = parseFloat(tolInp.value)||0.01; });
+
+  var runBtn = document.getElementById("runBtn");
+  var allKeys = Object.keys(STATE.files);
+  var faltantes = allKeys.filter(function(k){return !STATE.files[k];});
+  if(faltantes.length===0){
+    document.getElementById("runNote").textContent = "Listo para procesar.";
+  } else {
+    runBtn.disabled = true;
+  }
+  runBtn.onclick = ejecutarConciliacion;
+
+  if(STATE.results) renderResultados();
+}
+
+function ejecutarConciliacion(){
+  var note = document.getElementById("runNote");
+  note.textContent = "Leyendo archivos...";
+  var keys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","retVisa"];
+  var raws = {};
+  var pending = keys.length;
+  keys.forEach(function(k){
+    readWorkbook(STATE.files[k], function(rows){
+      raws[k] = rows;
+      pending--;
+      if(pending===0) procesar(raws);
+    });
+  });
+}
+
+function procesar(raws){
+  try{
+    var reporte = parseReporteConsolidado(raws.reporte);
+    var diarioCaja = parseDiario(raws.diarioCaja, "Caja General");
+    var diarioBanistmo = parseDiario(raws.diarioBanistmo, "Banistmo");
+    var diarioStg = parseDiario(raws.diarioStg, null).filter(function(x){
+      return normTxt(x.cuenta).indexOf("BANISTMO")===-1;
+    });
+    var estBanistmo = parseEstadoCuenta(raws.estBanistmo, "banistmo");
+    var estStg = parseEstadoCuenta(raws.estStg, "stg");
+    var retVisa = parseRetencionesVisa(raws.retVisa);
+
+    var ventana = STATE.options.ventanaDias, tol = STATE.options.tolerancia;
+
+    var h1 = paso1(reporte, diarioCaja, tol);
+    var h2 = paso2(diarioCaja, diarioBanistmo, diarioStg, tol);
+    var h3 = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventana, tol);
+    var h4 = paso4(retVisa, estStg, ventana, tol);
+
+    STATE.results = {
+      paso1:h1, paso2:h2, paso3:h3, paso4:h4
+    };
+    STATE.checks = {};
+    document.getElementById("runNote").textContent = "Conciliación ejecutada.";
+    renderResultados();
+  }catch(err){
+    document.getElementById("runNote").textContent = "Error: " + err.message;
+  }
+}
+
+function renderResultados(){
+  var area = document.getElementById("resultsArea");
+  var r = STATE.results;
+  var total = r.paso1.length + r.paso2.length + r.paso3.length + r.paso4.length;
+  var html = '<div class="results-head"><h2>Hallazgos</h2>' +
+    '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
+  html += '<div class="summary-bar">' +
+    '<span class="chip'+(total===0?" ok":" alert")+'">'+total+' hallazgo(s) en total</span>' +
+    '<span class="chip">Paso 1: '+r.paso1.length+'</span>' +
+    '<span class="chip">Paso 2: '+r.paso2.length+'</span>' +
+    '<span class="chip">Paso 3: '+r.paso3.length+'</span>' +
+    '<span class="chip">Paso 4: '+r.paso4.length+'</span>' +
+    '</div>';
+
+  var pasos = [
+    {key:"paso1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General", items:r.paso1},
+    {key:"paso2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario", items:r.paso2},
+    {key:"paso3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta", items:r.paso3},
+    {key:"paso4", titulo:"Paso 4 — Validación VISA STG", items:r.paso4}
+  ];
+  pasos.forEach(function(p){
+    html += '<div class="step-block"><div class="step-head"><h4>'+p.titulo+'</h4>' +
+      '<span class="count">'+p.items.length+' hallazgo(s)</span></div><div class="step-body">';
+    if(p.items.length===0){
+      html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
+    } else {
+      p.items.forEach(function(item, idx){
+        var ckKey = p.key+"_"+idx;
+        var checked = STATE.checks[ckKey] ? "checked" : "";
+        html += '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
+          '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
+          '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div></div>';
+      });
+    }
+    html += '</div></div>';
+  });
+  area.innerHTML = html;
+
+  area.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+    cb.addEventListener("change", function(){
+      var k = cb.getAttribute("data-ck");
+      STATE.checks[k] = cb.checked;
+      renderResultados();
+    });
+  });
+  document.getElementById("exportBtn").onclick = exportarChecklist;
+}
+
+function exportarChecklist(){
+  var r = STATE.results;
+  var rows = [["Paso","Fecha","Banco","Hallazgo","Fuente","Corregido"]];
+  var pasos = [
+    ["Paso 1", r.paso1], ["Paso 2", r.paso2], ["Paso 3", r.paso3], ["Paso 4", r.paso4]
+  ];
+  pasos.forEach(function(p){
+    p[1].forEach(function(item, idx){
+      var ckKey = (p[0]==="Paso 1"?"paso1":p[0]==="Paso 2"?"paso2":p[0]==="Paso 3"?"paso3":"paso4")+"_"+idx;
+      rows.push([p[0], item.fecha, item.banco, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
+    });
+  });
+  var ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:70},{wch:40},{wch:10}];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
+  XLSX.writeFile(wb, "checklist_conciliacion_caja_general.xlsx");
+}
+
+render();
+</script>
+</body>
+</html>
