@@ -104,6 +104,7 @@
   .dz{border:2px dashed var(--dz-empty-line);border-radius:16px;padding:16px;display:flex;align-items:center;gap:12px;
     background:var(--dz-empty-bg);transition:all .15s ease}
   .dz.filled{border-style:solid;border-color:var(--dz-filled-line);background:var(--dz-filled-bg)}
+  .dz.dragover{border-color:var(--brand);background:var(--brand-lighter)}
   .dz .ico{font-size:22px}
   .dz .info{flex:1;min-width:0}
   .dz .info .lbl{font-size:13px;font-weight:700;color:var(--heading)}
@@ -641,7 +642,7 @@ function dzHtml(key, label, esperado){
     '<div class="info">' +
       '<div class="lbl">'+label+'</div>' +
       '<div class="expected">Archivo esperado: <b>'+esperado+'</b></div>' +
-      '<div class="sub">'+(f?("Subido: "+f.name):"Sin subir")+'</div>' +
+      '<div class="sub">'+(f?("Subido: "+f.name):"Sin subir · arrastra el Excel aquí o usa el botón")+'</div>' +
     '</div>' +
     '<label class="btn-sel">'+(f?"Cambiar":"Subir")+'<input type="file" accept=".xlsx,.xls" data-key="'+key+'"></label>' +
     '</div>';
@@ -688,11 +689,25 @@ function renderModulo1(){
     '<div id="resultsArea"></div>';
 
   document.getElementById("backBtn").onclick = function(){ STATE.view="menu"; render(); };
+  function assignFile(key, file){
+    if(!file) return;
+    STATE.files[key] = file;
+    renderModulo1();
+    if(STATE.results) renderResultados();
+  }
   document.querySelectorAll('input[type=file]').forEach(function(inp){
     inp.addEventListener("change", function(e){
-      var key = e.target.getAttribute("data-key");
-      var file = e.target.files[0];
-      if(file){ STATE.files[key] = file; renderModulo1(); if(STATE.results) renderResultados(); }
+      assignFile(e.target.getAttribute("data-key"), e.target.files[0]);
+    });
+  });
+  document.querySelectorAll('.dz').forEach(function(dz){
+    var key = dz.getAttribute("data-key");
+    dz.addEventListener("dragover", function(e){ e.preventDefault(); dz.classList.add("dragover"); });
+    dz.addEventListener("dragleave", function(e){ dz.classList.remove("dragover"); });
+    dz.addEventListener("drop", function(e){
+      e.preventDefault();
+      dz.classList.remove("dragover");
+      assignFile(key, e.dataTransfer.files[0]);
     });
   });
   var ventInp = document.getElementById("ventana");
