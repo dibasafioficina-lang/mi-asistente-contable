@@ -20,11 +20,11 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 
 | # | Nombre | Estado |
 |---|--------|--------|
-| 1 | Conciliador de Caja General (bancaria y de caja) | Construido — ver PRD específico abajo |
+| 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
 
-### Módulo 1 — Conciliador de Caja General
+### Módulo 1 — Conciliador Caja y Banco
 
 Valida en una sola pasada que la venta reportada manualmente por las cajeras llegó íntegra al banco pasando por la contabilidad, detectando: método de pago mal asignado, montos en tránsito, y descuadres en retenciones VISA.
 

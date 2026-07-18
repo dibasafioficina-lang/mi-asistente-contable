@@ -605,7 +605,7 @@ function renderMenu(){
   var TAG_CONCILIATORIO = {bg:"var(--brand-light)", color:"var(--brand-dark)"};
   var TAG_REVISION = {bg:"var(--accent-purple-bg)", color:"var(--accent-purple)"};
   var mods = [
-    {id:"modulo1", nombre:"Conciliador de Caja General",
+    {id:"modulo1", nombre:"Conciliador Caja y Banco",
       desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG",
       enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tag:TAG_CONCILIATORIO,
       tagText:"7 archivos", action:"Conciliar"},
@@ -650,7 +650,7 @@ function dzHtml(key, label, esperado){
 function renderModulo1(){
   app.innerHTML =
     headerHtml() +
-    '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador de Caja General</span></div>' +
+    '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
     '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
