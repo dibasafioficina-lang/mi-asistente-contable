@@ -150,6 +150,7 @@
   .ftxt .amt{font-family:"Mulish";font-weight:800;color:var(--brand-dark)}
   .ftxt .src{display:block;font-size:12px;color:var(--slate);margin-top:3px;font-weight:600}
   .empty-ok{font-size:14px;color:var(--ok);padding:14px 4px;font-weight:700}
+  .empty-skip{font-size:14px;color:var(--slate);padding:14px 4px;font-weight:700;font-style:italic}
 
   .btn-export{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-family:"Mulish";font-size:13.5px;font-weight:800;
     padding:10px 20px;border-radius:999px;cursor:pointer;box-shadow:0 6px 16px rgba(158,104,126,.08)}
@@ -656,7 +657,7 @@ function renderModulo1(){
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
     '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
     '<div class="dropzones grid2">' +
-      dzHtml("reporte","Reporte consolidado de caja","Reporte_rango_-_[SUCURSAL]_-_[FECHA].xls (o .xlsx)") +
+      dzHtml("reporte","Reporte consolidado de caja (opcional)","Reporte_rango_-_[SUCURSAL]_-_[FECHA].xls (o .xlsx) — si no lo subís, se omite el Paso 1") +
       dzHtml("diarioCaja","Diario Caja General","Navegador_Contabilidad_Excel — cuenta [1.1.8] Caja General") +
     '</div></div>' +
 
@@ -684,7 +685,7 @@ function renderModulo1(){
     '</div>' +
 
     '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar conciliación</button>' +
-    '<span class="run-note" id="runNote">Sube los 7 archivos para habilitar.</span></div>' +
+    '<span class="run-note" id="runNote">Sube los 6 archivos requeridos para habilitar (el reporte de cajeras es opcional).</span></div>' +
 
     '<div id="resultsArea"></div>';
 
@@ -716,12 +717,15 @@ function renderModulo1(){
   tolInp.addEventListener("change", function(){ STATE.options.tolerancia = parseFloat(tolInp.value)||0.01; });
 
   var runBtn = document.getElementById("runBtn");
-  var allKeys = Object.keys(STATE.files);
-  var faltantes = allKeys.filter(function(k){return !STATE.files[k];});
+  var requeridas = Object.keys(STATE.files).filter(function(k){ return k!=="reporte"; });
+  var faltantes = requeridas.filter(function(k){return !STATE.files[k];});
   if(faltantes.length===0){
-    document.getElementById("runNote").textContent = "Listo para procesar.";
+    document.getElementById("runNote").textContent = STATE.files.reporte
+      ? "Listo para procesar."
+      : "Listo para procesar (sin reporte de cajeras: el Paso 1 se omite).";
   } else {
     runBtn.disabled = true;
+    document.getElementById("runNote").textContent = "Sube los "+requeridas.length+" archivos requeridos para habilitar (el reporte de cajeras es opcional).";
   }
   runBtn.onclick = ejecutarConciliacion;
 
@@ -731,7 +735,8 @@ function renderModulo1(){
 function ejecutarConciliacion(){
   var note = document.getElementById("runNote");
   note.textContent = "Leyendo archivos...";
-  var keys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","retVisa"];
+  var keys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","retVisa"]
+    .filter(function(k){ return STATE.files[k]; });
   var raws = {};
   var pending = keys.length;
   keys.forEach(function(k){
@@ -745,7 +750,6 @@ function ejecutarConciliacion(){
 
 function procesar(raws){
   try{
-    var reporte = parseReporteConsolidado(raws.reporte);
     var diarioCaja = parseDiario(raws.diarioCaja, "Caja General");
     var diarioBanistmo = parseDiario(raws.diarioBanistmo, "Banistmo");
     var diarioStg = parseDiario(raws.diarioStg, null).filter(function(x){
@@ -757,7 +761,8 @@ function procesar(raws){
 
     var ventana = STATE.options.ventanaDias, tol = STATE.options.tolerancia;
 
-    var h1 = paso1(reporte, diarioCaja, tol);
+    // Paso 1 requiere el reporte de cajeras, que es opcional: sin él, se omite (no se marca como "sin diferencias").
+    var h1 = raws.reporte ? paso1(parseReporteConsolidado(raws.reporte), diarioCaja, tol) : null;
     var h2 = paso2(diarioCaja, diarioBanistmo, diarioStg, tol);
     var h3 = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventana, tol);
     var h4 = paso4(retVisa, estStg, ventana, tol);
@@ -776,12 +781,12 @@ function procesar(raws){
 function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
-  var total = r.paso1.length + r.paso2.length + r.paso3.length + r.paso4.length;
+  var total = (r.paso1?r.paso1.length:0) + r.paso2.length + r.paso3.length + r.paso4.length;
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
   html += '<div class="summary-bar">' +
     '<span class="chip'+(total===0?" ok":" alert")+'">'+total+' hallazgo(s) en total</span>' +
-    '<span class="chip">Paso 1: '+r.paso1.length+'</span>' +
+    '<span class="chip">Paso 1: '+(r.paso1?r.paso1.length:"omitido")+'</span>' +
     '<span class="chip">Paso 2: '+r.paso2.length+'</span>' +
     '<span class="chip">Paso 3: '+r.paso3.length+'</span>' +
     '<span class="chip">Paso 4: '+r.paso4.length+'</span>' +
@@ -795,8 +800,10 @@ function renderResultados(){
   ];
   pasos.forEach(function(p){
     html += '<div class="step-block"><div class="step-head"><h4>'+p.titulo+'</h4>' +
-      '<span class="count">'+p.items.length+' hallazgo(s)</span></div><div class="step-body">';
-    if(p.items.length===0){
+      '<span class="count">'+(p.items===null?"omitido":p.items.length+' hallazgo(s)')+'</span></div><div class="step-body">';
+    if(p.items===null){
+      html += '<div class="empty-skip">Paso omitido: no se subió el reporte de cajeras.</div>';
+    } else if(p.items.length===0){
       html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
     } else {
       p.items.forEach(function(item, idx){
@@ -828,6 +835,10 @@ function exportarChecklist(){
     ["Paso 1", r.paso1], ["Paso 2", r.paso2], ["Paso 3", r.paso3], ["Paso 4", r.paso4]
   ];
   pasos.forEach(function(p){
+    if(p[1]===null){
+      rows.push([p[0], "", "", "Paso omitido: no se subió el reporte de cajeras.", "", ""]);
+      return;
+    }
     p[1].forEach(function(item, idx){
       var ckKey = (p[0]==="Paso 1"?"paso1":p[0]==="Paso 2"?"paso2":p[0]==="Paso 3"?"paso3":"paso4")+"_"+idx;
       rows.push([p[0], item.fecha, item.banco, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
