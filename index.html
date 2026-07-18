@@ -34,7 +34,6 @@
     --accent-purple-bg:#ECE7F6;
     --accent-purple:#8467B0;
     --accent-green-bg:#E4F0EC;
-    --muted-bg:#F0EAEC;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{
@@ -43,21 +42,29 @@
     background-attachment:fixed;
     color:var(--ink);line-height:1.5;-webkit-font-smoothing:antialiased;
   }
-  .app{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+  .app{max-width:1240px;margin:0 auto;padding:26px 56px 64px}
 
   /* Encabezado */
-  .masthead{display:flex;align-items:center;justify-content:space-between;padding-bottom:14px;margin-bottom:28px}
-  .masthead h1{font-family:"DM Serif Display",Georgia,serif;font-weight:400;font-size:28px;letter-spacing:.2px;color:var(--heading)}
-  .masthead .folio{font-family:"Mulish",sans-serif;font-size:12.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--brand)}
+  .masthead{display:flex;align-items:center;justify-content:space-between;padding-bottom:22px;margin-bottom:24px}
+  .brand{display:flex;align-items:center;gap:13px}
+  .logo-box{width:42px;height:42px;border-radius:13px;background:linear-gradient(150deg,#E79BB2,#C07A95);
+    display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(192,122,149,.32);flex-shrink:0}
+  .logo-mark{width:15px;height:15px;border:2.5px solid #fff;border-radius:5px 5px 5px 0}
+  .masthead h1{font-family:"DM Serif Display",Georgia,serif;font-weight:400;font-size:20px;letter-spacing:.2px;color:var(--heading)}
+  .user-chip{display:flex;align-items:center;gap:10px;padding:7px 8px 7px 16px;background:#fff;
+    border-radius:999px;box-shadow:0 4px 14px rgba(160,110,130,.10)}
+  .user-chip .user-name{font-size:13.5px;font-weight:600;color:#7A6068}
+  .user-chip .avatar{width:32px;height:32px;border-radius:50%;background:linear-gradient(150deg,#F3C4D1,#D693AA);
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:#fff;flex-shrink:0}
   .crumb{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--slate);margin-bottom:18px}
   .crumb button{background:none;border:none;color:var(--brand);font-weight:800;cursor:pointer;font-size:14px;padding:0}
   .crumb button:hover{color:var(--brand-dark);text-decoration:underline}
 
   /* Menu de modulos */
   .hero{margin-bottom:36px;animation:floatIn .5s ease both}
-  .greet{font-size:13.5px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;color:var(--brand);margin-bottom:10px}
-  .hero-title{font-family:"DM Serif Display",serif;font-weight:400;font-size:38px;line-height:1.1;color:var(--heading);max-width:620px}
-  .hero-sub{font-size:15.5px;color:var(--slate);margin-top:12px;max-width:560px;line-height:1.55}
+  .greet{font-size:14px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;color:var(--brand);margin-bottom:10px}
+  .hero-title{font-family:"DM Serif Display",serif;font-weight:400;font-size:42px;line-height:1.1;color:var(--heading);max-width:620px}
+  .hero-sub{font-size:16.5px;color:var(--slate);margin-top:12px;max-width:560px;line-height:1.55}
   @keyframes floatIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
 
   .modules-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
@@ -72,12 +79,11 @@
   .tag-pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;
     font-size:12px;font-weight:800;letter-spacing:.2px;white-space:nowrap}
   .tag-pill .dot{width:6px;height:6px;border-radius:50%}
-  .module-card h2{font-family:"DM Serif Display",serif;font-weight:400;font-size:22px;color:var(--heading);margin-top:18px}
-  .module-card p{font-size:14px;color:var(--slate);margin-top:7px;line-height:1.5}
+  .module-card h2{font-family:"DM Serif Display",serif;font-weight:400;font-size:23px;color:var(--heading);margin-top:18px}
+  .module-card p{font-size:14.5px;color:var(--slate);margin-top:7px;line-height:1.5}
   .module-action{display:flex;align-items:center;gap:7px;margin-top:20px;font-size:13.5px;font-weight:800;color:var(--brand)}
+  .module-action.muted{color:var(--slate);font-weight:700}
   .module-action .arrow{font-size:16px;transform:translateY(.5px)}
-  .module-card.disabled .tag-pill{background:var(--muted-bg);color:var(--slate)}
-  .module-card.disabled .tag-pill .dot{background:var(--slate)}
 
   .note-banner{margin-top:30px;display:flex;align-items:center;gap:12px;padding:18px 24px;
     background:var(--note-bg);border:1px dashed var(--note-line);border-radius:18px;color:var(--note-text)}
@@ -574,11 +580,18 @@ function render(){
   if(STATE.view==="modulo1") return renderModulo1();
 }
 
+function headerHtml(){
+  return '<div class="masthead">' +
+    '<div class="brand"><div class="logo-box"><span class="logo-mark"></span></div><h1>Mi Asistente Contable</h1></div>' +
+    '<div class="user-chip"><span class="user-name">Equipo Contable</span><div class="avatar">E</div></div>' +
+  '</div>';
+}
+
 function renderMenu(){
   var hour = new Date().getHours();
   var greeting = hour<12 ? "Buenos días" : hour<19 ? "Buenas tardes" : "Buenas noches";
   app.innerHTML =
-    '<div class="masthead"><h1>Mi Asistente Contable</h1><span class="folio">Menú de módulos</span></div>' +
+    headerHtml() +
     '<div class="hero">' +
       '<div class="greet">'+greeting+'</div>' +
       '<h2 class="hero-title">¿Qué cuadramos hoy?</h2>' +
@@ -587,31 +600,35 @@ function renderMenu(){
     '<div class="modules-grid" id="modulesGrid"></div>' +
     '<div class="note-banner"><span class="ico">🔒</span><span class="txt">Nada se guarda en tu computadora. Al cerrar la pestaña, la sesión se descarta por completo.</span></div>';
   var grid = document.getElementById("modulesGrid");
+  // Color del tag según tipo de módulo (rosado = conciliatorio de 2+ fuentes, morado = revisión de pendientes de 1 sola fuente),
+  // no según si ya está construido — el estado construido/pendiente se refleja solo en la opacidad de la tarjeta.
+  var TAG_CONCILIATORIO = {bg:"var(--brand-light)", color:"var(--brand-dark)"};
+  var TAG_REVISION = {bg:"var(--accent-purple-bg)", color:"var(--accent-purple)"};
   var mods = [
     {id:"modulo1", nombre:"Conciliador de Caja General",
       desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG",
-      enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tagBg:"var(--brand-light)", tagColor:"var(--brand-dark)",
+      enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tag:TAG_CONCILIATORIO,
       tagText:"7 archivos", action:"Conciliar"},
     {id:"modulo2", nombre:"Revisión de movimientos pendientes",
       desc:"Un solo Excel: se filtran y listan los movimientos sin conciliar.",
-      enabled:false, icon:"🧾", iconBg:"var(--accent-purple-bg)", tagText:"Próximamente"},
+      enabled:false, icon:"🧾", iconBg:"var(--accent-purple-bg)", tag:TAG_REVISION,
+      tagText:"1 archivo", action:"Próximamente"},
     {id:"modulo3", nombre:"Conciliador de auxiliares",
       desc:"Compara el diario contra el auxiliar y enumera las diferencias entre ambas fuentes.",
-      enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tagText:"Próximamente"}
+      enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tag:TAG_CONCILIATORIO,
+      tagText:"2 archivos", action:"Próximamente"}
   ];
   mods.forEach(function(m){
     var el = document.createElement("div");
     el.className = "module-card" + (m.enabled?"":" disabled");
-    var tagStyle = m.enabled ? (' style="background:'+m.tagBg+';color:'+m.tagColor+'"') : '';
-    var dotStyle = m.enabled ? (' style="background:'+m.tagColor+'"') : '';
     el.innerHTML =
       '<div class="module-card-top">' +
         '<div class="icon-box" style="background:'+m.iconBg+'">'+m.icon+'</div>' +
-        '<span class="tag-pill"'+tagStyle+'><span class="dot"'+dotStyle+'></span>'+m.tagText+'</span>' +
+        '<span class="tag-pill" style="background:'+m.tag.bg+';color:'+m.tag.color+'"><span class="dot" style="background:'+m.tag.color+'"></span>'+m.tagText+'</span>' +
       '</div>' +
       '<h2>'+m.nombre+'</h2>' +
       '<p>'+m.desc+'</p>' +
-      (m.enabled ? '<div class="module-action">'+m.action+' <span class="arrow">→</span></div>' : '');
+      '<div class="module-action'+(m.enabled?"":" muted")+'">'+m.action+(m.enabled?' <span class="arrow">→</span>':'')+'</div>';
     if(m.enabled){ el.onclick = function(){ STATE.view = m.id; render(); }; }
     grid.appendChild(el);
   });
@@ -632,7 +649,7 @@ function dzHtml(key, label, esperado){
 
 function renderModulo1(){
   app.innerHTML =
-    '<div class="masthead"><h1>Mi Asistente Contable</h1><span class="folio">Módulo 01</span></div>' +
+    headerHtml() +
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador de Caja General</span></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
