@@ -151,11 +151,13 @@
   .step-body{padding:6px 20px 16px}
   .finding{display:flex;gap:14px;align-items:flex-start;padding:14px 4px;border-bottom:1px solid var(--line)}
   .finding:last-child{border-bottom:none}
-  .finding input[type=checkbox]{margin-top:3px;width:18px;height:18px;accent-color:var(--brand)}
+  .finding input[type=checkbox]{margin-top:3px;width:18px;height:18px;accent-color:var(--brand);flex-shrink:0}
   .finding.done .ftxt{text-decoration:line-through;color:var(--slate);opacity:.6}
-  .ftxt{font-size:14px}
-  .ftxt .amt{font-family:"Mulish";font-weight:800;color:var(--brand-dark)}
+  .finding.done .famt{text-decoration:line-through;color:var(--slate);opacity:.6}
+  .ftxt{font-size:14px;flex:1;min-width:0}
   .ftxt .src{display:block;font-size:12px;color:var(--slate);margin-top:3px;font-weight:600}
+  .famt{font-family:"Mulish";font-size:14.5px;font-weight:800;color:var(--brand-dark);white-space:nowrap;
+    margin-left:12px;flex-shrink:0}
   .empty-ok{font-size:14px;color:var(--ok);padding:14px 4px;font-weight:700}
   .empty-skip{font-size:14px;color:var(--slate);padding:14px 4px;font-weight:700;font-style:italic}
 
@@ -467,7 +469,7 @@ function paso1(reporte, diarioCaja, tolerancia){
     var diff = Math.round((a-b)*100)/100;
     if(Math.abs(diff) > tolerancia){
       hallazgos.push({
-        fecha:fecha, banco:banco,
+        fecha:fecha, banco:banco, monto:diff,
         texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
                " vs. diario Caja General B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
         fuente: "Reporte consolidado de caja / Diario Caja General"
@@ -492,7 +494,7 @@ function paso2(diarioCaja, diarioBanistmo, diarioStg, tolerancia){
       var diff = Math.round((a-b)*100)/100;
       if(Math.abs(diff) > tolerancia){
         hallazgos.push({
-          fecha:fecha, banco:cfg.nombre,
+          fecha:fecha, banco:cfg.nombre, monto:diff,
           texto: "Diferencia " + cfg.nombre + " " + fecha + ": diario Caja General B/ " + a.toFixed(2) +
                  " vs. diario " + cfg.nombre + " B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ") — posible en tránsito",
           fuente: "Diario Caja General / Diario " + cfg.nombre
@@ -539,7 +541,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventanaDias, tole
     );
     faltanEnBanco.forEach(function(f){
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre,
+        fecha:f.fecha, banco:cfg.nombre, monto:f.debito,
         texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
         fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
       });
@@ -551,7 +553,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventanaDias, tole
     );
     faltanEnDiario.forEach(function(f){
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre,
+        fecha:f.fecha, banco:cfg.nombre, monto:f.credito,
         texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + (f.descripcion||"").trim(),
         fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
       });
@@ -579,7 +581,7 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
     if(mejor>=0){ usadas[mejor]=true; }
     else {
       hallazgos.push({
-        fecha:d.fecha, banco:"STG",
+        fecha:d.fecha, banco:"STG", monto:d.neto,
         texto:"VISA " + d.fecha + ": venta bruta B/ " + d.bruto.toFixed(2) + " menos retenciones B/ " + Math.abs(d.retenciones).toFixed(2) +
               " = neto esperado B/ " + d.neto.toFixed(2) + " sin depósito 'Remisión V/Mc' correspondiente en el estado de cuenta STG",
         fuente:"Informe de retenciones VISA STG / Estado de cuenta STG"
@@ -929,9 +931,11 @@ function renderResultados(){
       items.forEach(function(item, idx){
         var ckKey = p.key+"_"+idx;
         var checked = STATE.checks[ckKey] ? "checked" : "";
+        var montoTxt = (item.monto<0?"-":"")+"B/ "+Math.abs(item.monto).toFixed(2);
         html += '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
           '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
-          '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div></div>';
+          '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
+          '<div class="famt">'+montoTxt+'</div></div>';
       });
     }
     html += '</div></div>';
@@ -950,27 +954,27 @@ function renderResultados(){
 
 function exportarChecklist(){
   var r = STATE.results;
-  var rows = [["Paso","Fecha","Banco","Hallazgo","Fuente","Corregido"]];
+  var rows = [["Paso","Fecha","Banco","Monto","Hallazgo","Fuente","Corregido"]];
   var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"],["Paso 4","paso4"]];
   pasosMeta.forEach(function(p){
     var label = p[0], key = p[1], items = r[key];
     if(items===undefined){
-      rows.push([label, "", "", "Paso no ejecutado en esta sesión.", "", ""]);
+      rows.push([label, "", "", "", "Paso no ejecutado en esta sesión.", "", ""]);
       return;
     }
     if(items===null){
-      rows.push([label, "", "", key==="paso1"
+      rows.push([label, "", "", "", key==="paso1"
         ? "Paso omitido: no se subió el reporte de cajeras."
         : "Paso omitido: faltan archivos de este paso.", "", ""]);
       return;
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      rows.push([label, item.fecha, item.banco, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
+      rows.push([label, item.fecha, item.banco, item.monto, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
   var ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:70},{wch:40},{wch:10}];
+  ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:12},{wch:70},{wch:40},{wch:10}];
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
   XLSX.writeFile(wb, "checklist_conciliacion_caja_general.xlsx");
