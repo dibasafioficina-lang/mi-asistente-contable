@@ -28,6 +28,13 @@
     --dz-empty-line:#ECD3DC;
     --dz-filled-bg:#F6FBF8;
     --dz-filled-line:#CFE3D6;
+    --note-bg:#FFF8F3;
+    --note-line:#ECCDBF;
+    --note-text:#9C7D6D;
+    --accent-purple-bg:#ECE7F6;
+    --accent-purple:#8467B0;
+    --accent-green-bg:#E4F0EC;
+    --muted-bg:#F0EAEC;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{
@@ -47,19 +54,35 @@
   .crumb button:hover{color:var(--brand-dark);text-decoration:underline}
 
   /* Menu de modulos */
-  .menu-list{display:grid;gap:16px}
-  .menu-item{display:flex;align-items:center;gap:18px;padding:22px 24px;border-radius:22px;
-    background:var(--card);border:1px solid var(--line);box-shadow:0 10px 30px rgba(158,104,126,.09);
-    cursor:pointer;transition:transform .18s ease,box-shadow .18s ease}
-  .menu-item:hover{transform:translateY(-3px);box-shadow:0 18px 40px rgba(158,104,126,.18)}
-  .menu-item .num{font-family:"Mulish",sans-serif;font-weight:800;font-size:14px;color:var(--brand-dark);
-    width:44px;height:44px;border-radius:14px;background:var(--brand-light);
-    display:flex;align-items:center;justify-content:center;flex-shrink:0}
-  .menu-item .txt h2{font-family:"DM Serif Display",serif;font-weight:400;font-size:19px;color:var(--heading)}
-  .menu-item .txt p{font-size:13.5px;color:var(--slate);margin-top:4px}
-  .menu-item .arrow{margin-left:auto;color:var(--brand);font-size:20px;font-weight:700}
-  .menu-item.disabled{opacity:.5;cursor:default}
-  .menu-item.disabled:hover{transform:none;box-shadow:0 10px 30px rgba(158,104,126,.09)}
+  .hero{margin-bottom:36px;animation:floatIn .5s ease both}
+  .greet{font-size:13.5px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;color:var(--brand);margin-bottom:10px}
+  .hero-title{font-family:"DM Serif Display",serif;font-weight:400;font-size:38px;line-height:1.1;color:var(--heading);max-width:620px}
+  .hero-sub{font-size:15.5px;color:var(--slate);margin-top:12px;max-width:560px;line-height:1.55}
+  @keyframes floatIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+
+  .modules-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
+  .module-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:26px 26px 24px;
+    box-shadow:0 10px 30px rgba(158,104,126,.09);cursor:pointer;transition:transform .18s ease,box-shadow .18s ease}
+  .module-card:hover{transform:translateY(-4px);box-shadow:0 18px 40px rgba(158,104,126,.18)}
+  .module-card.disabled{opacity:.6;cursor:default}
+  .module-card.disabled:hover{transform:none;box-shadow:0 10px 30px rgba(158,104,126,.09)}
+  .module-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .icon-box{width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;
+    font-size:24px;flex-shrink:0}
+  .tag-pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;
+    font-size:12px;font-weight:800;letter-spacing:.2px;white-space:nowrap}
+  .tag-pill .dot{width:6px;height:6px;border-radius:50%}
+  .module-card h2{font-family:"DM Serif Display",serif;font-weight:400;font-size:22px;color:var(--heading);margin-top:18px}
+  .module-card p{font-size:14px;color:var(--slate);margin-top:7px;line-height:1.5}
+  .module-action{display:flex;align-items:center;gap:7px;margin-top:20px;font-size:13.5px;font-weight:800;color:var(--brand)}
+  .module-action .arrow{font-size:16px;transform:translateY(.5px)}
+  .module-card.disabled .tag-pill{background:var(--muted-bg);color:var(--slate)}
+  .module-card.disabled .tag-pill .dot{background:var(--slate)}
+
+  .note-banner{margin-top:30px;display:flex;align-items:center;gap:12px;padding:18px 24px;
+    background:var(--note-bg);border:1px dashed var(--note-line);border-radius:18px;color:var(--note-text)}
+  .note-banner .ico{font-size:20px}
+  .note-banner .txt{font-size:13.5px;line-height:1.5}
 
   /* Modulo */
   .stage{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:26px;margin-bottom:18px;
@@ -552,24 +575,45 @@ function render(){
 }
 
 function renderMenu(){
+  var hour = new Date().getHours();
+  var greeting = hour<12 ? "Buenos días" : hour<19 ? "Buenas tardes" : "Buenas noches";
   app.innerHTML =
     '<div class="masthead"><h1>Mi Asistente Contable</h1><span class="folio">Menú de módulos</span></div>' +
-    '<div class="menu-list" id="menuList"></div>' +
-    '<footer class="note">Cada módulo procesa los archivos en tu navegador. Nada se guarda entre sesiones.</footer>';
-  var list = document.getElementById("menuList");
+    '<div class="hero">' +
+      '<div class="greet">'+greeting+'</div>' +
+      '<h2 class="hero-title">¿Qué cuadramos hoy?</h2>' +
+      '<p class="hero-sub">Elige un módulo, sube tu Excel y te ayudo a encontrar las diferencias. Cada revisión es tuya y se borra al cerrar. ✨</p>' +
+    '</div>' +
+    '<div class="modules-grid" id="modulesGrid"></div>' +
+    '<div class="note-banner"><span class="ico">🔒</span><span class="txt">Nada se guarda en tu computadora. Al cerrar la pestaña, la sesión se descarta por completo.</span></div>';
+  var grid = document.getElementById("modulesGrid");
   var mods = [
-    {id:"modulo1", nombre:"Conciliador de Caja General", desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG", enabled:true},
-    {id:"modulo2", nombre:"Revisión de movimientos pendientes", desc:"Próximamente", enabled:false},
-    {id:"modulo3", nombre:"Conciliador de auxiliares", desc:"Próximamente", enabled:false}
+    {id:"modulo1", nombre:"Conciliador de Caja General",
+      desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG",
+      enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tagBg:"var(--brand-light)", tagColor:"var(--brand-dark)",
+      tagText:"7 archivos", action:"Conciliar"},
+    {id:"modulo2", nombre:"Revisión de movimientos pendientes",
+      desc:"Un solo Excel: se filtran y listan los movimientos sin conciliar.",
+      enabled:false, icon:"🧾", iconBg:"var(--accent-purple-bg)", tagText:"Próximamente"},
+    {id:"modulo3", nombre:"Conciliador de auxiliares",
+      desc:"Compara el diario contra el auxiliar y enumera las diferencias entre ambas fuentes.",
+      enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tagText:"Próximamente"}
   ];
-  mods.forEach(function(m, i){
+  mods.forEach(function(m){
     var el = document.createElement("div");
-    el.className = "menu-item" + (m.enabled?"":" disabled");
-    el.innerHTML = '<span class="num">'+String(i+1).padStart(2,"0")+'</span>' +
-      '<div class="txt"><h2>'+m.nombre+'</h2><p>'+m.desc+'</p></div>' +
-      (m.enabled ? '<span class="arrow">→</span>' : '');
+    el.className = "module-card" + (m.enabled?"":" disabled");
+    var tagStyle = m.enabled ? (' style="background:'+m.tagBg+';color:'+m.tagColor+'"') : '';
+    var dotStyle = m.enabled ? (' style="background:'+m.tagColor+'"') : '';
+    el.innerHTML =
+      '<div class="module-card-top">' +
+        '<div class="icon-box" style="background:'+m.iconBg+'">'+m.icon+'</div>' +
+        '<span class="tag-pill"'+tagStyle+'><span class="dot"'+dotStyle+'></span>'+m.tagText+'</span>' +
+      '</div>' +
+      '<h2>'+m.nombre+'</h2>' +
+      '<p>'+m.desc+'</p>' +
+      (m.enabled ? '<div class="module-action">'+m.action+' <span class="arrow">→</span></div>' : '');
     if(m.enabled){ el.onclick = function(){ STATE.view = m.id; render(); }; }
-    list.appendChild(el);
+    grid.appendChild(el);
   });
 }
 
