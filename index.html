@@ -115,6 +115,13 @@
     padding:8px 14px;border-radius:999px;cursor:pointer;white-space:nowrap;box-shadow:0 4px 12px rgba(158,104,126,.08)}
   .dz .btn-sel:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
 
+  .stage-run{display:flex;align-items:center;gap:12px;margin-top:18px;padding-top:16px;border-top:1px dashed var(--line);flex-wrap:wrap}
+  .btn-step-run{background:#fff;border:1.5px solid var(--brand);color:var(--brand);font-family:"Mulish";font-size:13px;font-weight:800;
+    padding:9px 18px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:all .15s ease}
+  .btn-step-run:hover:not(:disabled){background:var(--brand);color:#fff}
+  .btn-step-run:disabled{border-color:var(--line);color:var(--slate);cursor:not-allowed}
+  .stage-run-note{font-size:12.5px;color:var(--slate);font-weight:600}
+
   .run-bar{display:flex;align-items:center;gap:14px;margin:22px 0;flex-wrap:wrap}
   .btn-run{background:linear-gradient(150deg,#E79BB2,#C07A95);color:#fff;border:none;font-family:"Mulish";
     font-size:15px;font-weight:800;padding:14px 28px;border-radius:999px;cursor:pointer;
@@ -157,6 +164,14 @@
   .btn-export:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
 
   footer.note{font-size:12.5px;color:var(--slate);margin-top:34px;border-top:1px solid var(--line);padding-top:16px}
+
+  .confetti-container{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:9999}
+  .confetti-piece{position:absolute;top:-10px;border-radius:2px;opacity:.9;
+    animation-name:confettiFall;animation-timing-function:ease-in;animation-fill-mode:forwards}
+  @keyframes confettiFall{
+    0%{transform:translate(0,0) rotate(0deg);opacity:1}
+    100%{transform:translate(var(--drift),110vh) rotate(var(--rot));opacity:.9}
+  }
 </style>
 </head>
 <body>
@@ -574,6 +589,141 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
   return hallazgos;
 }
 
+/* ---------------- Ejecución por paso (individual o global) ---------------- */
+// Cada paso puede correrse solo (si tiene sus propios archivos) o como parte de la
+// conciliación completa. r[pasoKey] === undefined -> nunca se ejecutó en esta sesión;
+// === null -> se intentó pero faltan archivos de ese paso (se omite); array -> resultado real.
+var PASO_ORDEN = ["paso1","paso2","paso3","paso4"];
+var PASO_REQS = {
+  paso1: ["reporte","diarioCaja"],
+  paso2: ["diarioCaja","diarioBanistmo","diarioStg"],
+  paso3: ["diarioBanistmo","diarioStg","estBanistmo","estStg"],
+  paso4: ["retVisa","estStg"]
+};
+
+function pasoListo(pasoKey){
+  return PASO_REQS[pasoKey].every(function(k){ return !!STATE.files[k]; });
+}
+
+function computePasoResult(pasoKey, raws, opts){
+  if(pasoKey==="paso1"){
+    if(!raws.reporte || !raws.diarioCaja) return null;
+    return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), opts.tol);
+  }
+  if(pasoKey==="paso2"){
+    if(!raws.diarioCaja || !raws.diarioBanistmo || !raws.diarioStg) return null;
+    var diarioCaja = parseDiario(raws.diarioCaja,"Caja General");
+    var diarioBanistmo = parseDiario(raws.diarioBanistmo,"Banistmo");
+    var diarioStg = parseDiario(raws.diarioStg,null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
+    return paso2(diarioCaja, diarioBanistmo, diarioStg, opts.tol);
+  }
+  if(pasoKey==="paso3"){
+    if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
+    var diarioBanistmo = parseDiario(raws.diarioBanistmo,"Banistmo");
+    var diarioStg = parseDiario(raws.diarioStg,null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
+    var estBanistmo = parseEstadoCuenta(raws.estBanistmo,"banistmo");
+    var estStg = parseEstadoCuenta(raws.estStg,"stg");
+    return paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, opts.ventana, opts.tol);
+  }
+  if(pasoKey==="paso4"){
+    if(!raws.retVisa || !raws.estStg) return null;
+    var retVisa = parseRetencionesVisa(raws.retVisa);
+    var estStgVisa = parseEstadoCuenta(raws.estStg,"stg");
+    return paso4(retVisa, estStgVisa, opts.ventana, opts.tol);
+  }
+  return null;
+}
+
+function readMany(keys, cb){
+  var uniq = keys.filter(function(k,i){ return keys.indexOf(k)===i; });
+  var raws = {};
+  var pending = uniq.length;
+  if(pending===0){ cb(raws); return; }
+  uniq.forEach(function(k){
+    readWorkbook(STATE.files[k], function(rows){
+      raws[k] = rows;
+      pending--;
+      if(pending===0) cb(raws);
+    });
+  });
+}
+
+function ensureResults(){
+  if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined, paso4:undefined};
+}
+
+function tieneCuadreLimpio(keys, r){
+  var evaluados = keys.filter(function(k){ return Array.isArray(r[k]); });
+  if(evaluados.length===0) return false;
+  return evaluados.every(function(k){ return r[k].length===0; });
+}
+
+function ejecutarPaso(pasoKey){
+  if(!pasoListo(pasoKey)) return;
+  var note = document.getElementById("runNote");
+  if(note) note.textContent = "Leyendo archivos de este paso...";
+  readMany(PASO_REQS[pasoKey], function(raws){
+    try{
+      var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
+      var result = computePasoResult(pasoKey, raws, opts);
+      ensureResults();
+      Object.keys(STATE.checks).forEach(function(k){ if(k.indexOf(pasoKey+"_")===0) delete STATE.checks[k]; });
+      STATE.results[pasoKey] = result;
+      if(note) note.textContent = "Paso ejecutado.";
+      if(Array.isArray(result) && result.length===0) launchConfetti();
+      renderResultados();
+    }catch(err){
+      if(note) note.textContent = "Error: " + err.message;
+    }
+  });
+}
+
+function ejecutarConciliacion(){
+  var note = document.getElementById("runNote");
+  note.textContent = "Leyendo archivos...";
+  var allKeys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","retVisa"]
+    .filter(function(k){ return STATE.files[k]; });
+  readMany(allKeys, function(raws){
+    try{
+      var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
+      ensureResults();
+      PASO_ORDEN.forEach(function(pasoKey){
+        STATE.results[pasoKey] = computePasoResult(pasoKey, raws, opts);
+      });
+      STATE.checks = {};
+      note.textContent = "Conciliación ejecutada.";
+      if(tieneCuadreLimpio(PASO_ORDEN, STATE.results)) launchConfetti();
+      renderResultados();
+    }catch(err){
+      note.textContent = "Error: " + err.message;
+    }
+  });
+}
+
+/* ---------------- Confetti (celebración cuando todo cuadra) ---------------- */
+function launchConfetti(){
+  var colors = ["#E79BB2","#C07A95","#B56B86","#8467B0","#4F9878","#D9A441"];
+  var container = document.createElement("div");
+  container.className = "confetti-container";
+  document.body.appendChild(container);
+  var total = 90;
+  for(var i=0;i<total;i++){
+    var piece = document.createElement("span");
+    piece.className = "confetti-piece";
+    var size = 6 + Math.random()*6;
+    piece.style.left = (Math.random()*100)+"vw";
+    piece.style.background = colors[Math.floor(Math.random()*colors.length)];
+    piece.style.width = size+"px";
+    piece.style.height = (size*0.4)+"px";
+    piece.style.animationDelay = (Math.random()*0.4)+"s";
+    piece.style.animationDuration = (2.2+Math.random()*1.4)+"s";
+    piece.style.setProperty("--rot", (Math.random()*360)+"deg");
+    piece.style.setProperty("--drift", ((Math.random()*2-1)*80)+"px");
+    container.appendChild(piece);
+  }
+  setTimeout(function(){ container.remove(); }, 4000);
+}
+
 /* ---------------- UI ---------------- */
 var app = document.getElementById("app");
 
@@ -649,6 +799,14 @@ function dzHtml(key, label, esperado){
     '</div>';
 }
 
+function stageRunHtml(pasoKey){
+  var listo = pasoListo(pasoKey);
+  return '<div class="stage-run">' +
+    '<button class="btn-step-run" data-paso="'+pasoKey+'"'+(listo?'':' disabled')+'>Ejecutar solo este paso</button>' +
+    '<span class="stage-run-note">'+(listo?'Listo para ejecutar de forma independiente.':'Faltan archivos de este paso.')+'</span>' +
+  '</div>';
+}
+
 function renderModulo1(){
   app.innerHTML =
     headerHtml() +
@@ -659,33 +817,34 @@ function renderModulo1(){
     '<div class="dropzones grid2">' +
       dzHtml("reporte","Reporte consolidado de caja (opcional)","Reporte_rango_-_[SUCURSAL]_-_[FECHA].xls (o .xlsx) — si no lo subís, se omite el Paso 1") +
       dzHtml("diarioCaja","Diario Caja General","Navegador_Contabilidad_Excel — cuenta [1.1.8] Caja General") +
-    '</div></div>' +
+    '</div>' + stageRunHtml("paso1") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 2</span> Diario Caja General → Diario bancario</h3>' +
     '<p class="desc">Valida que el traslado a cada banco se registró en la cuenta correspondiente.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
       dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
-    '</div></div>' +
+    '</div>' + stageRunHtml("paso2") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real</h3>' +
     '<p class="desc">Conciliación bancaria clásica: excluye partidas "ABORTED" automáticamente.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
-    '</div></div>' +
+    '</div>' + stageRunHtml("paso3") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 4</span> Validación VISA STG</h3>' +
     '<p class="desc">Venta bruta − retención − comisión − ITBMS = depósito neto esperado en el banco.</p>' +
-    '<div class="dropzones">' + dzHtml("retVisa","Informe de retenciones VISA STG","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") + '</div></div>' +
+    '<div class="dropzones">' + dzHtml("retVisa","Informe de retenciones VISA STG","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") + '</div>' +
+    stageRunHtml("paso4") + '</div>' +
 
     '<div class="opts">' +
       '<label>Ventana de días para emparejar <input type="number" id="ventana" value="'+STATE.options.ventanaDias+'" min="0"></label>' +
       '<label>Tolerancia B/ <input type="number" id="tolerancia" value="'+STATE.options.tolerancia+'" step="0.01" min="0"></label>' +
     '</div>' +
 
-    '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar conciliación</button>' +
-    '<span class="run-note" id="runNote">Sube los 6 archivos requeridos para habilitar (el reporte de cajeras es opcional).</span></div>' +
+    '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar los 4 pasos</button>' +
+    '<span class="run-note" id="runNote">Sube los archivos de al menos un paso para habilitar.</span></div>' +
 
     '<div id="resultsArea"></div>';
 
@@ -711,102 +870,63 @@ function renderModulo1(){
       assignFile(key, e.dataTransfer.files[0]);
     });
   });
+  document.querySelectorAll('.btn-step-run').forEach(function(btn){
+    btn.onclick = function(){ ejecutarPaso(btn.getAttribute("data-paso")); };
+  });
   var ventInp = document.getElementById("ventana");
   var tolInp = document.getElementById("tolerancia");
   ventInp.addEventListener("change", function(){ STATE.options.ventanaDias = parseFloat(ventInp.value)||0; });
   tolInp.addEventListener("change", function(){ STATE.options.tolerancia = parseFloat(tolInp.value)||0.01; });
 
   var runBtn = document.getElementById("runBtn");
-  var requeridas = Object.keys(STATE.files).filter(function(k){ return k!=="reporte"; });
-  var faltantes = requeridas.filter(function(k){return !STATE.files[k];});
-  if(faltantes.length===0){
-    document.getElementById("runNote").textContent = STATE.files.reporte
-      ? "Listo para procesar."
-      : "Listo para procesar (sin reporte de cajeras: el Paso 1 se omite).";
+  var algunoListo = PASO_ORDEN.some(function(k){ return pasoListo(k); });
+  if(algunoListo){
+    document.getElementById("runNote").textContent = "Ejecuta los pasos con archivos completos; los demás se omiten.";
   } else {
     runBtn.disabled = true;
-    document.getElementById("runNote").textContent = "Sube los "+requeridas.length+" archivos requeridos para habilitar (el reporte de cajeras es opcional).";
   }
   runBtn.onclick = ejecutarConciliacion;
 
   if(STATE.results) renderResultados();
 }
 
-function ejecutarConciliacion(){
-  var note = document.getElementById("runNote");
-  note.textContent = "Leyendo archivos...";
-  var keys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","retVisa"]
-    .filter(function(k){ return STATE.files[k]; });
-  var raws = {};
-  var pending = keys.length;
-  keys.forEach(function(k){
-    readWorkbook(STATE.files[k], function(rows){
-      raws[k] = rows;
-      pending--;
-      if(pending===0) procesar(raws);
-    });
-  });
-}
-
-function procesar(raws){
-  try{
-    var diarioCaja = parseDiario(raws.diarioCaja, "Caja General");
-    var diarioBanistmo = parseDiario(raws.diarioBanistmo, "Banistmo");
-    var diarioStg = parseDiario(raws.diarioStg, null).filter(function(x){
-      return normTxt(x.cuenta).indexOf("BANISTMO")===-1;
-    });
-    var estBanistmo = parseEstadoCuenta(raws.estBanistmo, "banistmo");
-    var estStg = parseEstadoCuenta(raws.estStg, "stg");
-    var retVisa = parseRetencionesVisa(raws.retVisa);
-
-    var ventana = STATE.options.ventanaDias, tol = STATE.options.tolerancia;
-
-    // Paso 1 requiere el reporte de cajeras, que es opcional: sin él, se omite (no se marca como "sin diferencias").
-    var h1 = raws.reporte ? paso1(parseReporteConsolidado(raws.reporte), diarioCaja, tol) : null;
-    var h2 = paso2(diarioCaja, diarioBanistmo, diarioStg, tol);
-    var h3 = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventana, tol);
-    var h4 = paso4(retVisa, estStg, ventana, tol);
-
-    STATE.results = {
-      paso1:h1, paso2:h2, paso3:h3, paso4:h4
-    };
-    STATE.checks = {};
-    document.getElementById("runNote").textContent = "Conciliación ejecutada.";
-    renderResultados();
-  }catch(err){
-    document.getElementById("runNote").textContent = "Error: " + err.message;
-  }
-}
-
 function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
-  var total = (r.paso1?r.paso1.length:0) + r.paso2.length + r.paso3.length + r.paso4.length;
+  var total = PASO_ORDEN.reduce(function(sum,k){ return sum + (Array.isArray(r[k]) ? r[k].length : 0); }, 0);
+  var pasosMeta = [
+    {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
+    {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario"},
+    {key:"paso3", corto:"Paso 3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta"},
+    {key:"paso4", corto:"Paso 4", titulo:"Paso 4 — Validación VISA STG"}
+  ];
+
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
   html += '<div class="summary-bar">' +
-    '<span class="chip'+(total===0?" ok":" alert")+'">'+total+' hallazgo(s) en total</span>' +
-    '<span class="chip">Paso 1: '+(r.paso1?r.paso1.length:"omitido")+'</span>' +
-    '<span class="chip">Paso 2: '+r.paso2.length+'</span>' +
-    '<span class="chip">Paso 3: '+r.paso3.length+'</span>' +
-    '<span class="chip">Paso 4: '+r.paso4.length+'</span>' +
-    '</div>';
+    '<span class="chip'+(total===0?" ok":" alert")+'">'+total+' hallazgo(s) en total</span>';
+  pasosMeta.forEach(function(p){
+    var items = r[p.key];
+    var chipTxt = items===undefined ? "—" : items===null ? "omitido" : items.length;
+    html += '<span class="chip">'+p.corto+': '+chipTxt+'</span>';
+  });
+  html += '</div>';
 
-  var pasos = [
-    {key:"paso1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General", items:r.paso1},
-    {key:"paso2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario", items:r.paso2},
-    {key:"paso3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta", items:r.paso3},
-    {key:"paso4", titulo:"Paso 4 — Validación VISA STG", items:r.paso4}
-  ];
-  pasos.forEach(function(p){
+  pasosMeta.forEach(function(p){
+    var items = r[p.key];
+    var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : items.length+' hallazgo(s)';
     html += '<div class="step-block"><div class="step-head"><h4>'+p.titulo+'</h4>' +
-      '<span class="count">'+(p.items===null?"omitido":p.items.length+' hallazgo(s)')+'</span></div><div class="step-body">';
-    if(p.items===null){
-      html += '<div class="empty-skip">Paso omitido: no se subió el reporte de cajeras.</div>';
-    } else if(p.items.length===0){
+      '<span class="count">'+countTxt+'</span></div><div class="step-body">';
+    if(items===undefined){
+      html += '<div class="empty-skip">Aún no se ejecutó este paso — usa "Ejecutar solo este paso" o el botón global.</div>';
+    } else if(items===null){
+      html += '<div class="empty-skip">'+(p.key==="paso1"
+        ? "Paso omitido: no se subió el reporte de cajeras."
+        : "Paso omitido: faltan archivos de este paso.")+'</div>';
+    } else if(items.length===0){
       html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
     } else {
-      p.items.forEach(function(item, idx){
+      items.forEach(function(item, idx){
         var ckKey = p.key+"_"+idx;
         var checked = STATE.checks[ckKey] ? "checked" : "";
         html += '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
@@ -831,17 +951,22 @@ function renderResultados(){
 function exportarChecklist(){
   var r = STATE.results;
   var rows = [["Paso","Fecha","Banco","Hallazgo","Fuente","Corregido"]];
-  var pasos = [
-    ["Paso 1", r.paso1], ["Paso 2", r.paso2], ["Paso 3", r.paso3], ["Paso 4", r.paso4]
-  ];
-  pasos.forEach(function(p){
-    if(p[1]===null){
-      rows.push([p[0], "", "", "Paso omitido: no se subió el reporte de cajeras.", "", ""]);
+  var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"],["Paso 4","paso4"]];
+  pasosMeta.forEach(function(p){
+    var label = p[0], key = p[1], items = r[key];
+    if(items===undefined){
+      rows.push([label, "", "", "Paso no ejecutado en esta sesión.", "", ""]);
       return;
     }
-    p[1].forEach(function(item, idx){
-      var ckKey = (p[0]==="Paso 1"?"paso1":p[0]==="Paso 2"?"paso2":p[0]==="Paso 3"?"paso3":"paso4")+"_"+idx;
-      rows.push([p[0], item.fecha, item.banco, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
+    if(items===null){
+      rows.push([label, "", "", key==="paso1"
+        ? "Paso omitido: no se subió el reporte de cajeras."
+        : "Paso omitido: faltan archivos de este paso.", "", ""]);
+      return;
+    }
+    items.forEach(function(item, idx){
+      var ckKey = key+"_"+idx;
+      rows.push([label, item.fecha, item.banco, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
   var ws = XLSX.utils.aoa_to_sheet(rows);
