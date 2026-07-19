@@ -267,6 +267,43 @@ function colIdx(headerRow, token){
 
 /* ---------------- Parsers por fuente ---------------- */
 
+// Normalización de fechas del reporte de cajeras (Excel manual):
+// Excel a veces guarda las fechas ambiguas (día ≤ 12) como objetos Date con MES/DÍA invertidos
+// (ej. "01/06/2026" = 1 de junio se guarda como 6 de enero). Las fechas con día > 12 quedan
+// como texto DD/MM inequívoco. Estrategia robusta: deducir el/los meses reales desde esas filas
+// de texto inequívocas y usarlos para desambiguar las celdas Date (elegir la orientación cuyo
+// mes coincida con el mes dominante del reporte), en vez de invertir a ciegas.
+function mesesDominantesReporte(rows, cFecha, startRow){
+  var cuenta = {};
+  for(var r=startRow;r<rows.length;r++){
+    var row = rows[r]; if(!row) continue;
+    var raw = row[cFecha];
+    if(raw instanceof Date) continue; // ambigua, se resuelve luego
+    var s = String(raw==null?"":raw).trim();
+    var m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if(m){
+      var d = parseInt(m[1],10), mo = parseInt(m[2],10);
+      if(d>12 && mo>=1 && mo<=12) cuenta[mo] = (cuenta[mo]||0)+1; // DD/MM inequívoco (día>12)
+    }
+  }
+  return Object.keys(cuenta).map(Number);
+}
+function fechaReporteConsolidado(raw, meses){
+  if(raw instanceof Date && !isNaN(raw)){
+    var y=raw.getFullYear(), mo=raw.getMonth()+1, da=raw.getDate();
+    var opA={mes:mo, dia:da};          // tal cual
+    var opB={mes:da, dia:mo};          // mes/día invertidos
+    var aOk = meses.indexOf(opA.mes)!==-1;
+    var bOk = meses.indexOf(opB.mes)!==-1 && opB.dia<=12;
+    var pick = aOk ? opA : (bOk ? opB : opA); // preferir la orientación cuyo mes sea dominante
+    return y+"-"+String(pick.mes).padStart(2,"0")+"-"+String(pick.dia).padStart(2,"0");
+  }
+  var s=String(raw==null?"":raw).trim();
+  var mm=s.match(/^(\d{1,2})-(\d)(\d{4})$/); // texto roto tipo "6-62026" => 6-6-2026
+  if(mm) return mm[3]+"-"+String(parseInt(mm[2],10)).padStart(2,"0")+"-"+String(parseInt(mm[1],10)).padStart(2,"0");
+  return toISODate(raw, false); // DD/MM/YYYY normal
+}
+
 // 1) Reporte consolidado de caja (manual, por cajera)
 // Soporta dos formatos:
 //  a) Encabezado en 2 filas: fila de grupo (VISA/CLAVE/ACH/CHEQUE) + fila de sub-encabezado (Fecha, Cajera, Sr.George, Banistmo, Total)
@@ -324,6 +361,7 @@ function parseReporteConsolidado(rows){
     ].filter(function(m){return m.col>=0;});
   }
 
+  var meses = mesesDominantesReporte(rows, cFecha, subIdx+1);
   var out = [];
   for(var r=subIdx+1;r<rows.length;r++){
     var row = rows[r];
@@ -331,7 +369,7 @@ function parseReporteConsolidado(rows){
     var fechaRaw = row[cFecha];
     if(fechaRaw===null||fechaRaw===undefined||normTxt(fechaRaw)==="" ) continue;
     if(normTxt(fechaRaw).indexOf("TOTAL")!==-1) continue;
-    var iso = toISODate(fechaRaw, false);
+    var iso = fechaReporteConsolidado(fechaRaw, meses);
     if(!iso) continue;
     var cajera = cCajera>=0 ? row[cCajera] : "";
     mapCols.forEach(function(m){
@@ -452,11 +490,13 @@ function clasificarBancoPorTexto(desc){
 }
 function paso1(reporte, diarioCaja, tolerancia){
   var repPorBancoDia = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
-  // Solo se toman las lineas de DEBITO (el desglose individual por banco/metodo);
-  // las lineas de CREDITO suelen venir combinadas (ej. Visa+Clave juntos) y duplicarian el total.
-  var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.debito>0; });
+  // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
+  // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
+  // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
+  // cuadre banco a banco. Se toma un solo lado (credito) para no doble-contar.
+  var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; });
   var cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
-    function(x){ return x.debito; });
+    function(x){ return x.credito; });
 
   var claves = {};
   Object.keys(repPorBancoDia).forEach(function(k){claves[k]=true;});
@@ -471,7 +511,7 @@ function paso1(reporte, diarioCaja, tolerancia){
       hallazgos.push({
         fecha:fecha, banco:banco, monto:diff,
         texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
-               " vs. diario Caja General B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
+               " vs. diario Caja General (depósitos a " + banco + ") B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
         fuente: "Reporte consolidado de caja / Diario Caja General"
       });
     }
