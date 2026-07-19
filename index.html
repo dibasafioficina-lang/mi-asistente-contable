@@ -141,6 +141,7 @@
   .chip{font-size:12.5px;font-weight:800;padding:7px 14px;border-radius:999px;background:var(--brand-light);color:var(--brand-dark)}
   .chip.ok{background:var(--ok-bg);color:var(--ok)}
   .chip.alert{background:var(--alert-bg);color:var(--alert)}
+  .chip.warn{background:#FBF1E3;color:#9A6E1E}
 
   .step-block{border:1px solid var(--line);border-radius:18px;margin-bottom:16px;overflow:hidden;background:var(--card);
     box-shadow:0 8px 22px rgba(158,104,126,.07)}
@@ -160,6 +161,11 @@
     margin-left:12px;flex-shrink:0}
   .empty-ok{font-size:14px;color:var(--ok);padding:14px 4px;font-weight:700}
   .empty-skip{font-size:14px;color:var(--slate);padding:14px 4px;font-weight:700;font-style:italic}
+  .sinconf-block{margin-top:12px;border-top:1px dashed var(--line);padding-top:6px}
+  .sinconf-head{font-size:13px;font-weight:800;color:#9A6E1E;padding:10px 4px 2px}
+  .sinconf-head .sinconf-sub{display:block;font-size:12px;font-weight:600;color:var(--slate);margin-top:3px}
+  .sinconf-block .finding .famt{color:#9A6E1E}
+  .sinconf-block .finding input[type=checkbox]{accent-color:#C79A3A}
 
   .btn-export{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-family:"Mulish";font-size:13.5px;font-weight:800;
     padding:10px 20px;border-radius:999px;cursor:pointer;box-shadow:0 6px 16px rgba(158,104,126,.08)}
@@ -488,6 +494,14 @@ function clasificarBancoPorTexto(desc){
   if(n.indexOf("STG")!==-1) return "STG";
   return null;
 }
+// ¿La descripción es un depósito de ACH o cheque que el sistema a veces registra SIN banco?
+// (ej. "DEPOSITO ACH DEL...", "DEPOSITO POR CK DEL..."). Se usa para reconocer que la plata
+// está en el sistema aunque no lleve etiqueta de banco → hallazgo "sin confirmar" en vez de rojo.
+function esAchOChequeSinBanco(desc){
+  var n = normTxt(desc);
+  if(clasificarBancoPorTexto(desc)) return false; // ya tiene banco
+  return n.indexOf("ACH")!==-1 || /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
+}
 function paso1(reporte, diarioCaja, tolerancia){
   var repPorBancoDia = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
@@ -498,6 +512,15 @@ function paso1(reporte, diarioCaja, tolerancia){
   var cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
     function(x){ return x.credito; });
 
+  // Depósitos ACH/cheque que el sistema NO etiquetó con banco, por día (para explicar diferencias
+  // "positivas" donde el reporte asigna a un banco pero el sistema registró el depósito sin banco).
+  var sinBancoPorDia = {};
+  diarioCaja.forEach(function(x){
+    if(x.credito>0 && esAchOChequeSinBanco(x.descripcion)){
+      (sinBancoPorDia[x.fecha] = sinBancoPorDia[x.fecha] || []).push({monto:x.credito, desc:x.descripcion, usado:false});
+    }
+  });
+
   var claves = {};
   Object.keys(repPorBancoDia).forEach(function(k){claves[k]=true;});
   Object.keys(cajaPorBancoDia).forEach(function(k){claves[k]=true;});
@@ -507,14 +530,35 @@ function paso1(reporte, diarioCaja, tolerancia){
     var parts = k.split("|"); var banco = parts[0], fecha = parts[1];
     var a = repPorBancoDia[k]||0, b = cajaPorBancoDia[k]||0;
     var diff = Math.round((a-b)*100)/100;
-    if(Math.abs(diff) > tolerancia){
-      hallazgos.push({
-        fecha:fecha, banco:banco, monto:diff,
-        texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
-               " vs. diario Caja General (depósitos a " + banco + ") B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
-        fuente: "Reporte consolidado de caja / Diario Caja General"
-      });
+    if(Math.abs(diff) <= tolerancia) return;
+
+    // ¿La diferencia positiva (reporte > sistema-etiquetado) se explica por un depósito ACH/cheque
+    // que el sistema registró sin banco ese día? Entonces la plata está, solo falta la etiqueta.
+    if(diff > tolerancia){
+      var pool = sinBancoPorDia[fecha] || [];
+      var match = null;
+      for(var i=0;i<pool.length;i++){
+        if(!pool[i].usado && Math.abs(pool[i].monto - diff) <= tolerancia){ match = pool[i]; break; }
+      }
+      if(match){
+        match.usado = true;
+        hallazgos.push({
+          fecha:fecha, banco:banco, monto:diff, clase:"sin_confirmar",
+          texto: banco + " " + fecha + ": la cajera reportó B/ " + diff.toFixed(2) +
+                 " para este banco y el sistema tiene el depósito (\"" + String(match.desc).trim() +
+                 "\") pero sin etiqueta de banco, así que no se puede confirmar a qué banco entró.",
+          fuente: "Reporte consolidado de caja / Diario Caja General"
+        });
+        return;
+      }
     }
+
+    hallazgos.push({
+      fecha:fecha, banco:banco, monto:diff, clase:"diff",
+      texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
+             " vs. diario Caja General (depósitos a " + banco + ") B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
+      fuente: "Reporte consolidado de caja / Diario Caja General"
+    });
   });
   return hallazgos;
 }
@@ -694,10 +738,19 @@ function ensureResults(){
   if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined, paso4:undefined};
 }
 
+// Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar"
+// (plata presente en el sistema pero sin etiqueta de banco). Los pasos 2/3/4 no usan
+// clase, así que todos sus items cuentan como rojos.
+function esSinConfirmar(item){ return item && item.clase==="sin_confirmar"; }
+function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esSinConfirmar(i);}).length : 0; }
+function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
+
+// Cuadre limpio para el confetti: cero diferencias ROJAS en todo lo evaluado
+// (los "sin confirmar" no lo bloquean: la plata cuadra, solo falta la etiqueta de banco).
 function tieneCuadreLimpio(keys, r){
   var evaluados = keys.filter(function(k){ return Array.isArray(r[k]); });
   if(evaluados.length===0) return false;
-  return evaluados.every(function(k){ return r[k].length===0; });
+  return evaluados.every(function(k){ return contarRojas(r[k])===0; });
 }
 
 function ejecutarPaso(pasoKey){
@@ -712,7 +765,7 @@ function ejecutarPaso(pasoKey){
       Object.keys(STATE.checks).forEach(function(k){ if(k.indexOf(pasoKey+"_")===0) delete STATE.checks[k]; });
       STATE.results[pasoKey] = result;
       if(note) note.textContent = "Paso ejecutado.";
-      if(Array.isArray(result) && result.length===0) launchConfetti();
+      if(Array.isArray(result) && contarRojas(result)===0) launchConfetti();
       renderResultados();
     }catch(err){
       if(note) note.textContent = "Error: " + err.message;
@@ -935,7 +988,8 @@ function renderModulo1(){
 function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
-  var total = PASO_ORDEN.reduce(function(sum,k){ return sum + (Array.isArray(r[k]) ? r[k].length : 0); }, 0);
+  var totalRojas = PASO_ORDEN.reduce(function(sum,k){ return sum + contarRojas(r[k]); }, 0);
+  var totalSinConf = PASO_ORDEN.reduce(function(sum,k){ return sum + contarSinConfirmar(r[k]); }, 0);
   var pasosMeta = [
     {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
     {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario"},
@@ -943,20 +997,34 @@ function renderResultados(){
     {key:"paso4", corto:"Paso 4", titulo:"Paso 4 — Validación VISA STG"}
   ];
 
+  function findingHtml(p, item, idx){
+    var ckKey = p.key+"_"+idx;
+    var checked = STATE.checks[ckKey] ? "checked" : "";
+    var montoTxt = (item.monto<0?"-":"")+"B/ "+Math.abs(item.monto).toFixed(2);
+    return '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
+      '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
+      '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
+      '<div class="famt">'+montoTxt+'</div></div>';
+  }
+
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
   html += '<div class="summary-bar">' +
-    '<span class="chip'+(total===0?" ok":" alert")+'">'+total+' hallazgo(s) en total</span>';
+    '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
+    (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '');
   pasosMeta.forEach(function(p){
     var items = r[p.key];
-    var chipTxt = items===undefined ? "—" : items===null ? "omitido" : items.length;
+    var chipTxt = items===undefined ? "—" : items===null ? "omitido" : String(contarRojas(items));
     html += '<span class="chip">'+p.corto+': '+chipTxt+'</span>';
   });
   html += '</div>';
 
   pasosMeta.forEach(function(p){
     var items = r[p.key];
-    var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : items.length+' hallazgo(s)';
+    var rojas = Array.isArray(items) ? items.filter(function(i){return !esSinConfirmar(i);}) : [];
+    var sinConf = Array.isArray(items) ? items.filter(esSinConfirmar) : [];
+    var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido"
+      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : ''));
     html += '<div class="step-block"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
     if(items===undefined){
@@ -965,18 +1033,18 @@ function renderResultados(){
       html += '<div class="empty-skip">'+(p.key==="paso1"
         ? "Paso omitido: no se subió el reporte de cajeras."
         : "Paso omitido: faltan archivos de este paso.")+'</div>';
-    } else if(items.length===0){
-      html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
     } else {
-      items.forEach(function(item, idx){
-        var ckKey = p.key+"_"+idx;
-        var checked = STATE.checks[ckKey] ? "checked" : "";
-        var montoTxt = (item.monto<0?"-":"")+"B/ "+Math.abs(item.monto).toFixed(2);
-        html += '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
-          '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
-          '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
-          '<div class="famt">'+montoTxt+'</div></div>';
-      });
+      if(rojas.length===0){
+        html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
+      } else {
+        items.forEach(function(item, idx){ if(!esSinConfirmar(item)) html += findingHtml(p, item, idx); });
+      }
+      if(sinConf.length){
+        html += '<div class="sinconf-block"><div class="sinconf-head">Sin confirmar el banco ('+sinConf.length+')' +
+          '<span class="sinconf-sub">La plata está en el sistema, pero el depósito no trae etiqueta de banco. Verifica manualmente.</span></div>';
+        items.forEach(function(item, idx){ if(esSinConfirmar(item)) html += findingHtml(p, item, idx); });
+        html += '</div>';
+      }
     }
     html += '</div></div>';
   });
@@ -994,27 +1062,28 @@ function renderResultados(){
 
 function exportarChecklist(){
   var r = STATE.results;
-  var rows = [["Paso","Fecha","Banco","Monto","Hallazgo","Fuente","Corregido"]];
+  var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
   var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"],["Paso 4","paso4"]];
   pasosMeta.forEach(function(p){
     var label = p[0], key = p[1], items = r[key];
     if(items===undefined){
-      rows.push([label, "", "", "", "Paso no ejecutado en esta sesión.", "", ""]);
+      rows.push([label, "", "", "", "", "Paso no ejecutado en esta sesión.", "", ""]);
       return;
     }
     if(items===null){
-      rows.push([label, "", "", "", key==="paso1"
+      rows.push([label, "", "", "", "", key==="paso1"
         ? "Paso omitido: no se subió el reporte de cajeras."
         : "Paso omitido: faltan archivos de este paso.", "", ""]);
       return;
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      rows.push([label, item.fecha, item.banco, item.monto, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
+      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : "Diferencia";
+      rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
   var ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:12},{wch:70},{wch:40},{wch:10}];
+  ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:12},{wch:18},{wch:70},{wch:40},{wch:10}];
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
   XLSX.writeFile(wb, "checklist_conciliacion_caja_general.xlsx");
