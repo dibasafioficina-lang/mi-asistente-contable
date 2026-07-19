@@ -521,43 +521,70 @@ function paso1(reporte, diarioCaja, tolerancia){
     }
   });
 
-  var claves = {};
-  Object.keys(repPorBancoDia).forEach(function(k){claves[k]=true;});
-  Object.keys(cajaPorBancoDia).forEach(function(k){claves[k]=true;});
+  var BANCOS = ["STG","Banistmo"];
+  var dias = {};
+  Object.keys(repPorBancoDia).forEach(function(k){ dias[k.split("|")[1]] = true; });
+  Object.keys(cajaPorBancoDia).forEach(function(k){ dias[k.split("|")[1]] = true; });
 
   var hallazgos = [];
-  Object.keys(claves).sort().forEach(function(k){
-    var parts = k.split("|"); var banco = parts[0], fecha = parts[1];
-    var a = repPorBancoDia[k]||0, b = cajaPorBancoDia[k]||0;
-    var diff = Math.round((a-b)*100)/100;
-    if(Math.abs(diff) <= tolerancia) return;
+  Object.keys(dias).sort().forEach(function(fecha){
+    // diferencia por banco ese día (reporte de cajeras vs crédito del sistema)
+    var d = {};
+    BANCOS.forEach(function(bk){
+      var a = repPorBancoDia[bk+"|"+fecha]||0, b = cajaPorBancoDia[bk+"|"+fecha]||0;
+      d[bk] = { a:a, b:b, diff: Math.round((a-b)*100)/100 };
+    });
+    var dS = d.STG.diff, dB = d.Banistmo.diff;
 
-    // ¿La diferencia positiva (reporte > sistema-etiquetado) se explica por un depósito ACH/cheque
-    // que el sistema registró sin banco ese día? Entonces la plata está, solo falta la etiqueta.
-    if(diff > tolerancia){
-      var pool = sinBancoPorDia[fecha] || [];
-      var match = null;
-      for(var i=0;i<pool.length;i++){
-        if(!pool[i].usado && Math.abs(pool[i].monto - diff) <= tolerancia){ match = pool[i]; break; }
-      }
-      if(match){
-        match.usado = true;
-        hallazgos.push({
-          fecha:fecha, banco:banco, monto:diff, clase:"sin_confirmar",
-          texto: banco + " " + fecha + ": la cajera reportó B/ " + diff.toFixed(2) +
-                 " para este banco y el sistema tiene el depósito (\"" + String(match.desc).trim() +
-                 "\") pero sin etiqueta de banco, así que no se puede confirmar a qué banco entró.",
-          fuente: "Reporte consolidado de caja / Diario Caja General"
-        });
-        return;
-      }
+    // 1) Mismo monto en bancos distintos: el informe lo pone en un banco y el sistema en el otro
+    //    (diferencias opuestas que se cancelan). Se emite UNA sola alerta clara en vez de dos.
+    if(Math.abs(dS) > tolerancia && Math.abs(dB) > tolerancia &&
+       Math.abs(dS + dB) <= tolerancia && (dS > 0) !== (dB > 0)){
+      var monto = Math.abs(dS);
+      var bancoInforme = dS > 0 ? "STG" : "Banistmo";  // el reporte lo asigna aquí (diferencia positiva)
+      var bancoSistema = dS > 0 ? "Banistmo" : "STG";  // el sistema lo depositó aquí
+      hallazgos.push({
+        fecha:fecha, banco:bancoInforme, monto:monto, clase:"diff",
+        texto: "El monto B/ " + monto.toFixed(2) + " del " + fecha + " tiene bancos diferentes: el informe de cajeras lo reporta en " +
+               bancoInforme + " y el diario de Caja General lo registró en " + bancoSistema +
+               ". Verifica el informe de caja y el navegador de Caja General.",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
+      return;
     }
 
-    hallazgos.push({
-      fecha:fecha, banco:banco, monto:diff, clase:"diff",
-      texto: "Diferencia " + banco + " " + fecha + ": reporte de cajeras B/ " + a.toFixed(2) +
-             " vs. diario Caja General (depósitos a " + banco + ") B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
-      fuente: "Reporte consolidado de caja / Diario Caja General"
+    // 2) Por banco: sin confirmar (ACH/cheque sin banco) o diferencia genérica
+    BANCOS.forEach(function(bk){
+      var info = d[bk], diff = info.diff;
+      if(Math.abs(diff) <= tolerancia) return;
+
+      // ¿La diferencia positiva (reporte > sistema-etiquetado) se explica por un depósito ACH/cheque
+      // que el sistema registró sin banco ese día? Entonces la plata está, solo falta la etiqueta.
+      if(diff > tolerancia){
+        var pool = sinBancoPorDia[fecha] || [];
+        var match = null;
+        for(var i=0;i<pool.length;i++){
+          if(!pool[i].usado && Math.abs(pool[i].monto - diff) <= tolerancia){ match = pool[i]; break; }
+        }
+        if(match){
+          match.usado = true;
+          hallazgos.push({
+            fecha:fecha, banco:bk, monto:diff, clase:"sin_confirmar",
+            texto: bk + " " + fecha + ": la cajera reportó B/ " + diff.toFixed(2) +
+                   " para este banco y el sistema tiene el depósito (\"" + String(match.desc).trim() +
+                   "\") pero sin etiqueta de banco, así que no se puede confirmar a qué banco entró.",
+            fuente: "Reporte consolidado de caja / Diario Caja General"
+          });
+          return;
+        }
+      }
+
+      hallazgos.push({
+        fecha:fecha, banco:bk, monto:diff, clase:"diff",
+        texto: "Diferencia " + bk + " " + fecha + ": reporte de cajeras B/ " + info.a.toFixed(2) +
+               " vs. diario Caja General (depósitos a " + bk + ") B/ " + info.b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
     });
   });
   return hallazgos;
