@@ -646,30 +646,33 @@ function paso1(reporte, diarioCaja, tolerancia){
   return hallazgos;
 }
 
-// Paso 2: Diario Caja General (por banco/dia) vs Diario del banco (Banistmo/STG/Banco General)
-// diarioBancoGeneral es opcional: si no se sube, ese banco simplemente no se concilia.
-function paso2(diarioCaja, diarioBanistmo, diarioStg, diarioBancoGeneral, tolerancia){
+// Paso 2: Cotejo de lo que Caja General registró como depositado a cada banco (el resultado del
+// Paso 1: reporte → Caja General) contra el ESTADO DE CUENTA real de cada banco. Verifica que la
+// plata cobrada realmente llegó al banco. Empareja 1:1 por monto dentro de la ventana de días,
+// lo que absorbe la compensación T+1 (ej. Yappy compensa al día siguiente en Banco General).
+// estBancoGeneral es opcional: si no se sube, ese banco no se coteja.
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
   var hallazgos = [];
-  var cfgs = [{nombre:"Banistmo", diarioBanco:diarioBanistmo},{nombre:"STG", diarioBanco:diarioStg}];
-  if(diarioBancoGeneral) cfgs.push({nombre:"Banco General", diarioBanco:diarioBancoGeneral});
+  var cfgs = [
+    {nombre:"Banistmo", estado:estBanistmo},
+    {nombre:"STG", estado:estStg}
+  ];
+  if(estBancoGeneral) cfgs.push({nombre:"Banco General", estado:estBancoGeneral});
   cfgs.forEach(function(cfg){
-    var cajaFiltrada = diarioCaja.filter(function(x){return clasificarBancoPorTexto(x.descripcion)===cfg.nombre && x.debito>0;});
-    var cajaPorDia = sumBy(cajaFiltrada, function(x){return x.fecha;}, function(x){return x.debito;});
-    var bancoPorDia = sumBy(cfg.diarioBanco, function(x){return x.fecha;}, function(x){return x.debito;}); // ingresos al banco = debito en el diario del banco
-    var claves = {};
-    Object.keys(cajaPorDia).forEach(function(k){claves[k]=true;});
-    Object.keys(bancoPorDia).forEach(function(k){claves[k]=true;});
-    Object.keys(claves).sort().forEach(function(fecha){
-      var a = cajaPorDia[fecha]||0, b = bancoPorDia[fecha]||0;
-      var diff = Math.round((a-b)*100)/100;
-      if(Math.abs(diff) > tolerancia){
-        hallazgos.push({
-          fecha:fecha, banco:cfg.nombre, monto:diff,
-          texto: "Diferencia " + cfg.nombre + " " + fecha + ": diario Caja General B/ " + a.toFixed(2) +
-                 " vs. diario " + cfg.nombre + " B/ " + b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ") — posible en tránsito",
-          fuente: "Diario Caja General / Diario " + cfg.nombre
-        });
-      }
+    // Depósitos que Caja General dice que fueron a este banco (créditos clasificados por texto de la descripción).
+    var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===cfg.nombre && x.credito>0; });
+    // Entradas de dinero en el estado de cuenta del banco (créditos = dinero que entró).
+    var bancoIn = cfg.estado.filter(function(x){ return x.credito>0; });
+    // Depósitos de Caja General que no aparecen en el estado de cuenta (dentro de la ventana de días).
+    var faltan = matchUnoAUno(cajaDep, "credito", bancoIn, "credito", ventanaDias, tolerancia);
+    faltan.forEach(function(f){
+      var ref = /^ME-/i.test(String(f.referencia==null?"":f.referencia).trim()) ? (" · Comprobante " + String(f.referencia).trim()) : "";
+      hallazgos.push({
+        fecha:f.fecha, banco:cfg.nombre, monto:f.credito,
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " que el reporte/Caja General registró como depósito a " +
+               cfg.nombre + " (\"" + String(f.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + cfg.nombre + "." + ref,
+        fuente: "Diario Caja General / Estado de cuenta " + cfg.nombre
+      });
     });
   });
   return hallazgos;
@@ -771,14 +774,16 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
 var PASO_ORDEN = ["paso1","paso2","paso3"];
 var PASO_REQS = {
   paso1: ["reporte","diarioCaja"],
-  paso2: ["diarioCaja","diarioBanistmo","diarioStg"],
+  // Paso 2: coteja lo que Caja General registró como depositado a cada banco contra el estado de cuenta real.
+  paso2: ["diarioCaja","estBanistmo","estStg"],
+  // Paso 3: concilia el diario contable de cada banco contra su estado de cuenta real.
   paso3: ["diarioBanistmo","diarioStg","estBanistmo","estStg"]
 };
 // Archivos opcionales por paso: se leen si están subidos, pero no hacen falta para habilitar el paso.
-// El Paso 3 incluye la validación VISA (antes Paso 4): si se sube el informe de retenciones,
-// además de conciliar diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
+// El Paso 3 incluye la validación VISA: si se sube el informe de retenciones, además de conciliar
+// diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
-  paso2: ["diarioBancoGeneral"],
+  paso2: ["estBancoGeneral"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja"]
 };
@@ -799,12 +804,12 @@ function computePasoResult(pasoKey, raws, opts){
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), opts.tol);
   }
   if(pasoKey==="paso2"){
-    if(!raws.diarioCaja || !raws.diarioBanistmo || !raws.diarioStg) return null;
+    if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;
     var diarioCaja = parseDiario(raws.diarioCaja,"Caja General");
-    var diarioBanistmo = parseDiario(raws.diarioBanistmo,"Banistmo");
-    var diarioStg = parseDiario(raws.diarioStg,null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
-    var diarioBG = raws.diarioBancoGeneral ? parseDiario(raws.diarioBancoGeneral, null) : null;
-    return paso2(diarioCaja, diarioBanistmo, diarioStg, diarioBG, opts.tol);
+    var estBanistmo = parseEstadoCuenta(raws.estBanistmo,"banistmo");
+    var estStg = parseEstadoCuenta(raws.estStg,"stg");
+    var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, opts.ventana, opts.tol);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -1020,20 +1025,20 @@ function renderModulo1(){
       dzHtml("diarioCaja","Diario Caja General","Navegador_Contabilidad_Excel — cuenta [1.1.8] Caja General") +
     '</div>' + stageRunHtml("paso1") + '</div>' +
 
-    '<div class="stage"><h3><span class="tag">PASO 2</span> Diario Caja General → Diario bancario</h3>' +
-    '<p class="desc">Valida que el traslado a cada banco se registró en la cuenta correspondiente.</p>' +
-    '<div class="dropzones grid2">' +
-      dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
-      dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
-      dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
-    '</div>' + stageRunHtml("paso2") + '</div>' +
-
-    '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real + validación VISA</h3>' +
-    '<p class="desc">Conciliación bancaria clásica (excluye partidas "ABORTED"). Si subís el informe de retenciones VISA, además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
+    '<div class="stage"><h3><span class="tag">PASO 2</span> Reporte / Caja General → Estados de cuenta bancarios</h3>' +
+    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Usa el Diario Caja General cargado en el Paso 1. Empareja por monto dentro de la ventana de días (absorbe la compensación al día siguiente, ej. Yappy en Banco General).</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
       dzHtml("estBancoGeneral","Estado de cuenta Banco General (opcional)","Estado de cuenta de Banco General (donde compensa Yappy)") +
+    '</div>' + stageRunHtml("paso2") + '</div>' +
+
+    '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real + validación VISA</h3>' +
+    '<p class="desc">Conciliación bancaria clásica: el diario contable de cada banco contra su estado de cuenta real (los que subiste en el Paso 2). Excluye partidas "ABORTED". Si subís el informe de retenciones VISA, además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
+    '<div class="dropzones grid2">' +
+      dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
+      dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
+      dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
       dzHtml("retVisa","Informe de retenciones VISA STG (opcional)","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") +
     '</div>' + stageRunHtml("paso3") + '</div>' +
 
@@ -1108,7 +1113,7 @@ function renderResultados(){
   var totalSinConf = PASO_ORDEN.reduce(function(sum,k){ return sum + contarSinConfirmar(r[k]); }, 0);
   var pasosMeta = [
     {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
-    {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario"},
+    {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Reporte / Caja General vs. Estados de cuenta bancarios"},
     {key:"paso3", corto:"Paso 3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta + validación VISA"}
   ];
 
