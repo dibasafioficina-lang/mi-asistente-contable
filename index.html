@@ -169,6 +169,9 @@
   .sinconf-block.transito .sinconf-head{color:#3C6E9A}
   .sinconf-block.transito .finding .famt{color:#3C6E9A}
   .sinconf-block.transito .finding input[type=checkbox]{accent-color:#5B8DEF}
+  .sinconf-block.efectivo .sinconf-head{color:#4F7A52}
+  .sinconf-block.efectivo .finding .famt{color:#4F7A52}
+  .sinconf-block.efectivo .finding input[type=checkbox]{accent-color:#5FA463}
   .saldo-ctx{display:flex;align-items:flex-start;gap:10px;margin:8px 0 14px;padding:12px 14px;
     background:#EEF3FA;border:1px solid #D5E1F0;border-radius:12px}
   .saldo-ctx .ico{font-size:16px;line-height:1.4}
@@ -758,17 +761,26 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
   return hallazgos;
 }
 
-// Último día calendario del mes dominante entre un conjunto de fechas ISO (para los bordes de mes).
-function ultimoDiaMes(fechas){
+// Mes dominante (YYYY-MM) entre un conjunto de fechas ISO.
+function mesDominante(fechas){
   var ym = {};
   fechas.forEach(function(f){ if(f){ var k=f.slice(0,7); ym[k]=(ym[k]||0)+1; } });
   var best=null, max=-1;
   Object.keys(ym).forEach(function(k){ if(ym[k]>max){ max=ym[k]; best=k; } });
-  if(!best) return null;
-  var y=parseInt(best.slice(0,4),10), m=parseInt(best.slice(5,7),10);
-  var last = new Date(y, m, 0).getDate(); // día 0 del mes siguiente = último día del mes actual
-  return best + "-" + String(last).padStart(2,"0");
+  return best;
 }
+// Último día calendario del mes dominante (para los bordes de mes).
+function ultimoDiaMes(fechas){
+  var best = mesDominante(fechas); if(!best) return null;
+  var y=parseInt(best.slice(0,4),10), m=parseInt(best.slice(5,7),10);
+  return best + "-" + String(new Date(y, m, 0).getDate()).padStart(2,"0"); // día 0 del mes sig. = último del actual
+}
+// Primer día del mes dominante.
+function primerDiaMes(fechas){
+  var best = mesDominante(fechas); return best ? (best + "-01") : null;
+}
+// ¿La descripción es un ACH/depósito de Brinks? (equivale al efectivo brinks del reporte, no es diferencia).
+function esBrinks(desc){ return normTxt(desc).indexOf("BRINKS") !== -1; }
 
 // Busca en 'pool' (créditos del banco, con flag .usado) una combinación de 1, 2 o 3 movimientos
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
@@ -957,28 +969,68 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     {nombre:"STG", diario:diarioStg, estado:estStg}
   ];
   if(diarioBancoGeneral && estBancoGeneral) cfgs.push({nombre:"Banco General", diario:diarioBancoGeneral, estado:estBancoGeneral});
+  // Bordes de mes: el último día lo pendiente queda en tránsito al mes siguiente; el primer día lo del
+  // estado de cuenta suele ser una compensación que venía en tránsito del mes anterior.
+  var todasFechas = [];
+  cfgs.forEach(function(c){ (c.diario||[]).forEach(function(x){todasFechas.push(x.fecha);}); (c.estado||[]).forEach(function(x){todasFechas.push(x.fecha);}); });
+  var ultimoDia = ultimoDiaMes(todasFechas), primerDia = primerDiaMes(todasFechas);
   cfgs.forEach(function(cfg){
+    // Registrado en el diario pero no en el estado de cuenta.
     var faltanEnBanco = matchUnoAUno(
       cfg.diario.filter(function(x){return x.debito>0;}), "debito",
       cfg.estado.filter(function(x){return x.credito>0;}), "credito",
       ventanaDias, tolerancia
     );
     faltanEnBanco.forEach(function(f){
+      // Último día del mes → queda en tránsito para el mes siguiente (aún no compensa).
+      if(ultimoDia && f.fecha===ultimoDia){
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.debito, clase:"en_transito",
+          concepto:(f.descripcion||"").trim(), comprobante:"", motivo:"último día del mes",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " (\"" + (f.descripcion||"").trim() +
+                 "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el estado de cuenta).",
+          fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
+        });
+        return;
+      }
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.debito,
+        fecha:f.fecha, banco:cfg.nombre, monto:f.debito, clase:"diff",
         texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
         fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
       });
     });
+    // En el estado de cuenta pero no registrado en el diario.
     var faltanEnDiario = matchUnoAUno(
       cfg.estado.filter(function(x){return x.credito>0;}), "credito",
       cfg.diario.filter(function(x){return x.debito>0;}), "debito",
       ventanaDias, tolerancia
     );
     faltanEnDiario.forEach(function(f){
+      var desc = (f.descripcion||"").trim();
+      // Depósitos "Ach De Brinks Panama" = efectivo brinks del reporte (no es diferencia).
+      if(esBrinks(desc)){
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"efectivo",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " es un depósito en efectivo (Brinks: \"" + desc +
+                 "\") — corresponde al efectivo del reporte de cajeras, no es diferencia.",
+          fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Reporte (efectivo brinks)"
+        });
+        return;
+      }
+      // Primer día del mes → probablemente una compensación en tránsito del mes anterior.
+      if(primerDia && f.fecha===primerDia){
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"en_transito",
+          concepto:desc, comprobante:"", motivo:"compensación del mes anterior (confirmar)",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " (\"" + desc +
+                 "\") aparece el primer día del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo).",
+          fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
+        });
+        return;
+      }
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.credito,
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + (f.descripcion||"").trim(),
+        fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"diff",
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
         fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
       });
     });
@@ -1123,10 +1175,12 @@ function ensureResults(){
 // sin etiqueta de banco) o "en_transito" (cheque pendiente por cambiar). Esas dos NO bloquean el paso.
 function esSinConfirmar(item){ return item && item.clase==="sin_confirmar"; }
 function esEnTransito(item){ return item && item.clase==="en_transito"; }
-function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item); }
+function esEfectivo(item){ return item && item.clase==="efectivo"; } // depósito en efectivo (Brinks), no es diferencia
+function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || esEfectivo(item); }
 function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esNoRojo(i);}).length : 0; }
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
+function contarEfectivo(items){ return Array.isArray(items) ? items.filter(esEfectivo).length : 0; }
 
 // Cuadre limpio para el confetti: cero diferencias ROJAS en todo lo evaluado
 // (los "sin confirmar" no lo bloquean: la plata cuadra, solo falta la etiqueta de banco).
@@ -1531,8 +1585,9 @@ function renderResultados(){
     var rojas = esArray ? items.filter(function(i){return !esNoRojo(i);}) : [];
     var sinConf = esArray ? items.filter(esSinConfirmar) : [];
     var enTransito = esArray ? items.filter(esEnTransito) : [];
+    var efectivo = esArray ? items.filter(esEfectivo) : [];
     var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : bloqueado ? "bloqueado"
-      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : ''));
+      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : ''));
     var idxPaso = PASO_ORDEN.indexOf(p.key);
     html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
@@ -1564,6 +1619,12 @@ function renderResultados(){
         html += '<div class="sinconf-block"><div class="sinconf-head">Sin confirmar el banco ('+sinConf.length+')' +
           '<span class="sinconf-sub">La plata está en el sistema, pero el depósito no trae etiqueta de banco. Verifica manualmente.</span></div>';
         items.forEach(function(item, idx){ if(esSinConfirmar(item)) html += findingHtml(p, item, idx); });
+        html += '</div>';
+      }
+      if(efectivo.length){
+        html += '<div class="sinconf-block efectivo"><div class="sinconf-head">Depósitos en efectivo — Brinks ('+efectivo.length+')' +
+          '<span class="sinconf-sub">Movimientos "Ach De Brinks Panama" del estado de cuenta: son el efectivo del reporte de cajeras, no una diferencia.</span></div>';
+        items.forEach(function(item, idx){ if(esEfectivo(item)) html += findingHtml(p, item, idx); });
         html += '</div>';
       }
       // Etiqueta CUADRADO al pie del bloque cuando el paso no tiene diferencias rojas.
@@ -1603,7 +1664,7 @@ function exportarChecklist(){
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : "Diferencia";
+      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : "Diferencia";
       rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
