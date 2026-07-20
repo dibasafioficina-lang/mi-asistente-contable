@@ -808,6 +808,33 @@ function refComprobante(ref){
   return /^ME-/i.test(String(ref==null?"":ref).trim()) ? (" · Comprobante " + String(ref).trim()) : "";
 }
 
+// Concilia débitos del diario contra créditos del estado de cuenta permitiendo COMBINACIONES en ambos
+// sentidos (una línea combinada del diario puede aparecer partida en varias del estado y viceversa;
+// ej. el diario tiene 539.18 y el estado 211.82+132.05+195.31). Devuelve lo que quedó sin emparejar.
+function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia){
+  function limpio(arr, campo){
+    return arr.filter(function(x){ return x[campo]>0 && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
+      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, fila:x.fila, usado:false}; });
+  }
+  var poolDiario = limpio(diarioDeb, "debito");
+  var poolEstado = limpio(estadoCred, "credito");
+  // 1) cada débito del diario contra una combinación de créditos del estado
+  poolDiario.forEach(function(d){
+    var combo = buscarCombinacion(poolEstado, d.fecha, d.monto, ventanaDias, tolerancia);
+    if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
+  });
+  // 2) cada crédito del estado no usado contra una combinación de débitos del diario no usados
+  poolEstado.forEach(function(e){
+    if(e.usado) return;
+    var combo = buscarCombinacion(poolDiario, e.fecha, e.monto, ventanaDias, tolerancia);
+    if(combo){ combo.forEach(function(i){ poolDiario[i].usado=true; }); e.usado=true; }
+  });
+  return {
+    faltanEnBanco: poolDiario.filter(function(d){ return !d.usado; }),   // en el diario, no en el estado
+    faltanEnDiario: poolEstado.filter(function(e){ return !e.usado; })   // en el estado, no en el diario
+  };
+}
+
 // Paso 2: Cotejo de lo que Caja General registró como depositado a cada banco (el resultado del
 // Paso 1: reporte → Caja General) contra el ESTADO DE CUENTA real de cada banco. Reglas:
 //  - Empareja por monto dentro de la ventana de días; acepta que el banco parta un depósito
@@ -975,43 +1002,36 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
   cfgs.forEach(function(c){ (c.diario||[]).forEach(function(x){todasFechas.push(x.fecha);}); (c.estado||[]).forEach(function(x){todasFechas.push(x.fecha);}); });
   var ultimoDia = ultimoDiaMes(todasFechas), primerDia = primerDiaMes(todasFechas);
   cfgs.forEach(function(cfg){
+    // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
+    // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
+    var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia);
     // Registrado en el diario pero no en el estado de cuenta.
-    var faltanEnBanco = matchUnoAUno(
-      cfg.diario.filter(function(x){return x.debito>0;}), "debito",
-      cfg.estado.filter(function(x){return x.credito>0;}), "credito",
-      ventanaDias, tolerancia
-    );
-    faltanEnBanco.forEach(function(f){
+    conc.faltanEnBanco.forEach(function(f){
       // Último día del mes → queda en tránsito para el mes siguiente (aún no compensa).
       if(ultimoDia && f.fecha===ultimoDia){
         hallazgos.push({
-          fecha:f.fecha, banco:cfg.nombre, monto:f.debito, clase:"en_transito",
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
           concepto:(f.descripcion||"").trim(), comprobante:"", motivo:"último día del mes",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " (\"" + (f.descripcion||"").trim() +
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + (f.descripcion||"").trim() +
                  "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el estado de cuenta).",
           fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
         });
         return;
       }
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.debito, clase:"diff",
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.debito.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
+        fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"diff",
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
         fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
       });
     });
     // En el estado de cuenta pero no registrado en el diario.
-    var faltanEnDiario = matchUnoAUno(
-      cfg.estado.filter(function(x){return x.credito>0;}), "credito",
-      cfg.diario.filter(function(x){return x.debito>0;}), "debito",
-      ventanaDias, tolerancia
-    );
-    faltanEnDiario.forEach(function(f){
+    conc.faltanEnDiario.forEach(function(f){
       var desc = (f.descripcion||"").trim();
       // Depósitos "Ach De Brinks Panama" = efectivo brinks del reporte (no es diferencia).
       if(esBrinks(desc)){
         hallazgos.push({
-          fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"efectivo",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " es un depósito en efectivo (Brinks: \"" + desc +
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"efectivo",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " es un depósito en efectivo (Brinks: \"" + desc +
                  "\") — corresponde al efectivo del reporte de cajeras, no es diferencia.",
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Reporte (efectivo brinks)"
         });
@@ -1020,17 +1040,17 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       // Primer día del mes → probablemente una compensación en tránsito del mes anterior.
       if(primerDia && f.fecha===primerDia){
         hallazgos.push({
-          fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"en_transito",
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
           concepto:desc, comprobante:"", motivo:"compensación del mes anterior (confirmar)",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " (\"" + desc +
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
                  "\") aparece el primer día del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo).",
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
         });
         return;
       }
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.credito, clase:"diff",
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
+        fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"diff",
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
         fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
       });
     });
