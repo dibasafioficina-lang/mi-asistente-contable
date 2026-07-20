@@ -187,6 +187,13 @@
   .step-block.cuadrado .step-head .count{color:var(--ok)}
   .cuadrado-badge{margin:14px 4px 2px;padding:12px;border-radius:12px;text-align:center;
     background:var(--ok-bg);color:var(--ok);font-weight:800;font-size:15px;letter-spacing:2px}
+  .stage-opcional{border-style:dashed}
+  .opt-badge{font-family:"Mulish";font-size:10.5px;font-weight:800;letter-spacing:.3px;text-transform:uppercase;
+    background:var(--brand-light);color:var(--brand-dark);padding:3px 8px;border-radius:999px;margin-left:6px}
+  .cierre-panel{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    margin:6px 0 20px;padding:18px 22px;border-radius:16px;background:var(--ok-bg);border:1px solid #BEE3CD}
+  .cierre-panel .cierre-title{font-family:"DM Serif Display",serif;font-size:19px;color:var(--ok)}
+  .cierre-panel .cierre-sub{font-size:13.5px;color:#3F6E56;margin-top:4px;max-width:560px;line-height:1.5}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
 
@@ -224,6 +231,7 @@
 var STATE = {
   view:"menu",
   files:{
+    transitoPrevio:null,
     reporte:null, diarioCaja:null, diarioBanistmo:null, diarioStg:null, diarioBancoGeneral:null,
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null
   },
@@ -752,11 +760,14 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // cuadrado
 
       var ref = refComprobante(dep.referencia);
+      var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
+      var concepto = String(dep.descripcion||"").trim();
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
       if(ultimoDia && dep.fecha===ultimoDia){
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
-          texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " (\"" + String(dep.descripcion||"").trim() +
+          concepto:concepto, comprobante:refRaw, motivo:"último día del mes",
+          texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " (\"" + concepto +
                  "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el banco)." + ref,
           fuente: "Diario Caja General / Estado de cuenta " + banco
         });
@@ -781,6 +792,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         } else {
           hallazgos.push({
             fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+            concepto:concepto, comprobante:refRaw, motivo:"cheque pendiente por cambiar",
             texto: "Cheque de B/ " + objetivo.toFixed(2) + " (" + dep.fecha + ") registrado como depósito a " + banco +
                    " no aparece en ningún estado de cuenta — probablemente en tránsito (pendiente por cambiar)." + ref,
             fuente: "Diario Caja General / Estados de cuenta"
@@ -894,8 +906,12 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
 // Cada paso puede correrse solo (si tiene sus propios archivos) o como parte de la
 // conciliación completa. r[pasoKey] === undefined -> nunca se ejecutó en esta sesión;
 // === null -> se intentó pero faltan archivos de ese paso (se omite); array -> resultado real.
+// PASO_ORDEN gobierna la cadena condicionada (cada paso exige que cuadre el anterior) y el "todo
+// cuadrado". El Paso 0 NO está acá: es una validación opcional del arranque de mes que no bloquea.
 var PASO_ORDEN = ["paso1","paso2","paso3"];
 var PASO_REQS = {
+  // Paso 0 (opcional): valida que las partidas en tránsito del mes anterior compensaron este mes.
+  paso0: ["transitoPrevio","estBanistmo","estStg"],
   paso1: ["reporte","diarioCaja"],
   // Paso 2: coteja lo que Caja General registró como depositado a cada banco contra el estado de cuenta real.
   paso2: ["diarioCaja","estBanistmo","estStg"],
@@ -906,6 +922,7 @@ var PASO_REQS = {
 // El Paso 3 incluye la validación VISA: si se sube el informe de retenciones, además de conciliar
 // diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
+  paso0: ["estBancoGeneral"],
   // retVisa se pide también en el Paso 2 para poder cuadrar el neto VISA (bruto − retención) contra el banco.
   paso2: ["estBancoGeneral","retVisa"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
@@ -923,6 +940,14 @@ function computePasoResult(pasoKey, raws, opts){
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
   // mostrarlo como contexto de partidas en tránsito entre meses.
   if(raws.diarioCaja){ try{ STATE.saldoCajaGeneral = parseSaldoCajaGeneral(raws.diarioCaja); }catch(e){} }
+  if(pasoKey==="paso0"){
+    if(!raws.transitoPrevio || !raws.estBanistmo || !raws.estStg) return null;
+    var trPrev = parseTransitoPrevio(raws.transitoPrevio);
+    var eB = parseEstadoCuenta(raws.estBanistmo,"banistmo");
+    var eS = parseEstadoCuenta(raws.estStg,"stg");
+    var eBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
+    return paso0(trPrev, eB, eS, eBG, opts.ventana, opts.tol);
+  }
   if(pasoKey==="paso1"){
     if(!raws.reporte || !raws.diarioCaja) return null;
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), opts.tol);
@@ -976,7 +1001,7 @@ function readMany(keys, cb){
 }
 
 function ensureResults(){
-  if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined};
+  if(!STATE.results) STATE.results = {paso0:undefined, paso1:undefined, paso2:undefined, paso3:undefined};
 }
 
 // Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar" (plata presente pero
@@ -1043,7 +1068,7 @@ function ejecutarPaso(pasoKey){
       var cuadro = Array.isArray(result) && contarRojas(result)===0;
       refrescarModulo(cuadro ? (nombreCortoPaso(pasoKey)+" cuadrado.") : "Paso ejecutado.");
       if(cuadro){
-        if(tieneCuadreLimpio(PASO_ORDEN, STATE.results) && PASO_ORDEN.every(pasoCuadrado)) celebrarTodo();
+        if(PASO_ORDEN.indexOf(pasoKey)>=0 && tieneCuadreLimpio(PASO_ORDEN, STATE.results) && PASO_ORDEN.every(pasoCuadrado)) celebrarTodo();
         else celebrarPaso(pasoKey);
       }
     }catch(err){
@@ -1235,6 +1260,12 @@ function renderModulo1(){
     headerHtml() +
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
 
+    '<div class="stage stage-opcional"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge">opcional</span></h3>' +
+    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). No bloquea el resto.</p>' +
+    '<div class="dropzones">' +
+      dzHtml("transitoPrevio","Resumen en tránsito del mes anterior","en_transito_[MES].xlsx (Fecha, Banco, Monto, Concepto, Comprobante) — descargado del cierre del mes pasado") +
+    '</div>' + stageRunHtml("paso0") + '</div>' +
+
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
     '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
     '<div class="dropzones grid2">' +
@@ -1329,13 +1360,19 @@ function saldoCtxHtml(s, pasoKey){
 function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
-  var totalRojas = PASO_ORDEN.reduce(function(sum,k){ return sum + contarRojas(r[k]); }, 0);
-  var totalSinConf = PASO_ORDEN.reduce(function(sum,k){ return sum + contarSinConfirmar(r[k]); }, 0);
-  var pasosMeta = [
+  var pasosMeta = [];
+  // Paso 0 se muestra solo si hay archivo de tránsito previo o ya se ejecutó.
+  if(STATE.files.transitoPrevio || (r && r.paso0!==undefined)){
+    pasosMeta.push({key:"paso0", corto:"Paso 0", titulo:"Paso 0 — Partidas en tránsito del mes anterior → bancos de este mes"});
+  }
+  pasosMeta.push(
     {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
     {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Reporte / Caja General vs. Estados de cuenta bancarios"},
     {key:"paso3", corto:"Paso 3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta + validación VISA"}
-  ];
+  );
+  var keysRender = pasosMeta.map(function(p){return p.key;});
+  var totalRojas = keysRender.reduce(function(sum,k){ return sum + contarRojas(r[k]); }, 0);
+  var totalSinConf = keysRender.reduce(function(sum,k){ return sum + contarSinConfirmar(r[k]); }, 0);
 
   function findingHtml(p, item, idx){
     var ckKey = p.key+"_"+idx;
@@ -1349,7 +1386,17 @@ function renderResultados(){
 
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
-  var totalTransito = PASO_ORDEN.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
+  var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
+
+  // Cuando TODO el módulo (Pasos 1-3) cuadra, ofrecer el resumen de partidas en tránsito para el próximo mes.
+  var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
+  if(todoCuadrado){
+    var nT = PASO_ORDEN.reduce(function(s,k){ return s + contarEnTransito(r[k]); }, 0);
+    html += '<div class="cierre-panel"><div class="cierre-txt">' +
+      '<div class="cierre-title">🎉 Módulo cuadrado</div>' +
+      '<div class="cierre-sub">'+nT+' partida(s) quedaron en tránsito para el próximo mes. Descarga el resumen y cárgalo en el Paso 0 del mes siguiente para validar que compensen.</div>' +
+      '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
+  }
   html += '<div class="summary-bar">' +
     '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
     (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '') +
@@ -1419,12 +1466,14 @@ function renderResultados(){
     });
   });
   document.getElementById("exportBtn").onclick = exportarChecklist;
+  var btnT = document.getElementById("btnTransito");
+  if(btnT) btnT.onclick = exportarEnTransito;
 }
 
 function exportarChecklist(){
   var r = STATE.results;
   var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
-  var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"]];
+  var pasosMeta = [["Paso 0","paso0"],["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"]];
   pasosMeta.forEach(function(p){
     var label = p[0], key = p[1], items = r[key];
     if(items===undefined){
@@ -1448,6 +1497,86 @@ function exportarChecklist(){
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
   XLSX.writeFile(wb, "checklist_conciliacion_caja_general.xlsx");
+}
+
+/* ---------------- Resumen de partidas en tránsito (para el Paso 0 del próximo mes) ---------------- */
+// Junta todas las partidas "en tránsito" de los resultados (principalmente del Paso 2).
+function recolectarEnTransito(){
+  var out = [];
+  PASO_ORDEN.forEach(function(k){
+    var items = STATE.results && STATE.results[k];
+    if(Array.isArray(items)) items.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
+  });
+  return out;
+}
+function exportarEnTransito(){
+  var items = recolectarEnTransito();
+  var rows = [["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]];
+  items.forEach(function(it){
+    rows.push([it.fecha, it.banco, it.monto, it.concepto||"", it.comprobante||"", it.motivo||"en tránsito"]);
+  });
+  var ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:12},{wch:14},{wch:12},{wch:44},{wch:20},{wch:26}];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "En transito");
+  var mes = (STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.fechaFinal) ? STATE.saldoCajaGeneral.fechaFinal.slice(0,7) : "mes";
+  XLSX.writeFile(wb, "en_transito_" + mes + ".xlsx");
+}
+// Lee un resumen de partidas en tránsito exportado (para el Paso 0 del mes siguiente).
+function parseTransitoPrevio(rows){
+  var hIdx = findHeaderRow(rows, ["Fecha","Banco","Monto"]);
+  if(hIdx===-1) throw new Error("No se encontró el encabezado (Fecha, Banco, Monto) en el resumen en tránsito.");
+  var h = rows[hIdx];
+  var cF=colIdx(h,"Fecha"), cB=colIdx(h,"Banco"), cM=colIdx(h,"Monto"), cC=colIdx(h,"Concepto"), cR=colIdx(h,"Comprobante");
+  var out = [];
+  for(var r=hIdx+1;r<rows.length;r++){
+    var row = rows[r]; if(!row) continue;
+    var iso = toISODate(cF>=0?row[cF]:null, false);
+    var monto = money(cM>=0?row[cM]:0);
+    if(!iso || !monto) continue;
+    out.push({ fecha:iso, banco: cB>=0?String(row[cB]||"").trim():"", monto:monto,
+               concepto: cC>=0?String(row[cC]||"").trim():"", comprobante: cR>=0?String(row[cR]||"").trim():"" });
+  }
+  return out;
+}
+
+// Paso 0: valida que las partidas en tránsito del mes anterior compensaron en los bancos de este mes.
+function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
+  var estados = { "Banistmo": estBanistmo, "STG": estStg };
+  if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+  var bancoCred = {};
+  Object.keys(estados).forEach(function(b){
+    bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
+      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
+  });
+  // ventana amplia: la compensación cae a inicio del mes siguiente (puede tardar varios días).
+  var vent = Math.max(ventanaDias, 15);
+  var hallazgos = [];
+  transitoPrevio.forEach(function(t){
+    var pool = bancoCred[t.banco];
+    var combo = pool ? buscarCombinacion(pool, t.fecha, t.monto, vent, tolerancia) : null;
+    // si no está en su banco, buscar en cualquiera (por si se depositó en otro)
+    var otro = null;
+    if(!combo){
+      Object.keys(bancoCred).forEach(function(b2){
+        if(otro || (pool && b2===t.banco)) return;
+        var c = buscarCombinacion(bancoCred[b2], t.fecha, t.monto, vent, tolerancia);
+        if(c){ c.forEach(function(i){ bancoCred[b2][i].usado=true; }); otro=b2; }
+      });
+    }
+    if(combo){ combo.forEach(function(i){ pool[i].usado=true; }); return; } // compensó → ok
+    if(otro){
+      hallazgos.push({ fecha:t.fecha, banco:t.banco, monto:t.monto, clase:"diff",
+        texto:"Partida en tránsito del mes anterior (B/ "+t.monto.toFixed(2)+", "+t.fecha+", asignada a "+t.banco+") compensó en "+otro+" y no en "+t.banco+". Verifica el banco."+(t.comprobante?" · Comprobante "+t.comprobante:""),
+        fuente:"Resumen en tránsito mes anterior / Estados de cuenta" });
+    } else {
+      hallazgos.push({ fecha:t.fecha, banco:t.banco, monto:t.monto, clase:"en_transito",
+        concepto:t.concepto, comprobante:t.comprobante, motivo:"aún pendiente de compensar",
+        texto:"Partida en tránsito del mes anterior (B/ "+t.monto.toFixed(2)+", "+t.fecha+", "+t.banco+", \""+(t.concepto||"")+"\") aún NO compensó en los estados de cuenta de este mes."+(t.comprobante?" · Comprobante "+t.comprobante:""),
+        fuente:"Resumen en tránsito mes anterior / Estados de cuenta" });
+    }
+  });
+  return hallazgos;
 }
 
 render();
