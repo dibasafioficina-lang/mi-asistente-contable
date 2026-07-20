@@ -166,6 +166,9 @@
   .sinconf-head .sinconf-sub{display:block;font-size:12px;font-weight:600;color:var(--slate);margin-top:3px}
   .sinconf-block .finding .famt{color:#9A6E1E}
   .sinconf-block .finding input[type=checkbox]{accent-color:#C79A3A}
+  .sinconf-block.transito .sinconf-head{color:#3C6E9A}
+  .sinconf-block.transito .finding .famt{color:#3C6E9A}
+  .sinconf-block.transito .finding input[type=checkbox]{accent-color:#5B8DEF}
   .saldo-ctx{display:flex;align-items:flex-start;gap:10px;margin:8px 0 14px;padding:12px 14px;
     background:#EEF3FA;border:1px solid #D5E1F0;border-radius:12px}
   .saldo-ctx .ico{font-size:16px;line-height:1.4}
@@ -673,32 +676,100 @@ function paso1(reporte, diarioCaja, tolerancia){
   return hallazgos;
 }
 
+// Busca en 'pool' (créditos del banco, con flag .usado) una combinación de 1, 2 o 3 movimientos
+// no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
+// El banco a veces refleja un depósito combinado de Caja General partido en varias líneas
+// (ej. 429.74 aparece como 314.55 + 115.19). Devuelve los índices usados o null.
+function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia){
+  if(Math.abs(objetivo) <= tolerancia) return null;
+  var idxs = [];
+  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && daysBetween(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
+  var a, b, c;
+  for(a=0;a<idxs.length;a++){ if(Math.abs(pool[idxs[a]].monto - objetivo) <= tolerancia) return [idxs[a]]; }
+  for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++){
+    if(Math.abs(pool[idxs[a]].monto + pool[idxs[b]].monto - objetivo) <= tolerancia) return [idxs[a],idxs[b]];
+  }
+  for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++) for(c=b+1;c<idxs.length;c++){
+    if(Math.abs(pool[idxs[a]].monto + pool[idxs[b]].monto + pool[idxs[c]].monto - objetivo) <= tolerancia) return [idxs[a],idxs[b],idxs[c]];
+  }
+  return null;
+}
+function esChequeDesc(desc){
+  var n = normTxt(desc);
+  return /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
+}
+function refComprobante(ref){
+  return /^ME-/i.test(String(ref==null?"":ref).trim()) ? (" · Comprobante " + String(ref).trim()) : "";
+}
+
 // Paso 2: Cotejo de lo que Caja General registró como depositado a cada banco (el resultado del
-// Paso 1: reporte → Caja General) contra el ESTADO DE CUENTA real de cada banco. Verifica que la
-// plata cobrada realmente llegó al banco. Empareja 1:1 por monto dentro de la ventana de días,
-// lo que absorbe la compensación T+1 (ej. Yappy compensa al día siguiente en Banco General).
-// estBancoGeneral es opcional: si no se sube, ese banco no se coteja.
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
+// Paso 1: reporte → Caja General) contra el ESTADO DE CUENTA real de cada banco. Reglas:
+//  - Empareja por monto dentro de la ventana de días; acepta que el banco parta un depósito
+//    combinado en varias líneas (busca combinaciones que sumen el total).
+//  - VISA compensa NETO en el banco: si hay informe de retenciones, para STG también se intenta
+//    emparejar el depósito menos la retención del día (bruto − retención = neto).
+//  - Un cheque que no aparece en su banco se busca en los otros bancos; si aparece en otro, se marca
+//    como banco mal asignado; si no aparece en ninguno, queda "en tránsito" (pendiente por cambiar).
+// estBancoGeneral y retVisa son opcionales.
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, ventanaDias, tolerancia){
   var hallazgos = [];
-  var cfgs = [
-    {nombre:"Banistmo", estado:estBanistmo},
-    {nombre:"STG", estado:estStg}
-  ];
-  if(estBancoGeneral) cfgs.push({nombre:"Banco General", estado:estBancoGeneral});
-  cfgs.forEach(function(cfg){
-    // Depósitos que Caja General dice que fueron a este banco (créditos clasificados por texto de la descripción).
-    var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===cfg.nombre && x.credito>0; });
-    // Entradas de dinero en el estado de cuenta del banco (créditos = dinero que entró).
-    var bancoIn = cfg.estado.filter(function(x){ return x.credito>0; });
-    // Depósitos de Caja General que no aparecen en el estado de cuenta (dentro de la ventana de días).
-    var faltan = matchUnoAUno(cajaDep, "credito", bancoIn, "credito", ventanaDias, tolerancia);
-    faltan.forEach(function(f){
-      var ref = /^ME-/i.test(String(f.referencia==null?"":f.referencia).trim()) ? (" · Comprobante " + String(f.referencia).trim()) : "";
+  var estados = { "Banistmo": estBanistmo, "STG": estStg };
+  if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+
+  // Créditos del banco por banco, con flag .usado (excluye ABORTED).
+  var bancoCred = {};
+  Object.keys(estados).forEach(function(b){
+    bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
+      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
+  });
+
+  Object.keys(estados).forEach(function(banco){
+    var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
+    cajaDep.forEach(function(dep){
+      var pool = bancoCred[banco];
+      var objetivo = dep.credito;
+      // 1) match directo (1:1 o combinación) dentro de la ventana
+      var combo = buscarCombinacion(pool, dep.fecha, objetivo, ventanaDias, tolerancia);
+      // 2) STG con retenciones VISA: el banco muestra el neto → probar bruto − retención del día
+      if(!combo && banco==="STG" && retVisaPorDia && retVisaPorDia[dep.fecha]!=null){
+        combo = buscarCombinacion(pool, dep.fecha, Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100, ventanaDias, tolerancia);
+      }
+      if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // cuadrado
+
+      var ref = refComprobante(dep.referencia);
+      // 3) cheque no encontrado en su banco → buscar en los otros bancos
+      if(esChequeDesc(dep.descripcion)){
+        var otro = null, comboOtro = null;
+        Object.keys(bancoCred).forEach(function(b2){
+          if(b2===banco || otro) return;
+          var c = buscarCombinacion(bancoCred[b2], dep.fecha, objetivo, ventanaDias, tolerancia);
+          if(c){ comboOtro = {banco:b2, idxs:c}; otro = b2; }
+        });
+        if(otro){
+          comboOtro.idxs.forEach(function(i){ bancoCred[otro][i].usado = true; });
+          hallazgos.push({
+            fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
+            texto: "Cheque de B/ " + objetivo.toFixed(2) + " (" + dep.fecha + ") que Caja General asignó a " + banco +
+                   " aparece depositado en " + otro + ". Verifica el banco de destino." + ref,
+            fuente: "Diario Caja General / Estado de cuenta " + otro
+          });
+        } else {
+          hallazgos.push({
+            fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+            texto: "Cheque de B/ " + objetivo.toFixed(2) + " (" + dep.fecha + ") registrado como depósito a " + banco +
+                   " no aparece en ningún estado de cuenta — probablemente en tránsito (pendiente por cambiar)." + ref,
+            fuente: "Diario Caja General / Estados de cuenta"
+          });
+        }
+        return;
+      }
+
+      // 4) resto: diferencia real
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.credito,
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.credito.toFixed(2) + " que el reporte/Caja General registró como depósito a " +
-               cfg.nombre + " (\"" + String(f.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + cfg.nombre + "." + ref,
-        fuente: "Diario Caja General / Estado de cuenta " + cfg.nombre
+        fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
+        texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " que el reporte/Caja General registró como depósito a " +
+               banco + " (\"" + String(dep.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + banco + "." + ref,
+        fuente: "Diario Caja General / Estado de cuenta " + banco
       });
     });
   });
@@ -810,7 +881,8 @@ var PASO_REQS = {
 // El Paso 3 incluye la validación VISA: si se sube el informe de retenciones, además de conciliar
 // diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
-  paso2: ["estBancoGeneral"],
+  // retVisa se pide también en el Paso 2 para poder cuadrar el neto VISA (bruto − retención) contra el banco.
+  paso2: ["estBancoGeneral","retVisa"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja"]
 };
@@ -836,7 +908,13 @@ function computePasoResult(pasoKey, raws, opts){
     var estBanistmo = parseEstadoCuenta(raws.estBanistmo,"banistmo");
     var estStg = parseEstadoCuenta(raws.estStg,"stg");
     var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, opts.ventana, opts.tol);
+    // Retención VISA por día (magnitud positiva) para cuadrar el neto en STG: bruto − retención = neto del banco.
+    var retVisaDia = null;
+    if(raws.retVisa){
+      retVisaDia = {};
+      parseRetencionesVisa(raws.retVisa).forEach(function(d){ retVisaDia[d.fecha] = Math.abs(d.retenciones); });
+    }
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, opts.ventana, opts.tol);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -876,12 +954,14 @@ function ensureResults(){
   if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined};
 }
 
-// Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar"
-// (plata presente en el sistema pero sin etiqueta de banco). Los pasos 2/3/4 no usan
-// clase, así que todos sus items cuentan como rojos.
+// Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar" (plata presente pero
+// sin etiqueta de banco) o "en_transito" (cheque pendiente por cambiar). Esas dos NO bloquean el paso.
 function esSinConfirmar(item){ return item && item.clase==="sin_confirmar"; }
-function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esSinConfirmar(i);}).length : 0; }
+function esEnTransito(item){ return item && item.clase==="en_transito"; }
+function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item); }
+function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esNoRojo(i);}).length : 0; }
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
+function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
 
 // Cuadre limpio para el confetti: cero diferencias ROJAS en todo lo evaluado
 // (los "sin confirmar" no lo bloquean: la plata cuadra, solo falta la etiqueta de banco).
@@ -1138,20 +1218,20 @@ function renderModulo1(){
     '</div>' + stageRunHtml("paso1") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 2</span> Reporte / Caja General → Estados de cuenta bancarios</h3>' +
-    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Usa el Diario Caja General cargado en el Paso 1. Empareja por monto dentro de la ventana de días (absorbe la compensación al día siguiente, ej. Yappy en Banco General).</p>' +
+    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Empareja por monto dentro de la ventana de días (acepta depósitos partidos en varias líneas y la compensación al día siguiente, ej. Yappy). Un cheque que no aparezca se busca en los otros bancos o se marca en tránsito. Con el informe VISA, cuadra el neto (bruto − retenciones) contra el banco. Usa el Diario Caja General del Paso 1.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
       dzHtml("estBancoGeneral","Estado de cuenta Banco General (opcional)","Estado de cuenta de Banco General (donde compensa Yappy)") +
+      dzHtml("retVisa","Informe de retenciones VISA STG (opcional)","retenciones_de_visa_....xlsx — para cuadrar el neto VISA en el banco") +
     '</div>' + stageRunHtml("paso2") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real + validación VISA</h3>' +
-    '<p class="desc">Conciliación bancaria clásica: el diario contable de cada banco contra su estado de cuenta real (los que subiste en el Paso 2). Excluye partidas "ABORTED". Si subís el informe de retenciones VISA, además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
+    '<p class="desc">Conciliación bancaria clásica: el diario contable de cada banco contra su estado de cuenta real (los que subiste en el Paso 2). Excluye partidas "ABORTED". Si subiste el informe de retenciones VISA (Paso 2), además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
       dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
       dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
-      dzHtml("retVisa","Informe de retenciones VISA STG (opcional)","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") +
     '</div>' + stageRunHtml("paso3") + '</div>' +
 
     '<div class="opts">' +
@@ -1241,9 +1321,11 @@ function renderResultados(){
 
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
+  var totalTransito = PASO_ORDEN.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
   html += '<div class="summary-bar">' +
     '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
-    (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '');
+    (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '') +
+    (totalTransito>0 ? '<span class="chip warn">'+totalTransito+' en tránsito</span>' : '');
   pasosMeta.forEach(function(p){
     var items = r[p.key];
     var chipTxt = items===undefined ? "—" : items===null ? "omitido" : String(contarRojas(items));
@@ -1256,10 +1338,11 @@ function renderResultados(){
     var esArray = Array.isArray(items);
     var bloqueado = items==="bloqueado";
     var cuadrado = esArray && contarRojas(items)===0;
-    var rojas = esArray ? items.filter(function(i){return !esSinConfirmar(i);}) : [];
+    var rojas = esArray ? items.filter(function(i){return !esNoRojo(i);}) : [];
     var sinConf = esArray ? items.filter(esSinConfirmar) : [];
+    var enTransito = esArray ? items.filter(esEnTransito) : [];
     var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : bloqueado ? "bloqueado"
-      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : ''));
+      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : ''));
     var idxPaso = PASO_ORDEN.indexOf(p.key);
     html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
@@ -1279,7 +1362,13 @@ function renderResultados(){
       if(rojas.length===0){
         html += '<div class="empty-ok">Sin diferencias detectadas en este paso.</div>';
       } else {
-        items.forEach(function(item, idx){ if(!esSinConfirmar(item)) html += findingHtml(p, item, idx); });
+        items.forEach(function(item, idx){ if(!esNoRojo(item)) html += findingHtml(p, item, idx); });
+      }
+      if(enTransito.length){
+        html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito — pendiente por cambiar ('+enTransito.length+')' +
+          '<span class="sinconf-sub">Cheques registrados como depósito que aún no aparecen en ningún banco. No es diferencia: probablemente están pendientes de compensar.</span></div>';
+        items.forEach(function(item, idx){ if(esEnTransito(item)) html += findingHtml(p, item, idx); });
+        html += '</div>';
       }
       if(sinConf.length){
         html += '<div class="sinconf-block"><div class="sinconf-head">Sin confirmar el banco ('+sinConf.length+')' +
@@ -1322,7 +1411,7 @@ function exportarChecklist(){
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : "Diferencia";
+      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : "Diferencia";
       rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
