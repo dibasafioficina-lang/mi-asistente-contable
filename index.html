@@ -166,6 +166,11 @@
   .sinconf-head .sinconf-sub{display:block;font-size:12px;font-weight:600;color:var(--slate);margin-top:3px}
   .sinconf-block .finding .famt{color:#9A6E1E}
   .sinconf-block .finding input[type=checkbox]{accent-color:#C79A3A}
+  .saldo-ctx{display:flex;align-items:flex-start;gap:10px;margin:8px 0 14px;padding:12px 14px;
+    background:#EEF3FA;border:1px solid #D5E1F0;border-radius:12px}
+  .saldo-ctx .ico{font-size:16px;line-height:1.4}
+  .saldo-ctx .saldo-line{font-size:13.5px;font-weight:700;color:#3C5670}
+  .saldo-ctx .saldo-sub{font-size:12.5px;color:#5B6472;margin-top:3px;line-height:1.5}
 
   .btn-export{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-family:"Mulish";font-size:13.5px;font-weight:800;
     padding:10px 20px;border-radius:999px;cursor:pointer;box-shadow:0 6px 16px rgba(158,104,126,.08)}
@@ -195,6 +200,7 @@ var STATE = {
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
+  saldoCajaGeneral:null,
   checks:{}
 };
 
@@ -418,6 +424,29 @@ function parseDiario(rows, accountFilter){
     out.push({fecha:iso, cuenta:lastAccount, referencia: cRef>=0?row[cRef]:"", descripcion:desc, debito:deb, credito:cred, fila:r+1});
   }
   return out;
+}
+
+// Saldo del diario de Caja General: Balance Inicial (arrastre del mes anterior, dinero en tránsito),
+// movimiento del mes y Balance Final. Sirve para contemplar partidas en tránsito que compensan
+// entre meses. Devuelve null si el archivo no trae esas filas.
+function parseSaldoCajaGeneral(rows){
+  function valorFila(row){ // último valor no vacío de la fila (la etiqueta va en la col 0, el monto al final)
+    for(var i=row.length-1;i>=0;i--){
+      var c=row[i];
+      if(c!==null && c!==undefined && String(c).trim()!=="") return money(c);
+    }
+    return null;
+  }
+  var res = {inicial:null, movimiento:null, final:null, fechaInicial:null, fechaFinal:null};
+  for(var r=0;r<rows.length;r++){
+    var row = rows[r]; if(!row) continue;
+    var etq = normTxt(row[0]); if(!etq) continue;
+    var fecha = (String(row[0]).match(/(\d{4}-\d{2}-\d{2})/)||[])[1] || null;
+    if(etq.indexOf("BALANCE INICIAL")!==-1){ res.inicial = valorFila(row); res.fechaInicial = fecha; }
+    else if(etq.indexOf("MOVIMIENTO MOSTRADO")!==-1){ res.movimiento = valorFila(row); }
+    else if(etq.indexOf("BALANCE FINAL")!==-1){ res.final = valorFila(row); res.fechaFinal = fecha; }
+  }
+  return (res.inicial!==null || res.final!==null) ? res : null;
 }
 
 // 3) Estado de cuenta bancario (Banistmo, STG o Banco General)
@@ -750,7 +779,8 @@ var PASO_REQS = {
 // además de conciliar diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
   paso2: ["diarioBancoGeneral"],
-  paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa"]
+  // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
+  paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja"]
 };
 
 function pasoListo(pasoKey){
@@ -761,6 +791,9 @@ function archivosDePaso(pasoKey){
 }
 
 function computePasoResult(pasoKey, raws, opts){
+  // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
+  // mostrarlo como contexto de partidas en tránsito entre meses.
+  if(raws.diarioCaja){ try{ STATE.saldoCajaGeneral = parseSaldoCajaGeneral(raws.diarioCaja); }catch(e){} }
   if(pasoKey==="paso1"){
     if(!raws.reporte || !raws.diarioCaja) return null;
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), opts.tol);
@@ -1056,6 +1089,18 @@ function renderModulo1(){
   if(STATE.results) renderResultados();
 }
 
+function saldoCtxHtml(s){
+  function bal(v){ return (v<0?"-":"")+"B/ "+Math.abs(v).toFixed(2); }
+  var partes = [];
+  if(s.inicial!==null) partes.push('saldo inicial'+(s.fechaInicial?" ("+s.fechaInicial+")":"")+': <b>'+bal(s.inicial)+'</b>');
+  if(s.movimiento!==null) partes.push('movimiento del mes: <b>'+bal(s.movimiento)+'</b>');
+  if(s.final!==null) partes.push('saldo final'+(s.fechaFinal?" ("+s.fechaFinal+")":"")+': <b>'+bal(s.final)+'</b>');
+  return '<div class="saldo-ctx"><span class="ico">🔄</span><div class="txt">' +
+    '<div class="saldo-line">Caja General — ' + partes.join(' · ') + '</div>' +
+    '<div class="saldo-sub">Ese saldo es dinero en tránsito arrastrado del mes anterior. Algunas partidas sin emparejar de este mes pueden corresponder a operaciones anteriores que compensan ahora — revísalas contra el saldo antes de darlas por diferencia.</div>' +
+    '</div></div>';
+}
+
 function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
@@ -1097,6 +1142,10 @@ function renderResultados(){
       : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : ''));
     html += '<div class="step-block"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
+    // Contexto del saldo inicial de Caja General (solo Paso 3): dinero en tránsito arrastrado del mes anterior.
+    if(p.key==="paso3" && items!==undefined && items!==null && STATE.saldoCajaGeneral){
+      html += saldoCtxHtml(STATE.saldoCajaGeneral);
+    }
     if(items===undefined){
       html += '<div class="empty-skip">Aún no se ejecutó este paso — usa "Ejecutar solo este paso" o el botón global.</div>';
     } else if(items===null){
