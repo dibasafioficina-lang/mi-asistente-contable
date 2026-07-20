@@ -739,17 +739,18 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
 // Cada paso puede correrse solo (si tiene sus propios archivos) o como parte de la
 // conciliación completa. r[pasoKey] === undefined -> nunca se ejecutó en esta sesión;
 // === null -> se intentó pero faltan archivos de ese paso (se omite); array -> resultado real.
-var PASO_ORDEN = ["paso1","paso2","paso3","paso4"];
+var PASO_ORDEN = ["paso1","paso2","paso3"];
 var PASO_REQS = {
   paso1: ["reporte","diarioCaja"],
   paso2: ["diarioCaja","diarioBanistmo","diarioStg"],
-  paso3: ["diarioBanistmo","diarioStg","estBanistmo","estStg"],
-  paso4: ["retVisa","estStg"]
+  paso3: ["diarioBanistmo","diarioStg","estBanistmo","estStg"]
 };
 // Archivos opcionales por paso: se leen si están subidos, pero no hacen falta para habilitar el paso.
+// El Paso 3 incluye la validación VISA (antes Paso 4): si se sube el informe de retenciones,
+// además de conciliar diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
   paso2: ["diarioBancoGeneral"],
-  paso3: ["diarioBancoGeneral","estBancoGeneral"]
+  paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa"]
 };
 
 function pasoListo(pasoKey){
@@ -780,13 +781,14 @@ function computePasoResult(pasoKey, raws, opts){
     var estStg = parseEstadoCuenta(raws.estStg,"stg");
     var diarioBG = raws.diarioBancoGeneral ? parseDiario(raws.diarioBancoGeneral, null) : null;
     var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral, "bancogeneral") : null;
-    return paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol);
-  }
-  if(pasoKey==="paso4"){
-    if(!raws.retVisa || !raws.estStg) return null;
-    var retVisa = parseRetencionesVisa(raws.retVisa);
-    var estStgVisa = parseEstadoCuenta(raws.estStg,"stg");
-    return paso4(retVisa, estStgVisa, opts.ventana, opts.tol);
+    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol);
+    // Validación VISA (antes Paso 4): opcional, si se subió el informe de retenciones.
+    // Se valida contra el estado de cuenta STG (donde compensa VISA).
+    if(raws.retVisa){
+      var retVisa = parseRetencionesVisa(raws.retVisa);
+      hallazgos = hallazgos.concat(paso4(retVisa, estStg, opts.ventana, opts.tol));
+    }
+    return hallazgos;
   }
   return null;
 }
@@ -806,7 +808,7 @@ function readMany(keys, cb){
 }
 
 function ensureResults(){
-  if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined, paso4:undefined};
+  if(!STATE.results) STATE.results = {paso1:undefined, paso2:undefined, paso3:undefined};
 }
 
 // Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar"
@@ -993,25 +995,21 @@ function renderModulo1(){
       dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
     '</div>' + stageRunHtml("paso2") + '</div>' +
 
-    '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real</h3>' +
-    '<p class="desc">Conciliación bancaria clásica: excluye partidas "ABORTED" automáticamente.</p>' +
+    '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real + validación VISA</h3>' +
+    '<p class="desc">Conciliación bancaria clásica (excluye partidas "ABORTED"). Si subís el informe de retenciones VISA, además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
       dzHtml("estBancoGeneral","Estado de cuenta Banco General (opcional)","Estado de cuenta de Banco General (donde compensa Yappy)") +
+      dzHtml("retVisa","Informe de retenciones VISA STG (opcional)","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") +
     '</div>' + stageRunHtml("paso3") + '</div>' +
-
-    '<div class="stage"><h3><span class="tag">PASO 4</span> Validación VISA STG</h3>' +
-    '<p class="desc">Venta bruta − retención − comisión − ITBMS = depósito neto esperado en el banco.</p>' +
-    '<div class="dropzones">' + dzHtml("retVisa","Informe de retenciones VISA STG","retenciones_de_visa_....xlsx (Monto Bruto, Ret. Imp, Comisión, ITBMS)") + '</div>' +
-    stageRunHtml("paso4") + '</div>' +
 
     '<div class="opts">' +
       '<label>Ventana de días para emparejar <input type="number" id="ventana" value="'+STATE.options.ventanaDias+'" min="0"></label>' +
       '<label>Tolerancia B/ <input type="number" id="tolerancia" value="'+STATE.options.tolerancia+'" step="0.01" min="0"></label>' +
     '</div>' +
 
-    '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar los 4 pasos</button>' +
+    '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar los 3 pasos</button>' +
     '<span class="run-note" id="runNote">Sube los archivos de al menos un paso para habilitar.</span></div>' +
 
     '<div id="resultsArea"></div>';
@@ -1066,8 +1064,7 @@ function renderResultados(){
   var pasosMeta = [
     {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
     {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Diario Caja General vs. Diario bancario"},
-    {key:"paso3", corto:"Paso 3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta"},
-    {key:"paso4", corto:"Paso 4", titulo:"Paso 4 — Validación VISA STG"}
+    {key:"paso3", corto:"Paso 3", titulo:"Paso 3 — Diario bancario vs. Estado de cuenta + validación VISA"}
   ];
 
   function findingHtml(p, item, idx){
@@ -1136,7 +1133,7 @@ function renderResultados(){
 function exportarChecklist(){
   var r = STATE.results;
   var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
-  var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"],["Paso 4","paso4"]];
+  var pasosMeta = [["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"]];
   pasosMeta.forEach(function(p){
     var label = p[0], key = p[1], items = r[key];
     if(items===undefined){
