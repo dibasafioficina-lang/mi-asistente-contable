@@ -189,8 +189,8 @@
 var STATE = {
   view:"menu",
   files:{
-    reporte:null, diarioCaja:null, diarioBanistmo:null, diarioStg:null,
-    estBanistmo:null, estStg:null, retVisa:null
+    reporte:null, diarioCaja:null, diarioBanistmo:null, diarioStg:null, diarioBancoGeneral:null,
+    estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null
   },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
@@ -420,15 +420,24 @@ function parseDiario(rows, accountFilter){
   return out;
 }
 
-// 3) Estado de cuenta bancario (Banistmo o STG)
+// 3) Estado de cuenta bancario (Banistmo, STG o Banco General)
 function parseEstadoCuenta(rows, tipo){
-  var tokens = tipo==="banistmo" ? ["Fecha","Descripcion","Debito","Credito","Saldo"] : ["Fecha","Descripcion","Debitos","Creditos","Balance"];
+  // "bancogeneral" usa detección flexible porque no conocemos su formato exacto todavía:
+  // busca Fecha, Descripción y columnas de débito/crédito en singular o plural.
+  var tokens = tipo==="banistmo" ? ["Fecha","Descripcion","Debito","Credito","Saldo"]
+    : tipo==="stg" ? ["Fecha","Descripcion","Debitos","Creditos","Balance"]
+    : ["Fecha","Descripcion","Debito","Credito"]; // bancogeneral (tolerante)
   var hIdx = findHeaderRow(rows, tokens);
   if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el estado de cuenta.");
   var cFecha = colIdx(rows[hIdx],"Fecha");
   var cDesc = colIdx(rows[hIdx],"Descripcion");
-  var cDeb = tipo==="banistmo" ? colIdx(rows[hIdx],"Debito") : colIdx(rows[hIdx],"Debitos");
-  var cCred = tipo==="banistmo" ? colIdx(rows[hIdx],"Credito") : colIdx(rows[hIdx],"Creditos");
+  var cDeb, cCred;
+  if(tipo==="banistmo"){ cDeb = colIdx(rows[hIdx],"Debito"); cCred = colIdx(rows[hIdx],"Credito"); }
+  else if(tipo==="stg"){ cDeb = colIdx(rows[hIdx],"Debitos"); cCred = colIdx(rows[hIdx],"Creditos"); }
+  else { // bancogeneral: probar plural y luego singular
+    cDeb = colIdx(rows[hIdx],"Debitos"); if(cDeb<0) cDeb = colIdx(rows[hIdx],"Debito");
+    cCred = colIdx(rows[hIdx],"Creditos"); if(cCred<0) cCred = colIdx(rows[hIdx],"Credito");
+  }
   var out = [];
   for(var r=hIdx+1;r<rows.length;r++){
     var row = rows[r];
@@ -492,6 +501,9 @@ function clasificarBancoPorTexto(desc){
   var n = normTxt(desc);
   if(n.indexOf("BTS")!==-1 || n.indexOf("BANISTMO")!==-1) return "Banistmo";
   if(n.indexOf("STG")!==-1) return "STG";
+  // Yappy compensa en Banco General (todo lo que diga YAPPY va a Banco General),
+  // más menciones explícitas del banco ("BANCO GENERAL" / "B. GENERAL").
+  if(n.indexOf("YAPPY")!==-1 || n.indexOf("BANCO GENERAL")!==-1 || n.indexOf("B. GENERAL")!==-1 || n.indexOf("B.GENERAL")!==-1) return "Banco General";
   return null;
 }
 // ¿La descripción es un depósito de ACH o cheque que el sistema a veces registra SIN banco?
@@ -605,10 +617,13 @@ function paso1(reporte, diarioCaja, tolerancia){
   return hallazgos;
 }
 
-// Paso 2: Diario Caja General (por banco/dia) vs Diario del banco (Banistmo/STG)
-function paso2(diarioCaja, diarioBanistmo, diarioStg, tolerancia){
+// Paso 2: Diario Caja General (por banco/dia) vs Diario del banco (Banistmo/STG/Banco General)
+// diarioBancoGeneral es opcional: si no se sube, ese banco simplemente no se concilia.
+function paso2(diarioCaja, diarioBanistmo, diarioStg, diarioBancoGeneral, tolerancia){
   var hallazgos = [];
-  [{nombre:"Banistmo", diarioBanco:diarioBanistmo},{nombre:"STG", diarioBanco:diarioStg}].forEach(function(cfg){
+  var cfgs = [{nombre:"Banistmo", diarioBanco:diarioBanistmo},{nombre:"STG", diarioBanco:diarioStg}];
+  if(diarioBancoGeneral) cfgs.push({nombre:"Banco General", diarioBanco:diarioBancoGeneral});
+  cfgs.forEach(function(cfg){
     var cajaFiltrada = diarioCaja.filter(function(x){return clasificarBancoPorTexto(x.descripcion)===cfg.nombre && x.debito>0;});
     var cajaPorDia = sumBy(cajaFiltrada, function(x){return x.fecha;}, function(x){return x.debito;});
     var bancoPorDia = sumBy(cfg.diarioBanco, function(x){return x.fecha;}, function(x){return x.debito;}); // ingresos al banco = debito en el diario del banco
@@ -654,12 +669,15 @@ function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia)
   });
   return sinPar;
 }
-function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, ventanaDias, tolerancia){
+// diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
+function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia){
   var hallazgos = [];
-  [
+  var cfgs = [
     {nombre:"Banistmo", diario:diarioBanistmo, estado:estBanistmo},
     {nombre:"STG", diario:diarioStg, estado:estStg}
-  ].forEach(function(cfg){
+  ];
+  if(diarioBancoGeneral && estBancoGeneral) cfgs.push({nombre:"Banco General", diario:diarioBancoGeneral, estado:estBancoGeneral});
+  cfgs.forEach(function(cfg){
     var faltanEnBanco = matchUnoAUno(
       cfg.diario.filter(function(x){return x.debito>0;}), "debito",
       cfg.estado.filter(function(x){return x.credito>0;}), "credito",
@@ -728,9 +746,17 @@ var PASO_REQS = {
   paso3: ["diarioBanistmo","diarioStg","estBanistmo","estStg"],
   paso4: ["retVisa","estStg"]
 };
+// Archivos opcionales por paso: se leen si están subidos, pero no hacen falta para habilitar el paso.
+var PASO_OPCIONALES = {
+  paso2: ["diarioBancoGeneral"],
+  paso3: ["diarioBancoGeneral","estBancoGeneral"]
+};
 
 function pasoListo(pasoKey){
   return PASO_REQS[pasoKey].every(function(k){ return !!STATE.files[k]; });
+}
+function archivosDePaso(pasoKey){
+  return PASO_REQS[pasoKey].concat((PASO_OPCIONALES[pasoKey]||[]).filter(function(k){ return !!STATE.files[k]; }));
 }
 
 function computePasoResult(pasoKey, raws, opts){
@@ -743,7 +769,8 @@ function computePasoResult(pasoKey, raws, opts){
     var diarioCaja = parseDiario(raws.diarioCaja,"Caja General");
     var diarioBanistmo = parseDiario(raws.diarioBanistmo,"Banistmo");
     var diarioStg = parseDiario(raws.diarioStg,null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
-    return paso2(diarioCaja, diarioBanistmo, diarioStg, opts.tol);
+    var diarioBG = raws.diarioBancoGeneral ? parseDiario(raws.diarioBancoGeneral, null) : null;
+    return paso2(diarioCaja, diarioBanistmo, diarioStg, diarioBG, opts.tol);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -751,7 +778,9 @@ function computePasoResult(pasoKey, raws, opts){
     var diarioStg = parseDiario(raws.diarioStg,null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
     var estBanistmo = parseEstadoCuenta(raws.estBanistmo,"banistmo");
     var estStg = parseEstadoCuenta(raws.estStg,"stg");
-    return paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, opts.ventana, opts.tol);
+    var diarioBG = raws.diarioBancoGeneral ? parseDiario(raws.diarioBancoGeneral, null) : null;
+    var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral, "bancogeneral") : null;
+    return paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol);
   }
   if(pasoKey==="paso4"){
     if(!raws.retVisa || !raws.estStg) return null;
@@ -799,7 +828,7 @@ function ejecutarPaso(pasoKey){
   if(!pasoListo(pasoKey)) return;
   var note = document.getElementById("runNote");
   if(note) note.textContent = "Leyendo archivos de este paso...";
-  readMany(PASO_REQS[pasoKey], function(raws){
+  readMany(archivosDePaso(pasoKey), function(raws){
     try{
       var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
       var result = computePasoResult(pasoKey, raws, opts);
@@ -961,6 +990,7 @@ function renderModulo1(){
     '<div class="dropzones grid2">' +
       dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
       dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
+      dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
     '</div>' + stageRunHtml("paso2") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real</h3>' +
@@ -968,6 +998,7 @@ function renderModulo1(){
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
+      dzHtml("estBancoGeneral","Estado de cuenta Banco General (opcional)","Estado de cuenta de Banco General (donde compensa Yappy)") +
     '</div>' + stageRunHtml("paso3") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 4</span> Validación VISA STG</h3>' +
