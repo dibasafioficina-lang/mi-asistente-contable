@@ -288,8 +288,10 @@ function readWorkbook(file, cb){
     try{
       var data = new Uint8Array(e.target.result);
       var wb = XLSX.read(data, {type:"array", cellDates:true});
-      var sheet = wb.Sheets[wb.SheetNames[0]];
-      var rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:true, defval:null});
+      var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, raw:true, defval:null});
+      // Adjuntamos todas las hojas (ej. el reporte de cajeras trae una 2ª pestaña con el desglose de cheques).
+      rows.hojas = {};
+      wb.SheetNames.forEach(function(sn){ rows.hojas[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, raw:true, defval:null}); });
       cb(rows);
     }catch(err){ alert("No se pudo leer el archivo: "+err.message); }
   };
@@ -379,9 +381,12 @@ function parseReporteConsolidado(rows){
   for(var i=0;i<subRow.length;i++){
     var sub = normTxt(subRow[i]);
     if(sub==="TOTAL" || sub==="") continue; // evitar subtotal por grupo
+    // El método puede estar en la fila de grupo (ej. "VISA") o en el sub-encabezado (ej. "Visa\nSr.George").
+    // Algunos reportes agrupan Visa+Clave bajo "TARJETA", así que combinamos ambos textos para detectarlo.
+    var textoCol = filledGroup[i] + " " + sub;
     var metodo = null;
     for(var m=0;m<metodosValidos.length;m++){
-      if(filledGroup[i].indexOf(metodosValidos[m])!==-1){ metodo = metodosValidos[m]; break; }
+      if(textoCol.indexOf(metodosValidos[m])!==-1){ metodo = metodosValidos[m]; break; }
     }
     if(!metodo) continue;
     var banco = null;
@@ -428,6 +433,53 @@ function parseReporteConsolidado(rows){
         out.push({fecha:iso, cajera:cajera, banco:m.banco, metodo:m.metodo, monto:val, fila:r+1});
       }
     });
+  }
+  return out;
+}
+
+// 1b) Desglose individual de cheques (2ª pestaña del reporte de cajeras: "CK ...").
+// Los cheques no compensan en bloque: cada uno clarea por separado, así que se listan uno a uno.
+// Devuelve [{fecha, banco:"STG"|"Banistmo", monto}]. El banco lo da la columna (Cheque Sr.George / Banistmo).
+function parseChequesDetalle(reporteRows){
+  var hojas = reporteRows && reporteRows.hojas;
+  if(!hojas) return [];
+  var nombres = Object.keys(hojas);
+  var hoja = null;
+  for(var i=0;i<nombres.length;i++){ var n=normTxt(nombres[i]); if(n.indexOf("CK")!==-1 || n.indexOf("CHEQUE")!==-1){ hoja=hojas[nombres[i]]; break; } }
+  if(!hoja && nombres.length>1) hoja = hojas[nombres[1]]; // fallback: 2ª pestaña
+  if(!hoja) return [];
+  // Encabezado del detalle: fila con "Fecha" + "Cheque…Sr.George" + "Cheque…Banistmo".
+  var hIdx=-1;
+  for(var r=0;r<hoja.length;r++){
+    var row=hoja[r]; if(!row) continue;
+    var f=false, g=false, b=false;
+    row.forEach(function(c){ var t=normTxt(c);
+      if(t==="FECHA") f=true;
+      if(t.indexOf("CHEQUE")!==-1 && t.indexOf("GEORGE")!==-1) g=true;
+      if(t.indexOf("CHEQUE")!==-1 && t.indexOf("BANISTMO")!==-1) b=true;
+    });
+    if(f && g && b){ hIdx=r; break; }
+  }
+  if(hIdx===-1) return [];
+  var header=hoja[hIdx], cFecha=-1, cSTG=-1, cBan=-1;
+  for(var i=0;i<header.length;i++){ var t=normTxt(header[i]);
+    if(cFecha<0 && t==="FECHA") cFecha=i;
+    if(cSTG<0 && t.indexOf("CHEQUE")!==-1 && t.indexOf("GEORGE")!==-1) cSTG=i;
+    if(cBan<0 && t.indexOf("CHEQUE")!==-1 && t.indexOf("BANISTMO")!==-1) cBan=i;
+  }
+  var meses = mesesDominantesReporte(hoja, cFecha, hIdx+1);
+  var out=[], fechaAct=null;
+  for(var r=hIdx+1;r<hoja.length;r++){
+    var row=hoja[r]; if(!row) continue;
+    var raw = cFecha>=0?row[cFecha]:null;
+    if(raw!==null && raw!==undefined && normTxt(raw)!=="" && normTxt(raw).indexOf("TOTAL")===-1){
+      var iso = fechaReporteConsolidado(raw, meses); if(iso) fechaAct=iso;
+    }
+    if(!fechaAct) continue;
+    var vs = cSTG>=0?money(row[cSTG]):0;
+    var vb = cBan>=0?money(row[cBan]):0;
+    if(vs>0) out.push({fecha:fechaAct, banco:"STG", monto:vs, fila:r+1});
+    if(vb>0) out.push({fecha:fechaAct, banco:"Banistmo", monto:vb, fila:r+1});
   }
   return out;
 }
@@ -581,7 +633,7 @@ function esAchOChequeSinBanco(desc){
   if(clasificarBancoPorTexto(desc)) return false; // ya tiene banco
   return n.indexOf("ACH")!==-1 || /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
 }
-function paso1(reporte, diarioCaja, tolerancia){
+function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
   var repPorBancoDia = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
@@ -681,6 +733,28 @@ function paso1(reporte, diarioCaja, tolerancia){
       });
     });
   });
+
+  // Consistencia del desglose de cheques (2ª pestaña): la suma de los cheques individuales por
+  // banco/día debe igualar el total de cheques del reporte (columna Cheque de la 1ª pestaña).
+  if(chequesDetalle && chequesDetalle.length){
+    var detBD = sumBy(chequesDetalle, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
+    var repChequeBD = sumBy(reporte.filter(function(x){return x.metodo==="CHEQUE";}), function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
+    var clavesCh = {};
+    Object.keys(detBD).forEach(function(k){clavesCh[k]=true;});
+    Object.keys(repChequeBD).forEach(function(k){clavesCh[k]=true;});
+    Object.keys(clavesCh).sort().forEach(function(k){
+      var p = k.split("|"), bk = p[0], fecha = p[1];
+      var det = detBD[k]||0, tot = repChequeBD[k]||0, dch = Math.round((det-tot)*100)/100;
+      if(Math.abs(dch) > tolerancia){
+        hallazgos.push({
+          fecha:fecha, banco:bk, monto:dch, clase:"diff",
+          texto: "Cheques " + bk + " " + fecha + ": el desglose individual suma B/ " + det.toFixed(2) +
+                 " pero el total de cheques del reporte es B/ " + tot.toFixed(2) + " (dif. B/ " + dch.toFixed(2) + ").",
+          fuente: "Reporte de cajeras (desglose de cheques vs. total)"
+        });
+      }
+    });
+  }
   return hallazgos;
 }
 
@@ -728,13 +802,16 @@ function refComprobante(ref){
 //    combinado en varias líneas (busca combinaciones que sumen el total).
 //  - VISA compensa NETO en el banco: si hay informe de retenciones, para STG también se intenta
 //    emparejar el depósito menos la retención del día (bruto − retención = neto).
+//  - Los CHEQUES no compensan en bloque: si se sube el reporte con el desglose individual (2ª pestaña),
+//    cada cheque se cuadra por separado contra el banco; los que no compensan quedan en tránsito.
 //  - Un cheque que no aparece en su banco se busca en los otros bancos; si aparece en otro, se marca
 //    como banco mal asignado; si no aparece en ninguno, queda "en tránsito" (pendiente por cambiar).
-// estBancoGeneral y retVisa son opcionales.
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, ventanaDias, tolerancia){
+// estBancoGeneral, retVisa y chequesDetalle son opcionales.
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+  var usarDetalleCheques = !!(chequesDetalle && chequesDetalle.length);
 
   // Créditos del banco por banco, con flag .usado (excluye ABORTED).
   var bancoCred = {};
@@ -749,6 +826,8 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
   Object.keys(estados).forEach(function(banco){
     var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
     cajaDep.forEach(function(dep){
+      // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
+      if(usarDetalleCheques && esChequeDesc(dep.descripcion)) return;
       var pool = bancoCred[banco];
       var objetivo = dep.credito;
       // 1) match directo (1:1 o combinación) dentro de la ventana
@@ -810,6 +889,40 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       });
     });
   });
+
+  // Cheques individuales (2ª pestaña del reporte): cada cheque se cuadra por su cuenta, porque no
+  // compensan en bloque (cada uno clarea en su propia fecha).
+  if(usarDetalleCheques){
+    chequesDetalle.forEach(function(ch){
+      var banco = ch.banco, pool = bancoCred[banco];
+      var combo = pool ? buscarCombinacion(pool, ch.fecha, ch.monto, ventanaDias, tolerancia) : null;
+      if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // el cheque compensó
+      if(ultimoDia && ch.fecha===ultimoDia){
+        hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
+          concepto:"Cheque (detalle individual)", comprobante:"", motivo:"último día del mes",
+          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") es del último día del mes — queda en tránsito para el mes siguiente.",
+          fuente:"Desglose de cheques / Estado de cuenta "+banco });
+        return;
+      }
+      // buscar el cheque en los otros bancos
+      var otro=null;
+      Object.keys(bancoCred).forEach(function(b2){
+        if(otro || b2===banco) return;
+        var c = buscarCombinacion(bancoCred[b2], ch.fecha, ch.monto, ventanaDias, tolerancia);
+        if(c){ c.forEach(function(i){ bancoCred[b2][i].usado=true; }); otro=b2; }
+      });
+      if(otro){
+        hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"diff",
+          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+") que el reporte asignó a "+banco+" aparece depositado en "+otro+". Verifica el banco.",
+          fuente:"Desglose de cheques / Estado de cuenta "+otro });
+      } else {
+        hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
+          concepto:"Cheque (detalle individual)", comprobante:"", motivo:"cheque pendiente por cambiar",
+          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") aún no aparece en ningún estado de cuenta — en tránsito (pendiente por cambiar).",
+          fuente:"Desglose de cheques / Estados de cuenta" });
+      }
+    });
+  }
   return hallazgos;
 }
 
@@ -923,8 +1036,8 @@ var PASO_REQS = {
 // diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
   paso0: ["estBancoGeneral"],
-  // retVisa se pide también en el Paso 2 para poder cuadrar el neto VISA (bruto − retención) contra el banco.
-  paso2: ["estBancoGeneral","retVisa"],
+  // retVisa: para el neto VISA. reporte: para el desglose individual de cheques (2ª pestaña).
+  paso2: ["estBancoGeneral","retVisa","reporte"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja"]
 };
@@ -950,7 +1063,7 @@ function computePasoResult(pasoKey, raws, opts){
   }
   if(pasoKey==="paso1"){
     if(!raws.reporte || !raws.diarioCaja) return null;
-    return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), opts.tol);
+    return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), parseChequesDetalle(raws.reporte), opts.tol);
   }
   if(pasoKey==="paso2"){
     if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;
@@ -964,7 +1077,9 @@ function computePasoResult(pasoKey, raws, opts){
       retVisaDia = {};
       parseRetencionesVisa(raws.retVisa).forEach(function(d){ retVisaDia[d.fecha] = Math.abs(d.retenciones); });
     }
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, opts.ventana, opts.tol);
+    // Desglose individual de cheques (2ª pestaña del reporte): si está, los cheques se cuadran uno a uno.
+    var chequesDet = raws.reporte ? parseChequesDetalle(raws.reporte) : null;
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -1274,7 +1389,7 @@ function renderModulo1(){
     '</div>' + stageRunHtml("paso1") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 2</span> Reporte / Caja General → Estados de cuenta bancarios</h3>' +
-    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Empareja por monto dentro de la ventana de días (acepta depósitos partidos en varias líneas y la compensación al día siguiente, ej. Yappy). Un cheque que no aparezca se busca en los otros bancos o se marca en tránsito. Con el informe VISA, cuadra el neto (bruto − retenciones) contra el banco. Usa el Diario Caja General del Paso 1.</p>' +
+    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Empareja por monto dentro de la ventana de días (acepta depósitos partidos en varias líneas y la compensación al día siguiente, ej. Yappy). Los cheques se cuadran uno a uno con el desglose de la 2ª pestaña del reporte (no compensan en bloque); el que no aparezca se busca en los otros bancos o se marca en tránsito. Con el informe VISA, cuadra el neto (bruto − retenciones). Usa el Diario Caja General y el reporte del Paso 1.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
