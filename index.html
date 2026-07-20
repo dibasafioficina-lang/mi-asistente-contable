@@ -676,6 +676,18 @@ function paso1(reporte, diarioCaja, tolerancia){
   return hallazgos;
 }
 
+// Último día calendario del mes dominante entre un conjunto de fechas ISO (para los bordes de mes).
+function ultimoDiaMes(fechas){
+  var ym = {};
+  fechas.forEach(function(f){ if(f){ var k=f.slice(0,7); ym[k]=(ym[k]||0)+1; } });
+  var best=null, max=-1;
+  Object.keys(ym).forEach(function(k){ if(ym[k]>max){ max=ym[k]; best=k; } });
+  if(!best) return null;
+  var y=parseInt(best.slice(0,4),10), m=parseInt(best.slice(5,7),10);
+  var last = new Date(y, m, 0).getDate(); // día 0 del mes siguiente = último día del mes actual
+  return best + "-" + String(last).padStart(2,"0");
+}
+
 // Busca en 'pool' (créditos del banco, con flag .usado) una combinación de 1, 2 o 3 movimientos
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
 // El banco a veces refleja un depósito combinado de Caja General partido en varias líneas
@@ -723,6 +735,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
   });
 
+  // Último día del mes: lo que entra ese día queda en tránsito para el mes siguiente (no compensa aún).
+  var ultimoDia = ultimoDiaMes(diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; }).map(function(x){ return x.fecha; }));
+
   Object.keys(estados).forEach(function(banco){
     var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
     cajaDep.forEach(function(dep){
@@ -737,7 +752,17 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // cuadrado
 
       var ref = refComprobante(dep.referencia);
-      // 3) cheque no encontrado en su banco → buscar en los otros bancos
+      // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
+      if(ultimoDia && dep.fecha===ultimoDia){
+        hallazgos.push({
+          fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+          texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " (\"" + String(dep.descripcion||"").trim() +
+                 "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el banco)." + ref,
+          fuente: "Diario Caja General / Estado de cuenta " + banco
+        });
+        return;
+      }
+      // 3b) cheque no encontrado en su banco → buscar en los otros bancos
       if(esChequeDesc(dep.descripcion)){
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
@@ -1286,15 +1311,18 @@ function renderModulo1(){
   if(STATE.results) renderResultados();
 }
 
-function saldoCtxHtml(s){
+function saldoCtxHtml(s, pasoKey){
   function bal(v){ return (v<0?"-":"")+"B/ "+Math.abs(v).toFixed(2); }
   var partes = [];
   if(s.inicial!==null) partes.push('saldo inicial'+(s.fechaInicial?" ("+s.fechaInicial+")":"")+': <b>'+bal(s.inicial)+'</b>');
   if(s.movimiento!==null) partes.push('movimiento del mes: <b>'+bal(s.movimiento)+'</b>');
   if(s.final!==null) partes.push('saldo final'+(s.fechaFinal?" ("+s.fechaFinal+")":"")+': <b>'+bal(s.final)+'</b>');
+  var sub = pasoKey==="paso2"
+    ? 'El saldo inicial es lo que quedó en tránsito del mes anterior y debía compensar este mes: validá que las entradas de los primeros días del banco lo cubren. Y lo del último día del mes queda en tránsito para el mes siguiente (ver "En tránsito").'
+    : 'Ese saldo es dinero en tránsito arrastrado del mes anterior. Algunas partidas sin emparejar de este mes pueden corresponder a operaciones anteriores que compensan ahora — revísalas contra el saldo antes de darlas por diferencia.';
   return '<div class="saldo-ctx"><span class="ico">🔄</span><div class="txt">' +
     '<div class="saldo-line">Caja General — ' + partes.join(' · ') + '</div>' +
-    '<div class="saldo-sub">Ese saldo es dinero en tránsito arrastrado del mes anterior. Algunas partidas sin emparejar de este mes pueden corresponder a operaciones anteriores que compensan ahora — revísalas contra el saldo antes de darlas por diferencia.</div>' +
+    '<div class="saldo-sub">' + sub + '</div>' +
     '</div></div>';
 }
 
@@ -1346,9 +1374,9 @@ function renderResultados(){
     var idxPaso = PASO_ORDEN.indexOf(p.key);
     html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
-    // Contexto del saldo inicial de Caja General (solo Paso 3): dinero en tránsito arrastrado del mes anterior.
-    if(p.key==="paso3" && esArray && STATE.saldoCajaGeneral){
-      html += saldoCtxHtml(STATE.saldoCajaGeneral);
+    // Contexto del saldo inicial de Caja General (Pasos 2 y 3): dinero en tránsito arrastrado del mes anterior.
+    if((p.key==="paso2" || p.key==="paso3") && esArray && STATE.saldoCajaGeneral){
+      html += saldoCtxHtml(STATE.saldoCajaGeneral, p.key);
     }
     if(items===undefined){
       html += '<div class="empty-skip">Aún no se ejecutó este paso — usa "Ejecutar solo este paso" o el botón global.</div>';
