@@ -804,6 +804,34 @@ function esChequeDesc(desc){
   var n = normTxt(desc);
   return /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
 }
+// Subset-sum recursivo: busca cualquier subconjunto de hasta maxN movimientos no usados (dentro de la
+// ventana) que sumen 'objetivo'. Para cheques, que el banco junta de a varios (ej. 4 cheques = 798.23).
+function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN){
+  if(Math.abs(objetivo) <= tolerancia) return null;
+  var idxs = [];
+  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && daysBetween(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
+  var res = null;
+  function rec(start, restante, acc){
+    if(res) return;
+    if(Math.abs(restante) <= tolerancia && acc.length>0){ res = acc.slice(); return; }
+    if(acc.length >= maxN) return;
+    for(var j=start;j<idxs.length;j++){
+      if(pool[idxs[j]].monto - restante > tolerancia) continue; // no puede pasarse
+      acc.push(idxs[j]); rec(j+1, restante - pool[idxs[j]].monto, acc); acc.pop();
+      if(res) return;
+    }
+  }
+  rec(0, objetivo, []);
+  return res;
+}
+// Línea del estado de cuenta que corresponde a un DEPÓSITO (cheque/efectivo), no a una remisión de
+// tarjeta ni a comisiones/retenciones. Se usa para emparejar cheques sin cruzarlos con esas líneas.
+function esDepositoEstado(desc){
+  var n = normTxt(desc);
+  if(n.indexOf("REMISION")!==-1 || n.indexOf("RETENCION")!==-1 || n.indexOf("COMISION")!==-1 ||
+     n.indexOf("ITBMS")!==-1 || n.indexOf("TIMBRE")!==-1) return false;
+  return n.indexOf("DEPOSITO")!==-1 || n.indexOf("DEPÓSITO")!==-1;
+}
 function refComprobante(ref){
   return /^ME-/i.test(String(ref==null?"":ref).trim()) ? (" · Comprobante " + String(ref).trim()) : "";
 }
@@ -929,37 +957,47 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
     });
   });
 
-  // Cheques individuales (2ª pestaña del reporte): cada cheque se cuadra por su cuenta, porque no
-  // compensan en bloque (cada uno clarea en su propia fecha).
+  // Cheques individuales (2ª pestaña del reporte): no compensan en bloque ni cada uno por separado —
+  // el banco a veces junta varios cheques en un solo depósito o los reparte, y clarean días después.
+  // Por eso se reconcilia el CONJUNTO de cheques del reporte contra los DEPÓSITOS del estado de cuenta,
+  // permitiendo combinaciones en ambos sentidos y sin límite de fecha (solo dentro del mes).
   if(usarDetalleCheques){
-    chequesDetalle.forEach(function(ch){
-      var banco = ch.banco, pool = bancoCred[banco];
-      var combo = pool ? buscarCombinacion(pool, ch.fecha, ch.monto, ventanaDias, tolerancia) : null;
-      if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // el cheque compensó
-      if(ultimoDia && ch.fecha===ultimoDia){
-        hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
-          concepto:"Cheque (detalle individual)", comprobante:"", motivo:"último día del mes",
-          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") es del último día del mes — queda en tránsito para el mes siguiente.",
-          fuente:"Desglose de cheques / Estado de cuenta "+banco });
-        return;
-      }
-      // buscar el cheque en los otros bancos
-      var otro=null;
-      Object.keys(bancoCred).forEach(function(b2){
-        if(otro || b2===banco) return;
-        var c = buscarCombinacion(bancoCred[b2], ch.fecha, ch.monto, ventanaDias, tolerancia);
-        if(c){ c.forEach(function(i){ bancoCred[b2][i].usado=true; }); otro=b2; }
+    var VENTANA_CHEQUE = 366; // sin límite práctico dentro del mes
+    Object.keys(bancoCred).forEach(function(banco){
+      // Cheques del reporte de este banco. Los del último día quedan en tránsito (clarean el mes siguiente).
+      var chs = [];
+      chequesDetalle.filter(function(x){return x.banco===banco;}).forEach(function(x){
+        if(ultimoDia && x.fecha===ultimoDia){
+          hallazgos.push({ fecha:x.fecha, banco:banco, monto:x.monto, clase:"en_transito",
+            concepto:"Cheque (detalle individual)", comprobante:"", motivo:"último día del mes",
+            texto:"Cheque de B/ "+x.monto.toFixed(2)+" ("+x.fecha+", "+banco+") es del último día del mes — queda en tránsito para el mes siguiente.",
+            fuente:"Desglose de cheques / Estado de cuenta "+banco });
+        } else {
+          chs.push({ fecha:x.fecha, monto:x.monto, usado:false });
+        }
       });
-      if(otro){
-        hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"diff",
-          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+") que el reporte asignó a "+banco+" aparece depositado en "+otro+". Verifica el banco.",
-          fuente:"Desglose de cheques / Estado de cuenta "+otro });
-      } else {
+      // Depósitos del estado de cuenta (no remisiones/comisiones), referencias con .usado compartido.
+      var depos = bancoCred[banco].filter(function(x){ return esDepositoEstado(x.desc); });
+      // Paso A: cada cheque contra una combinación de depósitos (un cheque puede clarear en varios depósitos).
+      chs.forEach(function(ch){
+        if(ch.usado) return;
+        var combo = buscarSubsetSuma(depos, ch.fecha, ch.monto, VENTANA_CHEQUE, tolerancia, 8);
+        if(combo){ combo.forEach(function(i){ depos[i].usado=true; }); ch.usado=true; }
+      });
+      // Paso B: cada depósito no usado contra una combinación de cheques (el banco junta varios cheques en un depósito).
+      depos.forEach(function(d){
+        if(d.usado) return;
+        var combo = buscarSubsetSuma(chs, d.fecha, d.monto, VENTANA_CHEQUE, tolerancia, 12);
+        if(combo){ combo.forEach(function(i){ chs[i].usado=true; }); d.usado=true; }
+      });
+      // Cheques que no clarearon → en tránsito (pendiente por cambiar).
+      chs.forEach(function(ch){
+        if(ch.usado) return;
         hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
           concepto:"Cheque (detalle individual)", comprobante:"", motivo:"cheque pendiente por cambiar",
-          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") aún no aparece en ningún estado de cuenta — en tránsito (pendiente por cambiar).",
-          fuente:"Desglose de cheques / Estados de cuenta" });
-      }
+          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
+          fuente:"Desglose de cheques / Estado de cuenta "+banco });
+      });
     });
   }
   return hallazgos;
