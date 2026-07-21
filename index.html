@@ -1634,11 +1634,21 @@ function renderResultados(){
 
   // Cuando TODO el módulo (Pasos 1-3) cuadra, ofrecer el resumen de partidas en tránsito para el próximo mes.
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
-  if(todoCuadrado){
-    var nT = recolectarEnTransito().length;
+  // Panel de partidas en tránsito: se muestra siempre que haya alguna (no depende de que todo cuadre,
+  // porque el resumen sale de Paso 0 + Paso 2, que son independientes de las rojas de Paso 3).
+  var tt = totalesEnTransitoPorBanco();
+  if(tt.count > 0){
+    var bancosTxt = Object.keys(tt.porBanco).sort().map(function(b){
+      return b + ": B/ " + tt.porBanco[b].toFixed(2);
+    }).join(" · ");
+    var subNota = todoCuadrado
+      ? "Descarga el resumen y cárgalo en el Paso 0 del mes siguiente para validar que compensen."
+      : "Aún quedan diferencias por resolver, pero este resumen ya está listo (sale del Paso 0 y del Paso 2). Cárgalo en el Paso 0 del mes siguiente.";
     html += '<div class="cierre-panel"><div class="cierre-txt">' +
-      '<div class="cierre-title">🎉 Módulo cuadrado</div>' +
-      '<div class="cierre-sub">'+nT+' partida(s) quedaron en tránsito para el próximo mes. Descarga el resumen y cárgalo en el Paso 0 del mes siguiente para validar que compensen.</div>' +
+      '<div class="cierre-title">'+(todoCuadrado ? '🎉 Módulo cuadrado' : '📋 Partidas en tránsito')+'</div>' +
+      '<div class="cierre-sub"><strong>Total en tránsito para el próximo mes: B/ '+tt.total.toFixed(2)+'</strong> ('+tt.count+' partida(s))' +
+      (bancosTxt ? '<br>'+bancosTxt : '') +
+      '<br>'+subNota+'</div>' +
       '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
   }
   html += '<div class="summary-bar">' +
@@ -1752,18 +1762,26 @@ function exportarChecklist(){
 
 /* ---------------- Resumen de partidas en tránsito (para el Paso 0 del próximo mes) ---------------- */
 // Junta todas las partidas "en tránsito" de los resultados (principalmente del Paso 2).
+// Arma el resumen de lo que queda en tránsito para el próximo mes. Se toma de:
+//  - Paso 0: cheques de meses anteriores que AÚN no compensaron (se siguen arrastrando).
+//  - Paso 2: lo que Caja General depositó este mes y no clareó en el banco (cheques por cambiar,
+//    depósitos de fin de mes). Es la vista "lo que depositamos que no clareó".
+// NO se toma de Paso 3 (diario bancario vs estado): duplicaría los ítems de fin de mes de Paso 2 y
+// además incluye compensaciones de ENTRADA del mes anterior (primer día), que no se arrastran.
 function recolectarEnTransito(){
   var out = [];
-  // Pasos 1-3: lo que quedó en tránsito ESTE mes (cheques por cambiar, depósitos de fin de mes, etc.).
-  PASO_ORDEN.forEach(function(k){
-    var items = STATE.results && STATE.results[k];
-    if(Array.isArray(items)) items.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
-  });
-  // Paso 0: cheques/partidas de meses anteriores que AÚN no compensaron este mes → se arrastran al
-  // resumen para seguir vigilándolos el mes siguiente (si no, se perderían tras un mes).
   var p0 = STATE.results && STATE.results.paso0;
   if(Array.isArray(p0)) p0.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
+  var p2 = STATE.results && STATE.results.paso2;
+  if(Array.isArray(p2)) p2.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
   return out;
+}
+// Total en tránsito desglosado por banco (para mostrarlo al cerrar el módulo).
+function totalesEnTransitoPorBanco(){
+  var items = recolectarEnTransito();
+  var porBanco = {}; var total = 0;
+  items.forEach(function(it){ var b = it.banco||"—"; porBanco[b] = (porBanco[b]||0) + it.monto; total += it.monto; });
+  return { porBanco: porBanco, total: total, count: items.length };
 }
 function exportarEnTransito(){
   var items = recolectarEnTransito();
@@ -1796,41 +1814,44 @@ function parseTransitoPrevio(rows){
   return out;
 }
 
-// Paso 0: valida que las partidas en tránsito del mes anterior compensaron en los bancos de este mes.
+// Paso 0: valida que los cheques en tránsito de meses anteriores compensaron en los bancos de este mes.
+// Un cheque puede tardar semanas o meses en cambiarse, así que NO se limita por días: se empareja hacia
+// adelante (el depósito nunca es anterior al cheque) contra los DEPÓSITOS del estado de cuenta, con
+// combinaciones (el banco a veces junta varios cheques en un solo depósito). Los que no compensaron
+// siguen en tránsito y se arrastran al resumen para el mes siguiente.
 function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
-  var bancoCred = {};
-  Object.keys(estados).forEach(function(b){
-    bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
-  });
-  // ventana amplia: la compensación cae a inicio del mes siguiente (puede tardar varios días).
-  var vent = Math.max(ventanaDias, 15);
+  var VENTANA = 366; // sin límite práctico (un cheque puede clarear meses después)
   var hallazgos = [];
-  transitoPrevio.forEach(function(t){
-    var pool = bancoCred[t.banco];
-    var combo = pool ? buscarCombinacion(pool, t.fecha, t.monto, vent, tolerancia) : null;
-    // si no está en su banco, buscar en cualquiera (por si se depositó en otro)
-    var otro = null;
-    if(!combo){
-      Object.keys(bancoCred).forEach(function(b2){
-        if(otro || (pool && b2===t.banco)) return;
-        var c = buscarCombinacion(bancoCred[b2], t.fecha, t.monto, vent, tolerancia);
-        if(c){ c.forEach(function(i){ bancoCred[b2][i].usado=true; }); otro=b2; }
-      });
-    }
-    if(combo){ combo.forEach(function(i){ pool[i].usado=true; }); return; } // compensó → ok
-    if(otro){
-      hallazgos.push({ fecha:t.fecha, banco:t.banco, monto:t.monto, clase:"diff",
-        texto:"Partida en tránsito del mes anterior (B/ "+t.monto.toFixed(2)+", "+t.fecha+", asignada a "+t.banco+") compensó en "+otro+" y no en "+t.banco+". Verifica el banco."+(t.comprobante?" · Comprobante "+t.comprobante:""),
-        fuente:"Resumen en tránsito mes anterior / Estados de cuenta" });
-    } else {
-      hallazgos.push({ fecha:t.fecha, banco:t.banco, monto:t.monto, clase:"en_transito",
-        concepto:t.concepto, comprobante:t.comprobante, motivo:"aún pendiente de compensar",
-        texto:"Partida en tránsito del mes anterior (B/ "+t.monto.toFixed(2)+", "+t.fecha+", "+t.banco+", \""+(t.concepto||"")+"\") aún NO compensó en los estados de cuenta de este mes."+(t.comprobante?" · Comprobante "+t.comprobante:""),
-        fuente:"Resumen en tránsito mes anterior / Estados de cuenta" });
-    }
+  Object.keys(estados).forEach(function(banco){
+    // Cheques en tránsito de meses anteriores asignados a este banco.
+    var chs = transitoPrevio.filter(function(t){ return t.banco===banco; })
+      .map(function(t){ return {fecha:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante, usado:false}; });
+    if(!chs.length) return;
+    // Depósitos de cheque del estado (no remisiones/comisiones/retenciones), .usado compartido.
+    var depos = (estados[banco]||[]).filter(function(x){ return x.credito>0 && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
+      .map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; });
+    // Paso A: cada cheque contra UN depósito hacia adelante (un cheque clarea en un solo depósito).
+    chs.forEach(function(ch){
+      if(ch.usado) return;
+      var combo = buscarSubsetSuma(depos, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
+      if(combo){ combo.forEach(function(i){ depos[i].usado=true; }); ch.usado=true; }
+    });
+    // Paso B: cada depósito no usado contra una combinación de cheques (el banco junta varios en un depósito).
+    depos.forEach(function(d){
+      if(d.usado) return;
+      var combo = buscarSubsetSuma(chs, d.fecha, d.monto, VENTANA, tolerancia, 12, "atras");
+      if(combo){ combo.forEach(function(i){ chs[i].usado=true; }); d.usado=true; }
+    });
+    // Cheques que no compensaron → siguen en tránsito.
+    chs.forEach(function(ch){
+      if(ch.usado) return;
+      hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
+        concepto:ch.concepto, comprobante:ch.comprobante, motivo:"aún pendiente de compensar",
+        texto:"Cheque en circulación de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+", \""+(ch.concepto||"")+"\") de un mes anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
+        fuente:"Paso 0 — cheques en tránsito / Estado de cuenta "+banco });
+    });
   });
   return hallazgos;
 }
