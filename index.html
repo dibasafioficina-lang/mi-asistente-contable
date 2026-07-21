@@ -1635,7 +1635,7 @@ function renderResultados(){
   // Cuando TODO el módulo (Pasos 1-3) cuadra, ofrecer el resumen de partidas en tránsito para el próximo mes.
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
   if(todoCuadrado){
-    var nT = PASO_ORDEN.reduce(function(s,k){ return s + contarEnTransito(r[k]); }, 0);
+    var nT = recolectarEnTransito().length;
     html += '<div class="cierre-panel"><div class="cierre-txt">' +
       '<div class="cierre-title">🎉 Módulo cuadrado</div>' +
       '<div class="cierre-sub">'+nT+' partida(s) quedaron en tránsito para el próximo mes. Descarga el resumen y cárgalo en el Paso 0 del mes siguiente para validar que compensen.</div>' +
@@ -1754,10 +1754,15 @@ function exportarChecklist(){
 // Junta todas las partidas "en tránsito" de los resultados (principalmente del Paso 2).
 function recolectarEnTransito(){
   var out = [];
+  // Pasos 1-3: lo que quedó en tránsito ESTE mes (cheques por cambiar, depósitos de fin de mes, etc.).
   PASO_ORDEN.forEach(function(k){
     var items = STATE.results && STATE.results[k];
     if(Array.isArray(items)) items.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
   });
+  // Paso 0: cheques/partidas de meses anteriores que AÚN no compensaron este mes → se arrastran al
+  // resumen para seguir vigilándolos el mes siguiente (si no, se perderían tras un mes).
+  var p0 = STATE.results && STATE.results.paso0;
+  if(Array.isArray(p0)) p0.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
   return out;
 }
 function exportarEnTransito(){
