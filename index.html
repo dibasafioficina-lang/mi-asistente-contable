@@ -1191,10 +1191,11 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
 // conciliación completa. r[pasoKey] === undefined -> nunca se ejecutó en esta sesión;
 // === null -> se intentó pero faltan archivos de ese paso (se omite); array -> resultado real.
 // PASO_ORDEN gobierna la cadena condicionada (cada paso exige que cuadre el anterior) y el "todo
-// cuadrado". El Paso 0 NO está acá: es una validación opcional del arranque de mes que no bloquea.
+// cuadrado". El Paso 0 NO está en la lista pero es OBLIGATORIO: el Paso 1 exige que cuadre primero
+// (ver pasoDesbloqueado/propagarBloqueo). Se corre antes de las conciliaciones bancarias.
 var PASO_ORDEN = ["paso1","paso2","paso3"];
 var PASO_REQS = {
-  // Paso 0 (opcional): valida que las partidas en tránsito del mes anterior compensaron este mes.
+  // Paso 0 (obligatorio): valida que las partidas en tránsito del mes anterior compensaron este mes.
   paso0: ["transitoPrevio","estBanistmo","estStg"],
   paso1: ["reporte","diarioCaja"],
   // Paso 2: coteja lo que Caja General registró como depositado a cada banco contra el estado de cuenta real.
@@ -1322,19 +1323,30 @@ function pasoCuadrado(pasoKey){
   var r = STATE.results && STATE.results[pasoKey];
   return Array.isArray(r) && contarRojas(r)===0;
 }
-// Cada paso se desbloquea solo cuando el paso anterior cuadra (el Paso 1 siempre está desbloqueado).
+// Cada paso se desbloquea cuando el paso anterior cuadra. El Paso 0 es OBLIGATORIO: el Paso 1 exige que
+// el Paso 0 esté cuadrado (ejecutado sin diferencias). El Paso 0 en sí siempre está desbloqueado.
 function pasoDesbloqueado(pasoKey){
   var idx = PASO_ORDEN.indexOf(pasoKey);
-  if(idx<=0) return true;
+  if(idx<0) return true;                       // Paso 0 (no está en PASO_ORDEN)
+  if(idx===0) return pasoCuadrado("paso0");    // Paso 1 requiere el Paso 0 (obligatorio)
   return pasoCuadrado(PASO_ORDEN[idx-1]);
 }
+// Paso previo requerido para desbloquear pasoKey (el Paso 0 es el previo del Paso 1).
+function pasoPrevio(pasoKey){
+  var idx = PASO_ORDEN.indexOf(pasoKey);
+  return idx<=0 ? "paso0" : PASO_ORDEN[idx-1];
+}
 function nombreCortoPaso(pasoKey){
-  var n = PASO_ORDEN.indexOf(pasoKey)+1;
-  return "Paso " + n;
+  if(pasoKey==="paso0") return "Paso 0";
+  return "Paso " + (PASO_ORDEN.indexOf(pasoKey)+1);
 }
 // Si un paso deja de cuadrar (o no se ejecutó), los siguientes quedan bloqueados: se marcan con "bloqueado".
 function propagarBloqueo(){
   ensureResults();
+  // Paso 0 obligatorio: si no cuadró, el Paso 1 (y por cascada el resto) queda bloqueado.
+  if(!pasoCuadrado("paso0") && STATE.results[PASO_ORDEN[0]]!==undefined){
+    STATE.results[PASO_ORDEN[0]] = "bloqueado";
+  }
   for(var i=1;i<PASO_ORDEN.length;i++){
     if(!pasoCuadrado(PASO_ORDEN[i-1])){
       STATE.results[PASO_ORDEN[i]] = "bloqueado";
@@ -1376,12 +1388,20 @@ function ejecutarPaso(pasoKey){
 function ejecutarConciliacion(){
   var note = document.getElementById("runNote");
   note.textContent = "Leyendo archivos...";
-  var allKeys = ["reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","estBancoGeneral","diarioBancoGeneral","retVisa"]
+  var allKeys = ["transitoPrevio","reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","estBancoGeneral","diarioBancoGeneral","retVisa"]
     .filter(function(k){ return STATE.files[k]; });
   readMany(allKeys, function(raws){
     try{
       var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
       ensureResults();
+      // Paso 0 OBLIGATORIO: se corre primero. Si falta o no cuadra, se bloquean las conciliaciones.
+      STATE.results.paso0 = computePasoResult("paso0", raws, opts);
+      if(!pasoCuadrado("paso0")){
+        PASO_ORDEN.forEach(function(k){ STATE.results[k] = "bloqueado"; });
+        STATE.checks = {};
+        refrescarModulo("Paso 0 obligatorio: subí el resumen en tránsito del mes anterior (y los estados de cuenta) para continuar.");
+        return;
+      }
       // Cada paso se corre solo si el anterior cuadró; en cuanto uno no cuadra, los siguientes quedan bloqueados.
       var corridos = 0, frenado = false;
       PASO_ORDEN.forEach(function(pasoKey, i){
@@ -1542,7 +1562,7 @@ function stageRunHtml(pasoKey){
   var habilitado = listo && desbloqueado;
   var nota;
   if(!listo) nota = "Faltan archivos de este paso.";
-  else if(!desbloqueado) nota = "Bloqueado — primero debe cuadrar el " + nombreCortoPaso(PASO_ORDEN[PASO_ORDEN.indexOf(pasoKey)-1]) + ".";
+  else if(!desbloqueado) nota = "Bloqueado — primero debe cuadrar el " + nombreCortoPaso(pasoPrevio(pasoKey)) + ".";
   else if(cuadrado) nota = "Ya cuadró. Puedes volver a ejecutarlo si cambiaste archivos.";
   else nota = "Listo para ejecutar de forma independiente.";
   return '<div class="stage-run">' +
@@ -1556,8 +1576,8 @@ function renderModulo1(){
     headerHtml() +
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
 
-    '<div class="stage stage-opcional"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge">opcional</span></h3>' +
-    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). No bloquea el resto.</p>' +
+    '<div class="stage"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge" style="background:#B56B86;color:#fff">obligatorio</span></h3>' +
+    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). <b>Es obligatorio: hasta que el Paso 0 cuadre, las conciliaciones bancarias (Pasos 1 a 3) quedan bloqueadas.</b></p>' +
     '<div class="dropzones">' +
       dzHtml("transitoPrevio","Resumen en tránsito del mes anterior","en_transito_[MES].xlsx (Fecha, Banco, Monto, Concepto, Comprobante) — descargado del cierre del mes pasado") +
     '</div>' + stageRunHtml("paso0") + '</div>' +
@@ -1627,7 +1647,7 @@ function renderModulo1(){
   tolInp.addEventListener("change", function(){ STATE.options.tolerancia = parseFloat(tolInp.value)||0.01; });
 
   var runBtn = document.getElementById("runBtn");
-  var algunoListo = PASO_ORDEN.some(function(k){ return pasoListo(k); });
+  var algunoListo = ["paso0"].concat(PASO_ORDEN).some(function(k){ return pasoListo(k); });
   if(algunoListo){
     document.getElementById("runNote").textContent = "Ejecuta los pasos con archivos completos; los demás se omiten.";
   } else {
@@ -1657,10 +1677,8 @@ function renderResultados(){
   var area = document.getElementById("resultsArea");
   var r = STATE.results;
   var pasosMeta = [];
-  // Paso 0 se muestra solo si hay archivo de tránsito previo o ya se ejecutó.
-  if(STATE.files.transitoPrevio || (r && r.paso0!==undefined)){
-    pasosMeta.push({key:"paso0", corto:"Paso 0", titulo:"Paso 0 — Partidas en tránsito del mes anterior → bancos de este mes"});
-  }
+  // Paso 0 es obligatorio: siempre se muestra.
+  pasosMeta.push({key:"paso0", corto:"Paso 0", titulo:"Paso 0 — Partidas en tránsito del mes anterior → bancos de este mes (obligatorio)"});
   pasosMeta.push(
     {key:"paso1", corto:"Paso 1", titulo:"Paso 1 — Reporte de cajeras vs. Diario Caja General"},
     {key:"paso2", corto:"Paso 2", titulo:"Paso 2 — Reporte / Caja General vs. Estados de cuenta bancarios"},
@@ -1738,7 +1756,7 @@ function renderResultados(){
     if(items===undefined){
       html += '<div class="empty-skip">Aún no se ejecutó este paso — usa "Ejecutar solo este paso" o el botón global.</div>';
     } else if(bloqueado){
-      html += '<div class="empty-skip">🔒 Bloqueado — primero debe cuadrar el '+nombreCortoPaso(PASO_ORDEN[idxPaso-1])+'.</div>';
+      html += '<div class="empty-skip">🔒 Bloqueado — primero debe cuadrar el '+nombreCortoPaso(pasoPrevio(p.key))+'.</div>';
     } else if(items===null){
       html += '<div class="empty-skip">'+(p.key==="paso1"
         ? "Paso omitido: no se subió el reporte de cajeras."
@@ -1878,12 +1896,14 @@ function parseTransitoPrevio(rows){
     var bancoRaw = cB>=0?String(row[cB]||"").trim():"";
     var banco = clasificarBancoPorTexto(bancoRaw) || bancoRaw;
     var concepto = cC>=0?String(row[cC]||"").trim():"";
-    // Sentido: un cheque EMITIDO (pago) compensa como DÉBITO en el estado; lo detectamos por la nota
-    // "débito en circulación" (o "debito"/"pago") en cualquier celda de la fila. Por defecto, crédito.
+    var comprobante = cR>=0?String(row[cR]||"").trim():"";
+    // Sentido: un cheque EMITIDO (pago / débito en circulación) compensa como DÉBITO en el estado. Se
+    // detecta por la nota "débito en circulación" en la fila, o por el comprobante/referencia que empieza
+    // con "PAY" (los pagos llevan referencia PAY). Por defecto, crédito (cobros/depósitos).
     var rowTxt = normTxt(row.join(" "));
-    var sentido = (rowTxt.indexOf("DEBITO")!==-1) ? "debito" : "credito";
+    var sentido = (rowTxt.indexOf("DEBITO")!==-1 || /^PAY/i.test(comprobante)) ? "debito" : "credito";
     out.push({ fecha:iso, banco: banco, monto:monto, concepto: concepto,
-               comprobante: cR>=0?String(row[cR]||"").trim():"", sentido: sentido });
+               comprobante: comprobante, sentido: sentido });
   }
   return out;
 }
