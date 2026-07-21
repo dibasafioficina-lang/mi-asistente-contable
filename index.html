@@ -806,10 +806,18 @@ function esChequeDesc(desc){
 }
 // Subset-sum recursivo: busca cualquier subconjunto de hasta maxN movimientos no usados (dentro de la
 // ventana) que sumen 'objetivo'. Para cheques, que el banco junta de a varios (ej. 4 cheques = 798.23).
-function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN){
+// direccion (opcional): "adelante" = el pool debe ser de fecha >= ref (un depósito clarea en/después del
+// cheque); "atras" = el pool debe ser de fecha <= ref (los cheques de un depósito son de fecha anterior).
+// Sin dirección, ventana absoluta (compatibilidad). Evita el "viaje en el tiempo" (cheque que clarea antes de emitirse).
+function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, direccion){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
-  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && daysBetween(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
+  for(var i=0;i<pool.length;i++){
+    if(pool[i].usado || daysBetween(fecha, pool[i].fecha) > ventanaDias) continue;
+    if(direccion==="adelante" && pool[i].fecha < fecha) continue; // el depósito no puede ser anterior al cheque
+    if(direccion==="atras" && pool[i].fecha > fecha) continue;    // el cheque no puede ser posterior al depósito
+    idxs.push(i);
+  }
   var res = null;
   function rec(start, restante, acc){
     if(res) return;
@@ -839,7 +847,7 @@ function refComprobante(ref){
 // Concilia débitos del diario contra créditos del estado de cuenta permitiendo COMBINACIONES en ambos
 // sentidos (una línea combinada del diario puede aparecer partida en varias del estado y viceversa;
 // ej. el diario tiene 539.18 y el estado 211.82+132.05+195.31). Devuelve lo que quedó sin emparejar.
-function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia){
+function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
   function limpio(arr, campo){
     return arr.filter(function(x){ return x[campo]>0 && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
       .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, fila:x.fila, usado:false}; });
@@ -849,6 +857,11 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia){
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
     var combo = buscarCombinacion(poolEstado, d.fecha, d.monto, ventanaDias, tolerancia);
+    // VISA compensa NETO en el estado: el diario registra el bruto → probar bruto − retención del día
+    // (la 'Remisión V/Mc' del estado ya viene con la retención descontada). Solo aplica a líneas VISA.
+    if(!combo && retVisaPorDia && retVisaPorDia[d.fecha]!=null && normTxt(d.descripcion).indexOf("VISA")!==-1){
+      combo = buscarCombinacion(poolEstado, d.fecha, Math.round((d.monto - retVisaPorDia[d.fecha])*100)/100, ventanaDias, tolerancia);
+    }
     if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
   });
   // 2) cada crédito del estado no usado contra una combinación de débitos del diario no usados
@@ -981,13 +994,13 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // Paso A: cada cheque contra una combinación de depósitos (un cheque puede clarear en varios depósitos).
       chs.forEach(function(ch){
         if(ch.usado) return;
-        var combo = buscarSubsetSuma(depos, ch.fecha, ch.monto, VENTANA_CHEQUE, tolerancia, 8);
+        var combo = buscarSubsetSuma(depos, ch.fecha, ch.monto, VENTANA_CHEQUE, tolerancia, 8, "adelante");
         if(combo){ combo.forEach(function(i){ depos[i].usado=true; }); ch.usado=true; }
       });
       // Paso B: cada depósito no usado contra una combinación de cheques (el banco junta varios cheques en un depósito).
       depos.forEach(function(d){
         if(d.usado) return;
-        var combo = buscarSubsetSuma(chs, d.fecha, d.monto, VENTANA_CHEQUE, tolerancia, 12);
+        var combo = buscarSubsetSuma(chs, d.fecha, d.monto, VENTANA_CHEQUE, tolerancia, 12, "atras");
         if(combo){ combo.forEach(function(i){ chs[i].usado=true; }); d.usado=true; }
       });
       // Cheques que no clarearon → en tránsito (pendiente por cambiar).
@@ -1027,11 +1040,11 @@ function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia)
   return sinPar;
 }
 // diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
-function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia){
+function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia){
   var hallazgos = [];
   var cfgs = [
     {nombre:"Banistmo", diario:diarioBanistmo, estado:estBanistmo},
-    {nombre:"STG", diario:diarioStg, estado:estStg}
+    {nombre:"STG", diario:diarioStg, estado:estStg, retVisa:retVisaPorDia}
   ];
   if(diarioBancoGeneral && estBancoGeneral) cfgs.push({nombre:"Banco General", diario:diarioBancoGeneral, estado:estBancoGeneral});
   // Bordes de mes: el último día lo pendiente queda en tránsito al mes siguiente; el primer día lo del
@@ -1042,7 +1055,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
   cfgs.forEach(function(cfg){
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
-    var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia);
+    var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
     // Registrado en el diario pero no en el estado de cuenta.
     conc.faltanEnBanco.forEach(function(f){
       // Último día del mes → queda en tránsito para el mes siguiente (aún no compensa).
@@ -1199,12 +1212,16 @@ function computePasoResult(pasoKey, raws, opts){
     var estStg = parseEstadoCuenta(raws.estStg,"stg");
     var diarioBG = raws.diarioBancoGeneral ? parseDiario(raws.diarioBancoGeneral, null) : null;
     var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral, "bancogeneral") : null;
-    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol);
-    // Validación VISA (antes Paso 4): opcional, si se subió el informe de retenciones.
-    // Se valida contra el estado de cuenta STG (donde compensa VISA).
-    if(raws.retVisa){
-      var retVisa = parseRetencionesVisa(raws.retVisa);
-      hallazgos = hallazgos.concat(paso4(retVisa, estStg, opts.ventana, opts.tol));
+    // Retención VISA por día (magnitud positiva): el diario STG registra el bruto y el estado el neto,
+    // así que el matching prueba bruto − retención = neto (igual que en el Paso 2).
+    var retVisaLista = raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null;
+    var retVisaDia = null;
+    if(retVisaLista){ retVisaDia = {}; retVisaLista.forEach(function(d){ retVisaDia[d.fecha] = Math.abs(d.retenciones); }); }
+    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia);
+    // Validación VISA (antes Paso 4): chequeo independiente de que el neto VISA del informe tiene su
+    // 'Remisión V/Mc' en el estado de cuenta STG (además del cuadre diario↔estado de arriba).
+    if(retVisaLista){
+      hallazgos = hallazgos.concat(paso4(retVisaLista, estStg, opts.ventana, opts.tol));
     }
     return hallazgos;
   }
