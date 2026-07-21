@@ -1877,43 +1877,67 @@ function parseTransitoPrevio(rows){
     // Normaliza el nombre del banco a la forma canónica (acepta "stg"/"STG", "banistmo", etc.).
     var bancoRaw = cB>=0?String(row[cB]||"").trim():"";
     var banco = clasificarBancoPorTexto(bancoRaw) || bancoRaw;
-    out.push({ fecha:iso, banco: banco, monto:monto,
-               concepto: cC>=0?String(row[cC]||"").trim():"", comprobante: cR>=0?String(row[cR]||"").trim():"" });
+    var concepto = cC>=0?String(row[cC]||"").trim():"";
+    // Sentido: un cheque EMITIDO (pago) compensa como DÉBITO en el estado; lo detectamos por la nota
+    // "débito en circulación" (o "debito"/"pago") en cualquier celda de la fila. Por defecto, crédito.
+    var rowTxt = normTxt(row.join(" "));
+    var sentido = (rowTxt.indexOf("DEBITO")!==-1) ? "debito" : "credito";
+    out.push({ fecha:iso, banco: banco, monto:monto, concepto: concepto,
+               comprobante: cR>=0?String(row[cR]||"").trim():"", sentido: sentido });
   }
   return out;
 }
 
-// Paso 0: valida que los cheques en tránsito de meses anteriores compensaron en los bancos de este mes.
-// Un cheque puede tardar semanas o meses en cambiarse, así que NO se limita por días: se empareja hacia
-// adelante (el depósito nunca es anterior al cheque) contra los DEPÓSITOS del estado de cuenta, con
-// combinaciones (el banco a veces junta varios cheques en un solo depósito). Los que no compensaron
-// siguen en tránsito y se arrastran al resumen para el mes siguiente.
+// Línea del estado que es una "Remisión Clave" (compensación de tarjeta CLAVE).
+function esRemisionClave(desc){ var n = normTxt(desc); return n.indexOf("REMISION")!==-1 && n.indexOf("CLAVE")!==-1; }
+// Paso 0: valida que las partidas en tránsito de meses anteriores compensaron en los bancos de este mes.
+// Una partida puede tardar semanas o meses, así que NO se limita por días: se empareja hacia adelante
+// (la compensación nunca es anterior a la partida) con combinaciones. Según su TIPO compensa distinto:
+//  - Cheque por depositar / depósito en tránsito → CRÉDITO del estado (depósito).
+//  - Cheque EMITIDO (pago, "débito en circulación") → DÉBITO del estado (cargo).
+//  - Clave en tránsito → crédito "Remisión Clave" del estado.
+// Lo que no compensó sigue en tránsito y se arrastra al resumen del mes siguiente.
 function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
-  var VENTANA = 366; // sin límite práctico (un cheque puede clarear meses después)
+  var VENTANA = 366; // sin límite práctico (puede clarear meses después)
   var hallazgos = [];
   Object.keys(estados).forEach(function(banco){
-    // Cheques en tránsito de meses anteriores asignados a este banco.
-    var chs = transitoPrevio.filter(function(t){ return t.banco===banco; })
-      .map(function(t){ return {fecha:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante, usado:false}; });
-    if(!chs.length) return;
-    // Depósitos de cheque del estado (no remisiones/comisiones/retenciones), .usado compartido.
-    var depos = (estados[banco]||[]).filter(function(x){ return x.credito>0 && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; });
-    // Paso A: cada cheque contra UN depósito hacia adelante (un cheque clarea en un solo depósito).
+    var items = transitoPrevio.filter(function(t){ return t.banco===banco; });
+    if(!items.length) return;
+    var estado = estados[banco] || [];
+    var noAborted = function(x){ return normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; };
+    // Pools del estado según cómo compensa cada tipo (con .usado para no reusar la misma línea).
+    var poolDeb   = estado.filter(function(x){ return x.debito>0 && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.debito, usado:false}; });   // cheques emitidos (pagos) → débito
+    var poolCred  = estado.filter(function(x){ return x.credito>0 && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; });   // depósito en tránsito → cualquier crédito
+    var poolDep   = estado.filter(function(x){ return x.credito>0 && esDepositoEstado(x.descripcion) && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; }); // cheques por depositar → depósito
+    var poolClave = estado.filter(function(x){ return x.credito>0 && esRemisionClave(x.descripcion) && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; }); // clave → remisión clave
+    // Clasifica cada partida y le asigna su pool de compensación (según concepto y sentido).
+    function poolDe(item){
+      if(item.sentido==="debito") return poolDeb;                          // cheque emitido (pago) → débito del estado
+      var c = normTxt(item.concepto);
+      if(c.indexOf("CLAVE")!==-1) return poolClave;                        // clave en tránsito → remisión clave
+      if(c.indexOf("DEPOSITO")!==-1) return poolCred;                      // depósito en tránsito → cualquier crédito
+      return poolDep;                                                      // cheque por depositar → depósito
+    }
+    var chs = items.map(function(t){ return {fecha:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante, sentido:t.sentido, usado:false, pool:poolDe(t)}; });
+    // Paso A: cada partida contra su pool, hacia adelante (una compensación por partida).
     chs.forEach(function(ch){
       if(ch.usado) return;
-      var combo = buscarSubsetSuma(depos, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
-      if(combo){ combo.forEach(function(i){ depos[i].usado=true; }); ch.usado=true; }
+      var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
+      if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; }); ch.usado=true; }
     });
-    // Paso B: cada depósito no usado contra una combinación de cheques (el banco junta varios en un depósito).
-    depos.forEach(function(d){
-      if(d.usado) return;
-      var combo = buscarSubsetSuma(chs, d.fecha, d.monto, VENTANA, tolerancia, 12, "atras");
-      if(combo){ combo.forEach(function(i){ chs[i].usado=true; }); d.usado=true; }
+    // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco
+    // a veces junta varias en una), hacia atrás.
+    [poolDeb, poolCred, poolDep, poolClave].forEach(function(pool){
+      pool.forEach(function(d){
+        if(d.usado) return;
+        var candidatos = chs.filter(function(c){ return !c.usado && c.pool===pool; });
+        var combo = buscarSubsetSuma(candidatos, d.fecha, d.monto, VENTANA, tolerancia, 12, "atras");
+        if(combo){ combo.forEach(function(i){ candidatos[i].usado=true; }); d.usado=true; }
+      });
     });
-    // Partidas que no compensaron → siguen en tránsito (se rotulan con su concepto real).
+    // Partidas que no compensaron → siguen en tránsito (rotuladas con su concepto real).
     chs.forEach(function(ch){
       if(ch.usado) return;
       var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
