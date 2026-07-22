@@ -1804,9 +1804,11 @@ function renderResultados(){
         items.forEach(function(item, idx){ if(!esNoRojo(item)) html += findingHtml(p, item, idx); });
       }
       if(enTransito.length){
-        html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito — pendiente por cambiar ('+enTransito.length+')' +
+        var totTransitoPaso = enTransito.reduce(function(s,i){ return s + i.monto; }, 0);
+        html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito — pendiente por cambiar ('+enTransito.length+') · Total B/ '+totTransitoPaso.toFixed(2)+
           '<span class="sinconf-sub">Cheques registrados como depósito que aún no aparecen en ningún banco. No es diferencia: probablemente están pendientes de compensar.</span></div>';
         items.forEach(function(item, idx){ if(esEnTransito(item)) html += findingHtml(p, item, idx); });
+        html += '<div class="finding transito-total" style="border-top:2px solid var(--line)"><span style="width:18px;flex-shrink:0"></span><div class="ftxt"><b>Total en tránsito de este paso</b></div><div class="famt"><b>B/ '+totTransitoPaso.toFixed(2)+'</b></div></div>';
         html += '</div>';
       }
       if(sinConf.length){
