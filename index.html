@@ -1328,7 +1328,7 @@ function pasoCuadrado(pasoKey){
 function pasoDesbloqueado(pasoKey){
   var idx = PASO_ORDEN.indexOf(pasoKey);
   if(idx<0) return true;                       // Paso 0 (no está en PASO_ORDEN)
-  if(idx===0) return pasoCuadrado("paso0");    // Paso 1 requiere el Paso 0 (obligatorio)
+  if(idx===0) return pasoListo("paso0");       // Paso 1: requiere los archivos del Paso 0 (que se ejecuta junto)
   return pasoCuadrado(PASO_ORDEN[idx-1]);
 }
 // Paso previo requerido para desbloquear pasoKey (el Paso 0 es el previo del Paso 1).
@@ -1362,14 +1362,26 @@ function refrescarModulo(nota){
 }
 
 function ejecutarPaso(pasoKey){
+  if(pasoKey==="paso0") return; // el Paso 0 no se ejecuta solo: corre junto con el Paso 1 (es requisito).
   if(!pasoListo(pasoKey) || !pasoDesbloqueado(pasoKey)) return; // condicionado a que el paso anterior cuadre
   var note = document.getElementById("runNote");
   if(note) note.textContent = "Leyendo archivos de este paso...";
-  readMany(archivosDePaso(pasoKey), function(raws){
+  // El Paso 1 (primer paso de la cadena) ejecuta primero el Paso 0 obligatorio; para eso lee sus archivos.
+  var esPrimero = pasoKey===PASO_ORDEN[0];
+  var keys = esPrimero ? archivosDePaso("paso0").concat(archivosDePaso(pasoKey)) : archivosDePaso(pasoKey);
+  readMany(keys, function(raws){
     try{
       var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
-      var result = computePasoResult(pasoKey, raws, opts);
       ensureResults();
+      if(esPrimero){
+        STATE.results.paso0 = computePasoResult("paso0", raws, opts);
+        if(!pasoCuadrado("paso0")){
+          propagarBloqueo();
+          refrescarModulo("El Paso 0 (obligatorio) no cuadró — revisá las partidas en tránsito del mes anterior antes de continuar.");
+          return;
+        }
+      }
+      var result = computePasoResult(pasoKey, raws, opts);
       Object.keys(STATE.checks).forEach(function(k){ if(k.indexOf(pasoKey+"_")===0) delete STATE.checks[k]; });
       STATE.results[pasoKey] = result;
       propagarBloqueo();
@@ -1579,7 +1591,9 @@ function stageRunHtml(pasoKey){
   var habilitado = listo && desbloqueado;
   var nota;
   if(!listo) nota = "Faltan archivos: " + faltantesDePaso(pasoKey).join(", ") + ".";
-  else if(!desbloqueado) nota = "Bloqueado — primero debe cuadrar el " + nombreCortoPaso(pasoPrevio(pasoKey)) + ".";
+  else if(!desbloqueado) nota = (pasoKey===PASO_ORDEN[0])
+    ? "Faltan archivos del Paso 0 (obligatorio): " + faltantesDePaso("paso0").join(", ") + "."
+    : "Bloqueado — primero debe cuadrar el " + nombreCortoPaso(pasoPrevio(pasoKey)) + ".";
   else if(cuadrado) nota = "Ya cuadró. Puedes volver a ejecutarlo si cambiaste archivos.";
   else nota = "Listo para ejecutar de forma independiente.";
   return '<div class="stage-run">' +
@@ -1594,10 +1608,10 @@ function renderModulo1(){
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge" style="background:#B56B86;color:#fff">obligatorio</span></h3>' +
-    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). <b>Es obligatorio: hasta que el Paso 0 cuadre, las conciliaciones bancarias (Pasos 1 a 3) quedan bloqueadas.</b></p>' +
+    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). <b>Es obligatorio y no se ejecuta solo: se corre automáticamente junto con el Paso 1. Hasta que cuadre, las conciliaciones (Pasos 1 a 3) quedan bloqueadas.</b></p>' +
     '<div class="dropzones">' +
       dzHtml("transitoPrevio","Resumen en tránsito del mes anterior","en_transito_[MES].xlsx (Fecha, Banco, Monto, Concepto, Comprobante) — descargado del cierre del mes pasado") +
-    '</div>' + stageRunHtml("paso0") + '</div>' +
+    '</div><div class="stage-run"><span class="stage-run-note">El Paso 0 se ejecuta junto con el Paso 1 (no tiene botón propio). Necesita también los estados de cuenta del Paso 2.</span></div></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
     '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
