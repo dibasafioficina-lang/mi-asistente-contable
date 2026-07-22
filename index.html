@@ -1555,13 +1555,30 @@ function dzHtml(key, label, esperado){
     '</div>';
 }
 
+// Nombre legible de cada archivo (para avisar exactamente qué falta en cada paso).
+var FILE_LABELS = {
+  transitoPrevio: "Resumen en tránsito del mes anterior (Paso 0)",
+  reporte: "Reporte consolidado de caja (Paso 1)",
+  diarioCaja: "Diario Caja General (Paso 1)",
+  estBanistmo: "Estado de cuenta Banistmo (Paso 2)",
+  estStg: "Estado de cuenta STG (Paso 2)",
+  estBancoGeneral: "Estado de cuenta Banco General (Paso 2)",
+  diarioBanistmo: "Diario Banistmo (Paso 3)",
+  diarioStg: "Diario STG (Paso 3)",
+  diarioBancoGeneral: "Diario Banco General (Paso 3)",
+  retVisa: "Informe de retenciones VISA (Paso 2)"
+};
+function faltantesDePaso(pasoKey){
+  return (PASO_REQS[pasoKey]||[]).filter(function(k){ return !STATE.files[k]; })
+    .map(function(k){ return FILE_LABELS[k] || k; });
+}
 function stageRunHtml(pasoKey){
   var listo = pasoListo(pasoKey);
   var desbloqueado = pasoDesbloqueado(pasoKey);
   var cuadrado = pasoCuadrado(pasoKey);
   var habilitado = listo && desbloqueado;
   var nota;
-  if(!listo) nota = "Faltan archivos de este paso.";
+  if(!listo) nota = "Faltan archivos: " + faltantesDePaso(pasoKey).join(", ") + ".";
   else if(!desbloqueado) nota = "Bloqueado — primero debe cuadrar el " + nombreCortoPaso(pasoPrevio(pasoKey)) + ".";
   else if(cuadrado) nota = "Ya cuadró. Puedes volver a ejecutarlo si cambiaste archivos.";
   else nota = "Listo para ejecutar de forma independiente.";
