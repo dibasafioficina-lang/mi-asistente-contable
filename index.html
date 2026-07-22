@@ -1195,8 +1195,10 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
 // (ver pasoDesbloqueado/propagarBloqueo). Se corre antes de las conciliaciones bancarias.
 var PASO_ORDEN = ["paso1","paso2","paso3"];
 var PASO_REQS = {
-  // Paso 0 (obligatorio): valida que las partidas en tránsito del mes anterior compensaron este mes.
-  paso0: ["transitoPrevio","estBanistmo","estStg"],
+  // Paso 0 (obligatorio): su ÚNICO archivo requerido es el resumen en tránsito del mes anterior.
+  // Los estados de cuenta son opcionales acá (se suben en el Paso 2): si están, valida cuáles de esas
+  // partidas ya compensaron; si no, todas quedan en tránsito hasta que se corra con los estados.
+  paso0: ["transitoPrevio"],
   paso1: ["reporte","diarioCaja"],
   // Paso 2: coteja lo que Caja General registró como depositado a cada banco contra el estado de cuenta real.
   paso2: ["diarioCaja","estBanistmo","estStg"],
@@ -1207,7 +1209,9 @@ var PASO_REQS = {
 // El Paso 3 incluye la validación VISA: si se sube el informe de retenciones, además de conciliar
 // diario vs estado de cuenta, valida el neto VISA contra el estado de cuenta STG.
 var PASO_OPCIONALES = {
-  paso0: ["estBancoGeneral"],
+  // Estados de cuenta: opcionales en el Paso 0. Se leen si están (subidos en el Paso 2) para validar
+  // cuáles partidas del mes anterior ya compensaron; si no, todas quedan en tránsito.
+  paso0: ["estBanistmo","estStg","estBancoGeneral"],
   // retVisa: para el neto VISA. reporte: para el desglose individual de cheques (2ª pestaña).
   paso2: ["estBancoGeneral","retVisa","reporte"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
@@ -1227,10 +1231,11 @@ function computePasoResult(pasoKey, raws, opts){
   // mostrarlo como contexto de partidas en tránsito entre meses.
   if(raws.diarioCaja){ try{ STATE.saldoCajaGeneral = parseSaldoCajaGeneral(raws.diarioCaja); }catch(e){} }
   if(pasoKey==="paso0"){
-    if(!raws.transitoPrevio || !raws.estBanistmo || !raws.estStg) return null;
+    if(!raws.transitoPrevio) return null; // único archivo requerido: el resumen en tránsito
     var trPrev = parseTransitoPrevio(raws.transitoPrevio);
-    var eB = parseEstadoCuenta(raws.estBanistmo,"banistmo");
-    var eS = parseEstadoCuenta(raws.estStg,"stg");
+    // Estados de cuenta opcionales: si no están, se valida contra vacío (todo queda en tránsito).
+    var eB = raws.estBanistmo ? parseEstadoCuenta(raws.estBanistmo,"banistmo") : [];
+    var eS = raws.estStg ? parseEstadoCuenta(raws.estStg,"stg") : [];
     var eBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
     return paso0(trPrev, eB, eS, eBG, opts.ventana, opts.tol);
   }
@@ -1608,10 +1613,10 @@ function renderModulo1(){
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge" style="background:#B56B86;color:#fff">obligatorio</span></h3>' +
-    '<p class="desc">Sube el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida que esas partidas compensaron en los estados de cuenta de este mes (usa los del Paso 2). <b>Es obligatorio y no se ejecuta solo: se corre automáticamente junto con el Paso 1. Hasta que cuadre, las conciliaciones (Pasos 1 a 3) quedan bloqueadas.</b></p>' +
+    '<p class="desc">Su único archivo es el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida cuáles de esas partidas ya compensaron usando los estados de cuenta del Paso 2 (si están); las que no, quedan en tránsito. <b>Es obligatorio y no se ejecuta solo: se corre automáticamente junto con el Paso 1.</b></p>' +
     '<div class="dropzones">' +
       dzHtml("transitoPrevio","Resumen en tránsito del mes anterior","en_transito_[MES].xlsx (Fecha, Banco, Monto, Concepto, Comprobante) — descargado del cierre del mes pasado") +
-    '</div><div class="stage-run"><span class="stage-run-note">El Paso 0 se ejecuta junto con el Paso 1 (no tiene botón propio). Necesita también los estados de cuenta del Paso 2.</span></div></div>' +
+    '</div><div class="stage-run"><span class="stage-run-note">El Paso 0 se ejecuta junto con el Paso 1 (no tiene botón propio). Solo requiere este archivo; usa los estados de cuenta del Paso 2 si están disponibles.</span></div></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 1</span> Reporte de cajeras → Diario Caja General</h3>' +
     '<p class="desc">Valida que lo reportado manualmente por las cajeras se transcribió correctamente a la contabilidad.</p>' +
