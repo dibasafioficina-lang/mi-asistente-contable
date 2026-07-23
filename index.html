@@ -780,7 +780,9 @@ function primerDiaMes(fechas){
   var best = mesDominante(fechas); return best ? (best + "-01") : null;
 }
 // ¿La descripción es un ACH/depósito de Brinks? (equivale al efectivo brinks del reporte, no es diferencia).
-function esBrinks(desc){ return normTxt(desc).indexOf("BRINKS") !== -1; }
+// Detecta Brinks en cualquiera de sus variantes: "Brinks Panama" (junto) o "Brink S Panama" (con espacio,
+// como aparece en el estado de cuenta de STG). Por eso se busca "BRINK" y no "BRINKS".
+function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
 
 // Busca en 'pool' (créditos del banco, con flag .usado) una combinación de 1, 2 o 3 movimientos
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
@@ -847,6 +849,20 @@ function refComprobante(ref){
 // Concilia débitos del diario contra créditos del estado de cuenta permitiendo COMBINACIONES en ambos
 // sentidos (una línea combinada del diario puede aparecer partida en varias del estado y viceversa;
 // ej. el diario tiene 539.18 y el estado 211.82+132.05+195.31). Devuelve lo que quedó sin emparejar.
+// Empareja un depósito Brinks del diario contra el crédito Brinks del estado más cercano (en fecha)
+// dentro de una ventana amplia. Los depósitos Brinks clarean con varios días de rezago (el efectivo se
+// entrega a Brinks y el banco lo acredita días después con la misma descripción "Brinks"), más que la
+// ventana general; se restringe a líneas Brinks para no cruzar con otros montos iguales.
+function buscarBrinks(pool, fecha, objetivo, ventanaDias, tolerancia){
+  var mejor = -1, mejorDist = Infinity;
+  for(var i=0;i<pool.length;i++){
+    if(pool[i].usado || !esBrinks(pool[i].descripcion)) continue;
+    if(Math.abs(pool[i].monto - objetivo) > tolerancia) continue;
+    var dist = daysBetween(fecha, pool[i].fecha);
+    if(dist <= ventanaDias && dist < mejorDist){ mejor = i; mejorDist = dist; }
+  }
+  return mejor>=0 ? [mejor] : null;
+}
 function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
   function limpio(arr, campo){
     // _chqUsado: filas que la pasada de cheques (cheques del diario + Paso 0) ya emparejó, se excluyen.
@@ -855,6 +871,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   }
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
+  var VENTANA_BRINKS = Math.max(ventanaDias, 10); // el Brinks clarea con rezago (varios días)
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
     var combo = buscarCombinacion(poolEstado, d.fecha, d.monto, ventanaDias, tolerancia);
@@ -862,6 +879,10 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // (la 'Remisión V/Mc' del estado ya viene con la retención descontada). Solo aplica a líneas VISA.
     if(!combo && retVisaPorDia && retVisaPorDia[d.fecha]!=null && normTxt(d.descripcion).indexOf("VISA")!==-1){
       combo = buscarCombinacion(poolEstado, d.fecha, Math.round((d.monto - retVisaPorDia[d.fecha])*100)/100, ventanaDias, tolerancia);
+    }
+    // Brinks: depósito Brinks del diario → crédito Brinks del estado, con ventana amplia (rezago).
+    if(!combo && esBrinks(d.descripcion)){
+      combo = buscarBrinks(poolEstado, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
     }
     if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
   });
