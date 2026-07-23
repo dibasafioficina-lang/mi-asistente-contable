@@ -863,10 +863,31 @@ function buscarBrinks(pool, fecha, objetivo, ventanaDias, tolerancia){
   }
   return mejor>=0 ? [mejor] : null;
 }
+// Traspaso interno de neto cero: un mismo comprobante (referencia) con un DÉBITO y un CRÉDITO del mismo
+// monto en el diario = dinero que entra y sale (movimiento interno). No llega al estado de cuenta, así
+// que el débito se marca "_neutro" para no compararlo contra el banco (si no, saldría como diferencia).
+function marcarNeutros(diario){
+  var noAborted = function(x){ return normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; };
+  var credPorRef = {};
+  (diario||[]).forEach(function(x){
+    if(x.credito>0 && noAborted(x)){
+      var ref = String(x.referencia||"").trim(); if(!ref) return;
+      (credPorRef[ref] = credPorRef[ref] || []).push(x.credito);
+    }
+  });
+  (diario||[]).forEach(function(x){
+    if(x.debito>0 && noAborted(x)){
+      var ref = String(x.referencia||"").trim(); var lista = credPorRef[ref]; if(!lista) return;
+      for(var k=0;k<lista.length;k++){ if(Math.abs(lista[k]-x.debito)<=0.01){ lista.splice(k,1); x._neutro=true; break; } }
+    }
+  });
+}
 function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
+  marcarNeutros(diarioDeb);
   function limpio(arr, campo){
-    // _chqUsado: filas que la pasada de cheques (cheques del diario + Paso 0) ya emparejó, se excluyen.
-    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
+    // Se excluyen: _chqUsado (ya emparejado por la pasada de cheques/Paso 0) y _neutro (traspaso interno
+    // de neto cero, no llega al estado de cuenta).
+    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
       .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, fila:x.fila, usado:false}; });
   }
   var poolDiario = limpio(diarioDeb, "debito");
@@ -1127,13 +1148,21 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
     // Registrado en el diario pero no en el estado de cuenta.
     conc.faltanEnBanco.forEach(function(f){
-      // Último día del mes → queda en tránsito para el mes siguiente (aún no compensa).
-      if(ultimoDia && f.fecha===ultimoDia){
+      var desc = (f.descripcion||"").trim();
+      var n = normTxt(desc);
+      // Depósitos que clarean con REZAGO: Brinks (~5 días) y tarjeta/Yappy (~3 días). Si caen en los
+      // últimos días del mes y aún no compensaron, no alcanzaron el corte → quedan en tránsito para el
+      // mes siguiente (no es diferencia). Los depósitos directos (ACH, traspaso, certificados) no tienen
+      // rezago: solo el último día quedan en tránsito; antes de eso, si no compensan, es diferencia real.
+      var lag = esBrinks(desc) ? 5
+        : (n.indexOf("TARJETA")!==-1 || n.indexOf("VISA")!==-1 || n.indexOf("CLAVE")!==-1 || n.indexOf("YAPPY")!==-1) ? 3 : 0;
+      var diasAlCierre = ultimoDia ? daysBetween(f.fecha, ultimoDia) : 999;
+      if(ultimoDia && diasAlCierre <= lag){
         hallazgos.push({
           fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
-          concepto:(f.descripcion||"").trim(), comprobante:"", motivo:"último día del mes",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + (f.descripcion||"").trim() +
-                 "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el estado de cuenta).",
+          concepto:desc, comprobante:"", motivo:(f.fecha===ultimoDia ? "último día del mes" : "depósito de fin de mes"),
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+                 "\") es un depósito de los últimos días del mes que aún no compensa en el estado — queda en tránsito para el mes siguiente.",
           fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
         });
         return;
