@@ -1733,6 +1733,14 @@ function renderResultados(){
       '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
       '<div class="famt">'+montoTxt+'</div></div>';
   }
+  // Fila de subtotal (alineada con la columna de montos, con espaciador de la casilla).
+  function filaTotal(label, monto){
+    return '<div class="finding transito-total" style="border-top:2px solid var(--line)"><span style="width:18px;flex-shrink:0"></span>' +
+      '<div class="ftxt"><b>'+label+'</b></div><div class="famt"><b>B/ '+monto.toFixed(2)+'</b></div></div>';
+  }
+  // Una partida "en tránsito" es ENTRANTE si es una compensación del mes anterior (aparece el primer día);
+  // el resto SALE al próximo mes (fin de mes o cheque pendiente por cambiar).
+  function esTransitoEntrante(item){ return /mes anterior/i.test(item.motivo||""); }
 
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
@@ -1804,11 +1812,23 @@ function renderResultados(){
         items.forEach(function(item, idx){ if(!esNoRojo(item)) html += findingHtml(p, item, idx); });
       }
       if(enTransito.length){
-        var totTransitoPaso = enTransito.reduce(function(s,i){ return s + i.monto; }, 0);
-        html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito — pendiente por cambiar ('+enTransito.length+') · Total B/ '+totTransitoPaso.toFixed(2)+
-          '<span class="sinconf-sub">Cheques registrados como depósito que aún no aparecen en ningún banco. No es diferencia: probablemente están pendientes de compensar.</span></div>';
-        items.forEach(function(item, idx){ if(esEnTransito(item)) html += findingHtml(p, item, idx); });
-        html += '<div class="finding transito-total" style="border-top:2px solid var(--line)"><span style="width:18px;flex-shrink:0"></span><div class="ftxt"><b>Total en tránsito de este paso</b></div><div class="famt"><b>B/ '+totTransitoPaso.toFixed(2)+'</b></div></div>';
+        var salen = enTransito.filter(function(i){ return !esTransitoEntrante(i); });
+        var entraron = enTransito.filter(esTransitoEntrante);
+        var totSalen = salen.reduce(function(s,i){ return s + i.monto; }, 0);
+        var totEntraron = entraron.reduce(function(s,i){ return s + i.monto; }, 0);
+        var head = entraron.length
+          ? 'sale al próximo mes B/ '+totSalen.toFixed(2)+' · entró del mes anterior B/ '+totEntraron.toFixed(2)
+          : 'Total B/ '+totSalen.toFixed(2);
+        html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito ('+enTransito.length+') · '+head +
+          '<span class="sinconf-sub">Partidas que aún no compensan (salen al próximo mes) o que compensaron este mes viniendo del anterior. No son diferencias.</span></div>';
+        // Grupo 1: sale al próximo mes (fin de mes + cheques pendientes).
+        items.forEach(function(item, idx){ if(esEnTransito(item) && !esTransitoEntrante(item)) html += findingHtml(p, item, idx); });
+        if(salen.length) html += filaTotal(entraron.length ? "Sale al próximo mes" : "Total en tránsito de este paso", totSalen);
+        // Grupo 2: entró del mes anterior (compensó este mes).
+        if(entraron.length){
+          items.forEach(function(item, idx){ if(esEnTransito(item) && esTransitoEntrante(item)) html += findingHtml(p, item, idx); });
+          html += filaTotal("Entró del mes anterior (compensó este mes)", totEntraron);
+        }
         html += '</div>';
       }
       if(sinConf.length){
