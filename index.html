@@ -2024,7 +2024,9 @@ function cierreCajaHtml(){
   if(!STATE.caja) STATE.caja = {};
   var inicial = STATE.caja.inicial!=null ? STATE.caja.inicial : (saldo.inicial!=null ? saldo.inicial : 0);
   var sistema = STATE.caja.sistema!=null ? STATE.caja.sistema : (saldo.final!=null ? saldo.final : 0);
-  var movimiento = STATE.caja.movimiento!=null ? STATE.caja.movimiento : tm.total;
+  // Movimiento en tránsito: editable (Diba lo define). Se precarga con el movimiento del mes del sistema
+  // (para que el balance cuadre de entrada); el total en tránsito por método se muestra aparte como referencia.
+  var movimiento = STATE.caja.movimiento!=null ? STATE.caja.movimiento : (saldo.movimiento!=null ? saldo.movimiento : tm.total);
   var finalEsp = Math.round((inicial + movimiento)*100)/100;
   var dif = Math.round((finalEsp - sistema)*100)/100;
   var ok = Math.abs(dif) < 0.01;
