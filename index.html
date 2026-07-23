@@ -905,6 +905,12 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     if(!combo && esBrinks(d.descripcion)){
       combo = buscarBrinks(poolEstado, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
     }
+    // Depósito combinado: el diario registra un depósito global (ej. ACH de varios certificados por
+    // 1313.10) que el estado refleja partido en MÁS de 3 líneas y con unos días de rezago. Se prueba una
+    // combinación de hasta 5 créditos con ventana algo más amplia.
+    if(!combo){
+      combo = buscarSubsetSuma(poolEstado, d.fecha, d.monto, Math.max(ventanaDias, 8), tolerancia, 5);
+    }
     if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
   });
   // 2) cada crédito del estado no usado contra una combinación de débitos del diario no usados
