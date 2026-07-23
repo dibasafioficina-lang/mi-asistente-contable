@@ -1146,30 +1146,26 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
-    // Registrado en el diario pero no en el estado de cuenta.
+    // Registrado en el diario/informe pero NO en el estado de cuenta = dinero que la empresa ya registró
+    // como depósito y el banco todavía no reflejó → EN TRÁNSITO (pendiente por compensar en banco). No es
+    // diferencia: o clarea con rezago (Brinks/tarjeta), o es de fin de mes, o simplemente el banco aún no
+    // lo procesó. Se distingue el motivo (fin de mes vs pendiente) solo para el texto; la clase es la misma.
     conc.faltanEnBanco.forEach(function(f){
       var desc = (f.descripcion||"").trim();
       var n = normTxt(desc);
-      // Depósitos que clarean con REZAGO: Brinks (~5 días) y tarjeta/Yappy (~3 días). Si caen en los
-      // últimos días del mes y aún no compensaron, no alcanzaron el corte → quedan en tránsito para el
-      // mes siguiente (no es diferencia). Los depósitos directos (ACH, traspaso, certificados) no tienen
-      // rezago: solo el último día quedan en tránsito; antes de eso, si no compensan, es diferencia real.
       var lag = esBrinks(desc) ? 5
         : (n.indexOf("TARJETA")!==-1 || n.indexOf("VISA")!==-1 || n.indexOf("CLAVE")!==-1 || n.indexOf("YAPPY")!==-1) ? 3 : 0;
       var diasAlCierre = ultimoDia ? daysBetween(f.fecha, ultimoDia) : 999;
-      if(ultimoDia && diasAlCierre <= lag){
-        hallazgos.push({
-          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
-          concepto:desc, comprobante:"", motivo:(f.fecha===ultimoDia ? "último día del mes" : "depósito de fin de mes"),
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
-                 "\") es un depósito de los últimos días del mes que aún no compensa en el estado — queda en tránsito para el mes siguiente.",
-          fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
-        });
-        return;
-      }
+      var finDeMes = ultimoDia && diasAlCierre <= lag;
+      var motivo = finDeMes ? (f.fecha===ultimoDia ? "último día del mes" : "depósito de fin de mes") : "pendiente por compensar en banco";
+      var texto = finDeMes
+        ? cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+          "\") es un depósito de los últimos días del mes que aún no compensa en el estado — queda en tránsito para el mes siguiente."
+        : cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+          "\") está registrado en el diario/informe pero aún no aparece en el estado de cuenta — pendiente por compensar en banco.";
       hallazgos.push({
-        fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"diff",
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " registrado en el diario contable no aparece en el estado de cuenta",
+        fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
+        concepto:desc, comprobante:"", motivo:motivo, texto:texto,
         fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ") / Estado de cuenta " + cfg.nombre
       });
     });
