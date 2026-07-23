@@ -197,6 +197,21 @@
     margin:6px 0 20px;padding:18px 22px;border-radius:16px;background:var(--ok-bg);border:1px solid #BEE3CD}
   .cierre-panel .cierre-title{font-family:"DM Serif Display",serif;font-size:19px;color:var(--ok)}
   .cierre-panel .cierre-sub{font-size:13.5px;color:#3F6E56;margin-top:4px;max-width:560px;line-height:1.5}
+  .cierre-caja{margin:6px 0 20px;padding:20px 22px;border-radius:16px;background:var(--ok-bg);border:1px solid #BEE3CD}
+  .cierre-caja .cierre-title{font-family:"DM Serif Display",serif;font-size:20px;color:var(--ok);margin-bottom:14px}
+  .cg-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.cg-cols{grid-template-columns:1fr}}
+  .cg-box{background:#fff;border:1px solid #CDE7D6;border-radius:12px;padding:14px 16px}
+  .cg-h{font-weight:800;font-size:13px;color:var(--heading);margin-bottom:10px;text-transform:uppercase;letter-spacing:.3px}
+  .cg-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;font-size:14px;color:var(--slate);border-bottom:1px solid #EEF4F0}
+  .cg-row:last-child{border-bottom:none}
+  .cg-row b{font-family:"Mulish";font-weight:800;color:var(--heading);white-space:nowrap}
+  .cg-tot{border-top:2px solid #CDE7D6;margin-top:4px;font-weight:700}
+  .cg-tot span{font-weight:800;color:var(--heading)}
+  .cg-dif b{font-size:15px}
+  .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
+    border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
+  .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
 
@@ -1798,28 +1813,8 @@ function renderResultados(){
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
 
-  // Cuando TODO el módulo (Pasos 1-3) cuadra, ofrecer el resumen de partidas en tránsito para el próximo mes.
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
-  // Panel de partidas en tránsito: se muestra siempre que haya alguna (no depende de que todo cuadre,
-  // porque el resumen sale de Paso 0 + Paso 2, que son independientes de las rojas de Paso 3).
-  var tt = totalesEnTransitoPorBanco();
-  if(tt.count > 0){
-    var bancosTxt = Object.keys(tt.porBanco).sort().map(function(b){
-      var x = tt.porBanco[b];
-      var detalle = x.otros>0.005 ? " (cheques B/ "+x.cheques.toFixed(2)+" + otros B/ "+x.otros.toFixed(2)+")" : "";
-      return b + ": B/ " + x.total.toFixed(2) + detalle;
-    }).join("<br>");
-    var subNota = todoCuadrado
-      ? "Descarga el resumen y cárgalo en el Paso 0 del mes siguiente para validar que compensen."
-      : "Aún quedan diferencias por resolver, pero este resumen ya está listo (sale del Paso 0 y del Paso 2). Cárgalo en el Paso 0 del mes siguiente.";
-    html += '<div class="cierre-panel"><div class="cierre-txt">' +
-      '<div class="cierre-title">'+(todoCuadrado ? '🎉 Módulo cuadrado' : '📋 Partidas en tránsito')+'</div>' +
-      '<div class="cierre-sub"><strong>Total en tránsito para el próximo mes: B/ '+tt.total.toFixed(2)+'</strong> ('+tt.count+' partida(s))' +
-      '<br>Cheques: B/ '+tt.cheques.toFixed(2)+' · Otros depósitos (tarjeta/fin de mes): B/ '+tt.otros.toFixed(2) +
-      (bancosTxt ? '<br>'+bancosTxt : '') +
-      '<br>'+subNota+'</div>' +
-      '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
-  }
+  // Barra resumen (chips) — siempre visible.
   html += '<div class="summary-bar">' +
     '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
     (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '') +
@@ -1831,8 +1826,34 @@ function renderResultados(){
   });
   html += '</div>';
 
+  // Cuando la CAJA (Paso 1 y 2) cuadra, se muestra el cierre CONSOLIDADO de Caja General arriba, y abajo
+  // SOLO los pasos que todavía tengan diferencias (no se repiten los cuadrados). Si la caja aún no cuadra,
+  // se muestra el detalle por paso + el panel de partidas en tránsito.
+  var cajaLista = pasoCuadrado("paso1") && pasoCuadrado("paso2");
+  if(cajaLista){
+    html += cierreCajaHtml();
+  }
+  var tt = totalesEnTransitoPorBanco();
+  if(!cajaLista && tt.count > 0){
+    var bancosTxt = Object.keys(tt.porBanco).sort().map(function(b){
+      var x = tt.porBanco[b];
+      var detalle = x.otros>0.005 ? " (cheques B/ "+x.cheques.toFixed(2)+" + otros B/ "+x.otros.toFixed(2)+")" : "";
+      return b + ": B/ " + x.total.toFixed(2) + detalle;
+    }).join("<br>");
+    html += '<div class="cierre-panel"><div class="cierre-txt">' +
+      '<div class="cierre-title">📋 Partidas en tránsito</div>' +
+      '<div class="cierre-sub"><strong>Total en tránsito para el próximo mes: B/ '+tt.total.toFixed(2)+'</strong> ('+tt.count+' partida(s))' +
+      '<br>Cheques: B/ '+tt.cheques.toFixed(2)+' · Otros depósitos (tarjeta/fin de mes): B/ '+tt.otros.toFixed(2) +
+      (bancosTxt ? '<br>'+bancosTxt : '') +
+      '<br>Aún quedan diferencias por resolver; el resumen ya está listo (sale del Paso 0 y del Paso 2).</div>' +
+      '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
+  }
+
   pasosMeta.forEach(function(p){
     var items = r[p.key];
+    // Si la caja ya está cuadrada (cierre consolidado arriba), no repetimos los pasos que cuadran; solo
+    // se muestran abajo los que todavía tengan diferencias rojas (ej. Paso 3 con partidas de banco).
+    if(cajaLista && Array.isArray(items) && contarRojas(items)===0) return;
     var esArray = Array.isArray(items);
     var bloqueado = items==="bloqueado";
     var cuadrado = esArray && contarRojas(items)===0;
@@ -1912,6 +1933,7 @@ function renderResultados(){
   document.getElementById("exportBtn").onclick = exportarChecklist;
   var btnT = document.getElementById("btnTransito");
   if(btnT) btnT.onclick = exportarEnTransito;
+  if(cajaLista) bindCajaInputs(); // campos editables del cierre de Caja General (saldo inicial / sistema)
 }
 
 function exportarChecklist(){
@@ -1977,6 +1999,81 @@ function totalesEnTransitoPorBanco(){
   });
   return { porBanco: porBanco, cheques: totCheques, otros: totOtros, total: totCheques+totOtros, count: items.length };
 }
+// Método de pago de una partida en tránsito (según su concepto/texto), para el resumen del cierre.
+function metodoTransito(it){
+  var t = normTxt((it.concepto||"")+" "+(it.texto||""));
+  if(t.indexOf("VISA")!==-1) return "Tarjeta VISA";
+  if(t.indexOf("CLAVE")!==-1) return "Tarjeta CLAVE";
+  if(t.indexOf("YAPPY")!==-1) return "Yappy";
+  if(esBrinks(t) || t.indexOf("EFECTIVO")!==-1) return "Efectivo (Brinks)";
+  if(esChequeEnTransito(it)) return "Cheque";
+  if(t.indexOf("ACH")!==-1) return "ACH";
+  return "Otro depósito";
+}
+function transitoPorMetodo(){
+  var items = recolectarEnTransito();
+  var porMetodo = {}; var total = 0;
+  items.forEach(function(it){ var m = metodoTransito(it); porMetodo[m] = (porMetodo[m]||0) + it.monto; total += it.monto; });
+  return { porMetodo: porMetodo, total: total, count: items.length };
+}
+// Panel de cierre de Caja General: en tránsito por método de pago + balance editable
+// (saldo inicial + movimiento en tránsito = saldo final esperado, comparado con el saldo del sistema).
+function cierreCajaHtml(){
+  var tm = transitoPorMetodo();
+  var saldo = STATE.saldoCajaGeneral || {};
+  if(!STATE.caja) STATE.caja = {};
+  var inicial = STATE.caja.inicial!=null ? STATE.caja.inicial : (saldo.inicial!=null ? saldo.inicial : 0);
+  var sistema = STATE.caja.sistema!=null ? STATE.caja.sistema : (saldo.final!=null ? saldo.final : 0);
+  var movimiento = STATE.caja.movimiento!=null ? STATE.caja.movimiento : tm.total;
+  var finalEsp = Math.round((inicial + movimiento)*100)/100;
+  var dif = Math.round((finalEsp - sistema)*100)/100;
+  var ok = Math.abs(dif) < 0.01;
+  var filasMetodo = Object.keys(tm.porMetodo).sort().map(function(m){
+    return '<div class="cg-row"><span>'+m+'</span><b>B/ '+tm.porMetodo[m].toFixed(2)+'</b></div>';
+  }).join("");
+  var h = '<div class="cierre-caja">' +
+    '<div class="cierre-title">🎉 Caja General cuadrada — cierre del período</div>' +
+    '<div class="cg-cols">' +
+      '<div class="cg-box"><div class="cg-h">En tránsito para el próximo mes · por método de pago</div>' +
+        filasMetodo +
+        '<div class="cg-row cg-tot"><span>Movimiento en tránsito</span><b>B/ '+tm.total.toFixed(2)+'</b></div>' +
+        '<div class="cg-note">'+tm.count+' partida(s). Este es el dinero que la empresa registró y el banco reflejará el mes siguiente.</div>' +
+      '</div>' +
+      '<div class="cg-box"><div class="cg-h">Balance de Caja General</div>' +
+        '<div class="cg-row"><span>Saldo inicial</span><input id="cajaInicial" class="cg-inp" type="number" step="0.01" value="'+inicial.toFixed(2)+'"></div>' +
+        '<div class="cg-row"><span>+ Movimiento en tránsito</span><input id="cajaMov" class="cg-inp" type="number" step="0.01" value="'+movimiento.toFixed(2)+'"></div>' +
+        '<div class="cg-row cg-tot"><span>= Saldo final esperado</span><b id="cajaFinalEsp">B/ '+finalEsp.toFixed(2)+'</b></div>' +
+        '<div class="cg-row"><span>Saldo final del sistema</span><input id="cajaSistema" class="cg-inp" type="number" step="0.01" value="'+sistema.toFixed(2)+'"></div>' +
+        '<div class="cg-row cg-dif"><span>Diferencia</span><b id="cajaDif" style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+dif.toFixed(2))+'</b></div>' +
+      '</div>' +
+    '</div>' +
+    '<button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button>' +
+  '</div>';
+  return h;
+}
+// Recalcula en vivo el saldo final esperado y la diferencia al editar los campos (sin re-render completo).
+function bindCajaInputs(){
+  var ci = document.getElementById("cajaInicial");
+  var cs = document.getElementById("cajaSistema");
+  if(!ci || !cs) return;
+  var cm = document.getElementById("cajaMov");
+  function recalc(){
+    var ini = parseFloat(ci.value); if(isNaN(ini)) ini = 0;
+    var sis = parseFloat(cs.value); if(isNaN(sis)) sis = 0;
+    var mov = cm ? parseFloat(cm.value) : transitoPorMetodo().total; if(isNaN(mov)) mov = 0;
+    STATE.caja = { inicial: ini, sistema: sis, movimiento: mov };
+    var fe = Math.round((ini + mov)*100)/100;
+    var dif = Math.round((fe - sis)*100)/100;
+    var ok = Math.abs(dif) < 0.01;
+    document.getElementById("cajaFinalEsp").textContent = "B/ " + fe.toFixed(2);
+    var d = document.getElementById("cajaDif");
+    d.textContent = ok ? "✓ Coincide" : "B/ " + dif.toFixed(2);
+    d.style.color = ok ? "var(--ok)" : "#B54B4B";
+  }
+  ci.addEventListener("input", recalc);
+  cs.addEventListener("input", recalc);
+  if(cm) cm.addEventListener("input", recalc);
+}
 function exportarEnTransito(){
   var items = recolectarEnTransito();
   var rows = [["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]];
@@ -2002,9 +2099,11 @@ function parseTransitoPrevio(rows){
     var iso = toISODate(cF>=0?row[cF]:null, false);
     var monto = money(cM>=0?row[cM]:0);
     if(!iso || !monto) continue;
-    // Normaliza el nombre del banco a la forma canónica (acepta "stg"/"STG", "banistmo", etc.).
+    // Normaliza el nombre del banco a la forma canónica (acepta "stg"/"STG", "banistmo", "general", etc.).
     var bancoRaw = cB>=0?String(row[cB]||"").trim():"";
-    var banco = clasificarBancoPorTexto(bancoRaw) || bancoRaw;
+    var banco = clasificarBancoPorTexto(bancoRaw);
+    if(!banco && normTxt(bancoRaw).indexOf("GENERAL")!==-1) banco = "Banco General"; // "general" → Banco General
+    if(!banco) banco = bancoRaw;
     var concepto = cC>=0?String(row[cC]||"").trim():"";
     var comprobante = cR>=0?String(row[cR]||"").trim():"";
     // Sentido: un cheque EMITIDO (pago / débito en circulación) compensa como DÉBITO en el estado. Se
