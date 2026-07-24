@@ -1591,8 +1591,8 @@ function destinoRet(txt){
   var n = normTxt(txt);
   if(n.indexOf("SON")!==-1) return "Son Import";
   if(n.indexOf("REFRES")!==-1 || n.indexOf("MAYI")!==-1 || n.indexOf("SHOPPING")!==-1) return "Refresquería";
-  if(n.indexOf("FUNERAL")!==-1) return "Casa de Funerales";
-  if(n.indexOf("CAJA DE AHORRO")!==-1 || n.indexOf("BANCO")!==-1 || n.indexOf("PRESTAMO")!==-1 || n.indexOf("GEORGE")!==-1 || n.indexOf("STG")!==-1 || n.indexOf("NACIONAL")!==-1) return "Banco / Préstamo";
+  if(n.indexOf("FUNERAL")!==-1 || n.indexOf("CASA FUN")!==-1 || n.indexOf("FUN VIDA")!==-1) return "Casa de Funerales";
+  if(n.indexOf("CAJA DE AHORRO")!==-1 || n.indexOf("BANCO")!==-1 || n.indexOf("PRESTAMO")!==-1 || n.indexOf("GEORGE")!==-1 || n.indexOf("STG")!==-1 || n.indexOf("NACIONAL")!==-1 || n.indexOf("NALPMA")!==-1) return "Banco / Préstamo";
   if(n.indexOf("COOPERATIVA")!==-1 || n.indexOf("CASESO")!==-1 || n.indexOf("AHORRO")!==-1) return "Cooperativa / Ahorro";
   return null;
 }
@@ -1601,13 +1601,19 @@ function partirMontoRet(s){
   var m = String(s).match(/^(.*?)\s*(-?[\d]+[.,]\d{2})\s*$/);
   return m ? {texto:m[1].trim(), monto:money(m[2])} : {texto:String(s).trim(), monto:0};
 }
+// Como partirMontoRet pero el monto puede estar en el MEDIO: "AMABELIS 7.00 CASA FUN VIDA" →
+// {texto:"AMABELIS", monto:7.00, hint:"CASA FUN VIDA"} (el hint es el acreedor específico de la línea).
+function partirLineaRet(s){
+  var m = String(s).match(/^(.*?)\s+(-?[\d]+[.,]\d{2})\b(.*)$/);
+  return m ? {texto:m[1].trim(), monto:money(m[2]), hint:m[3].trim()} : {texto:String(s).trim(), monto:0, hint:""};
+}
 // ¿El texto es PURO concepto (sin nombre de empleado)? → es un sub-total de concepto, no un empleado.
 function esSoloConceptoRet(texto){
   var n = normTxt(texto).replace(/DESCUENTO|DESC\.?|NAVIDENO|BANCOS?|AHORRO|IMPORT|\bSON\b|REFRESQUERIA|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|FUNERAL|\bDE\b|\bDEL\b|QUINCENA|PAGO|RETENCION/g,"");
   return n.replace(/[^A-Z]/g,"").length===0;
 }
 function empleadoRet(texto){
-  var t = normTxt(partirMontoRet(texto).texto);
+  var t = normTxt(partirLineaRet(texto).texto);
   t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
   return t.trim();
 }
@@ -1635,28 +1641,59 @@ function parseRetenciones(rows){
 }
 // Clasifica un crédito (descuento) en uno o varios destinos. Los sub-totales de PURO concepto se suman
 // (crédito multi-concepto); si no cuadran o no hay, el crédito entero va al destino que aparezca en el texto.
-function clasificarCreditoRet(m){
-  var subt=[]; var md=partirMontoRet(m.desc);
-  if(md.monto>0 && destinoRet(md.texto) && esSoloConceptoRet(md.texto)) subt.push({d:destinoRet(md.texto),v:md.monto});
-  m.subs.forEach(function(s){ var p=partirMontoRet(s); if(p.monto>0 && destinoRet(p.texto) && esSoloConceptoRet(p.texto)) subt.push({d:destinoRet(p.texto),v:p.monto}); });
+// mapa (opcional): empleado+monto → destino aprendido de líneas que traían acreedor explícito (hint),
+// para reclasificar las mismas líneas cuando aparecen sin el acreedor (ej. "AMABELIS 7.00" = Casa de Funerales).
+function clasificarCreditoRet(m, mapa){
+  // 1) sub-totales de PURO concepto (sin hint de empleado) → crédito multi-concepto.
+  var subt=[]; var md=partirLineaRet(m.desc);
+  if(md.monto>0 && !md.hint && destinoRet(md.texto) && esSoloConceptoRet(md.texto)) subt.push({d:destinoRet(md.texto),v:md.monto});
+  m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto>0 && !p.hint && destinoRet(p.texto) && esSoloConceptoRet(p.texto)) subt.push({d:destinoRet(p.texto),v:p.monto}); });
   var sum=subt.reduce(function(a,x){return a+x.v;},0);
   if(subt.length && Math.abs(sum-m.cred)<=0.02) return subt;
-  var todo=m.desc+" "+m.subs.join(" "); var d=destinoRet(todo);
+  // 2) por LÍNEA de empleado: el acreedor de la línea (hint) o el aprendido prevalece sobre el concepto del lote.
+  var header=destinoRet(m.desc);
+  if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
+  var pz=[], se=0;
+  m.subs.forEach(function(s){ var p=partirLineaRet(s);
+    if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){
+      var emp=empleadoRet(s);
+      var dl = destinoRet(p.hint) || (mapa && mapa[emp+"|"+p.monto.toFixed(2)]) || destinoRet(p.texto) || header;
+      if(dl){ pz.push({d:dl,v:p.monto}); se+=p.monto; }
+    }
+  });
+  if(pz.length && Math.abs(se-m.cred)<=0.02) return pz;
+  // 3) fallback: crédito entero por el concepto que aparezca en el texto.
+  var d=destinoRet(m.desc+" "+m.subs.join(" "));
   return d? [{d:d,v:m.cred}] : null;
 }
+// Aprende empleado+monto → destino desde las líneas que traen acreedor explícito al final (hint).
+function aprenderMapaRet(movs){
+  var mapa={};
+  movs.forEach(function(m){ if(m.cred<=0) return; m.subs.forEach(function(s){ var p=partirLineaRet(s);
+    if(p.monto>0 && p.hint){ var dh=destinoRet(p.hint); if(dh) mapa[empleadoRet(s)+"|"+p.monto.toFixed(2)]=dh; } }); });
+  return mapa;
+}
 function netearRetenciones(movs){
+  var mapa=aprenderMapaRet(movs);
   var porDestino={}, empl={}, retPiezas={}, totalDesc=0, totalPago=0, sinClasificar=[];
   function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!empl[d]) empl[d]={}; if(!retPiezas[d]) retPiezas[d]=[]; }
   movs.forEach(function(m){
     if(m.deb>0){ var dp=destinoRet(m.acr||m.desc)||"Otros"; ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; return; }
     if(m.cred<=0) return;
-    var cls=clasificarCreditoRet(m);
+    var cls=clasificarCreditoRet(m, mapa);
     if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; retPiezas["Otros"].push({fecha:m.fecha,monto:m.cred}); sinClasificar.push(m); return; }
     cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; retPiezas[x.d].push({fecha:m.fecha,monto:x.v}); });
-    if(cls.length===1){ var d=cls[0].d;
-      if(m.subs.length){ m.subs.forEach(function(s){ var p=partirMontoRet(s); if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){ var e=empleadoRet(s); if(e) empl[d][e]=(empl[d][e]||0)+p.monto; } }); }
-      else if(m.fuente.indexOf("AP-PAY")!==-1){ var e2=normTxt((m.acr||m.desc.split(" - ")[0])); if(e2 && destinoRet(e2)===null) empl[d][e2]=(empl[d][e2]||0)+m.cred; }
-    }
+    // Detalle por empleado: cada línea de empleado a su destino (acreedor de la línea > aprendido > concepto).
+    var header=destinoRet(m.desc); if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
+    var hayEmp=false;
+    m.subs.forEach(function(s){ var p=partirLineaRet(s);
+      if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){
+        hayEmp=true; var emp=empleadoRet(s); if(!emp) return;
+        var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||header;
+        if(dl){ ensure(dl); empl[dl][emp]=(empl[dl][emp]||0)+p.monto; }
+      }
+    });
+    if(!hayEmp && cls.length===1 && m.fuente.indexOf("AP-PAY")!==-1){ var e2=normTxt((m.acr||m.desc.split(" - ")[0])); if(e2 && destinoRet(e2)===null){ empl[cls[0].d][e2]=(empl[cls[0].d][e2]||0)+m.cred; } }
   });
   // Aging FIFO: los pagos de cada destino cubren primero las retenciones MÁS VIEJAS; lo que queda sin
   // cubrir es el pendiente, agrupado por el MES en que se generó (para distinguir lo reciente de lo viejo).
@@ -1724,7 +1761,10 @@ function renderResultadosMod2(){
     '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Destino (acreedor / concepto)</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
-  Object.keys(pd).sort().forEach(function(d){ var x=pd[d]; var p=x.desc-x.pago;
+  // Orden: de más ANTIGUO a más reciente (por el mes más viejo con pendiente); los sin pendiente al final.
+  function mesViejo(d){ var ag=net.aging[d]||{}; var ks=Object.keys(ag).filter(function(k){return k!=="?";}).sort(); return ks.length? ks[0] : "9999"; }
+  var destinos=Object.keys(pd).sort(function(a,b){ var ma=mesViejo(a), mb=mesViejo(b); if(ma!==mb) return ma<mb?-1:1; return a<b?-1:1; });
+  destinos.forEach(function(d){ var x=pd[d]; var p=x.desc-x.pago;
     html+='<tr class="ret-dest"><td>'+d+'</td><td>B/ '+x.desc.toFixed(2)+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
       '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+p.toFixed(2)+'</b></td></tr>';
     // Aging: en qué mes se generó lo pendiente (marca lo viejo).
