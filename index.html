@@ -1717,6 +1717,15 @@ function esSoloConceptoRet(texto){
   var n = normTxt(texto).replace(/DESCUENTO|DESC\.?|NAVIDENO|BANCOS?|AHORRO|IMPORT|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|FUNERAL|CASA FUN|VIDA|NALPMA|\bDE\b|\bDEL\b|QUINCENA|PAGO|RETENCION/g,"");
   return n.replace(/[^A-Z]/g,"").length===0;
 }
+// Una línea es un SUB-TOTAL de concepto si EMPIEZA con una palabra de concepto, aunque después traiga un
+// nombre de empleado (ej. "REFRESQUERIA MABE : 2.00"). Se distingue de una línea de empleado, que empieza
+// con el NOMBRE (ej. "ARACELYS BANCO 94.13"). Así los créditos multi-concepto se parten aunque una de sus
+// líneas de concepto identifique al empleado.
+var CONCEPTO_LIDER_RET = /^(DESC|DESCUENTO|BANCOS?|AHORRO|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|CASA|FUNERAL|NALPMA|MAYI|SHOPPING)\b/;
+function esConceptoLiderRet(texto){
+  var n = normTxt(texto);
+  return CONCEPTO_LIDER_RET.test(n) && destinoRet(n)!==null;
+}
 function empleadoRet(texto){
   var t = normTxt(partirLineaRet(texto).texto);
   t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
@@ -1795,10 +1804,10 @@ function parseRetenciones(rows){
 // mapa (opcional): empleado+monto → destino aprendido de líneas que traían acreedor explícito (hint),
 // para reclasificar las mismas líneas cuando aparecen sin el acreedor (ej. "AMABELIS 7.00" = Casa de Funerales).
 function clasificarCreditoRet(m, mapa){
-  // 1) sub-totales de PURO concepto (sin hint de empleado) → crédito multi-concepto.
+  // 1) sub-totales por concepto (líneas que EMPIEZAN con el concepto) → crédito multi-concepto.
   var subt=[]; var md=partirLineaRet(m.desc);
-  if(md.monto>0 && !md.hint && destinoRet(md.texto) && esSoloConceptoRet(md.texto)) subt.push({d:destinoRet(md.texto),v:md.monto});
-  m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto>0 && !p.hint && destinoRet(p.texto) && esSoloConceptoRet(p.texto)) subt.push({d:destinoRet(p.texto),v:p.monto}); });
+  if(md.monto>0 && !md.hint && destinoRet(md.texto) && esConceptoLiderRet(md.texto)) subt.push({d:destinoRet(md.texto),v:md.monto});
+  m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto>0 && !p.hint && destinoRet(p.texto) && esConceptoLiderRet(p.texto)) subt.push({d:destinoRet(p.texto),v:p.monto}); });
   var sum=subt.reduce(function(a,x){return a+x.v;},0);
   if(subt.length && Math.abs(sum-m.cred)<=0.02) return subt;
   // 2) por LÍNEA de empleado: el acreedor de la línea (hint) o el aprendido prevalece sobre el concepto del lote.
