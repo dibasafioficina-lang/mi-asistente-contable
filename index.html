@@ -1624,19 +1624,23 @@ function parseRetenciones(rows){
       for(var k=j;k<rows[i].length;k++){ var v=money(rows[i][k]); if(v){ saldoInicial=v; break; } } } } }
   var hIdx = findHeaderRow(rows, ["Fecha","Débito","Crédito"]); if(hIdx<0) hIdx=1;
   var h = rows[hIdx];
-  var cAcc=colIdx(h,"Account"), cFecha=colIdx(h,"Fecha"), cFuente=colIdx(h,"Fuente"),
+  var cAcc=colIdx(h,"Account"), cFecha=colIdx(h,"Fecha"), cRef=colIdx(h,"Referencia"), cFuente=colIdx(h,"Fuente"),
       cDesc=colIdx(h,"Descripción"), cAcr=colIdx(h,"Acreedor"), cDeb=colIdx(h,"Débito"), cCred=colIdx(h,"Crédito");
   var cuenta="", movs=[];
   for(var r=hIdx+1;r<rows.length;r++){ var row=rows[r]; if(!row) continue;
     var acc = cAcc>=0?String(row[cAcc]||""):"";
     if(acc.trim()){
       if(!cuenta) cuenta=acc.trim();
-      movs.push({ fecha: toISODate(cFecha>=0?row[cFecha]:null,false), fuente: cFuente>=0?String(row[cFuente]||""):"",
+      movs.push({ fecha: toISODate(cFecha>=0?row[cFecha]:null,false), ref: cRef>=0?String(row[cRef]||"").trim():"", fuente: cFuente>=0?String(row[cFuente]||""):"",
         desc: cDesc>=0?String(row[cDesc]||""):"", acr:(cAcr>=0?String(row[cAcr]||""):"").replace(/^ACR\d+\s*-\s*/,""),
         deb: money(cDeb>=0?row[cDeb]:0), cred: money(cCred>=0?row[cCred]:0), subs:[] });
     } else if(cDesc>=0 && row[cDesc] && movs.length){ movs[movs.length-1].subs.push(String(row[cDesc])); }
   }
-  movs = movs.filter(function(m){ return !/ABORTED/i.test(m.desc); });
+  // Eliminación de transacciones ANULADAS: si un comprobante (referencia) tiene alguna fila ABORTED,
+  // se elimina TODA la transacción (la fila anulada Y su contrapartida original), no solo la marcada.
+  var refsAnuladas={};
+  movs.forEach(function(m){ if(/ABORTED/i.test(m.desc+" "+m.subs.join(" ")) && m.ref) refsAnuladas[m.ref]=true; });
+  movs = movs.filter(function(m){ return !/ABORTED/i.test(m.desc+" "+m.subs.join(" ")) && !(m.ref && refsAnuladas[m.ref]); });
   return { saldoInicial:saldoInicial, cuenta:cuenta, movs:movs };
 }
 // Clasifica un crédito (descuento) en uno o varios destinos. Los sub-totales de PURO concepto se suman
