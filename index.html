@@ -223,6 +223,10 @@
   .ret-tabla tr.ret-emp td:first-child{padding-left:26px}
   .pend-pos b{color:#B54B4B}
   .pend-neg b{color:var(--ok)}
+  .ret-tabla tr.ret-aging td{padding:2px 10px 8px 26px;font-size:12px;color:var(--slate);border-bottom:1px solid #EEF1F4}
+  .ret-aging .ret-reciente{color:#3F6E56;font-weight:700}
+  .ret-aging .ret-viejo{color:#B5731E;font-weight:800}
+  .ret-saldoini{margin-top:14px;padding:12px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:13px;color:#7A5320;line-height:1.5}
   .ret-nota{font-size:12px;color:var(--slate);margin-top:12px;line-height:1.5}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
@@ -1641,20 +1645,29 @@ function clasificarCreditoRet(m){
   return d? [{d:d,v:m.cred}] : null;
 }
 function netearRetenciones(movs){
-  var porDestino={}, empl={}, totalDesc=0, totalPago=0, sinClasificar=[];
-  function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!empl[d]) empl[d]={}; }
+  var porDestino={}, empl={}, retPiezas={}, totalDesc=0, totalPago=0, sinClasificar=[];
+  function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!empl[d]) empl[d]={}; if(!retPiezas[d]) retPiezas[d]=[]; }
   movs.forEach(function(m){
     if(m.deb>0){ var dp=destinoRet(m.acr||m.desc)||"Otros"; ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; return; }
     if(m.cred<=0) return;
     var cls=clasificarCreditoRet(m);
-    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; sinClasificar.push(m); return; }
-    cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; });
+    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; retPiezas["Otros"].push({fecha:m.fecha,monto:m.cred}); sinClasificar.push(m); return; }
+    cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; retPiezas[x.d].push({fecha:m.fecha,monto:x.v}); });
     if(cls.length===1){ var d=cls[0].d;
       if(m.subs.length){ m.subs.forEach(function(s){ var p=partirMontoRet(s); if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){ var e=empleadoRet(s); if(e) empl[d][e]=(empl[d][e]||0)+p.monto; } }); }
       else if(m.fuente.indexOf("AP-PAY")!==-1){ var e2=normTxt((m.acr||m.desc.split(" - ")[0])); if(e2 && destinoRet(e2)===null) empl[d][e2]=(empl[d][e2]||0)+m.cred; }
     }
   });
-  return { porDestino:porDestino, empleados:empl, totalDesc:totalDesc, totalPago:totalPago, sinClasificar:sinClasificar };
+  // Aging FIFO: los pagos de cada destino cubren primero las retenciones MÁS VIEJAS; lo que queda sin
+  // cubrir es el pendiente, agrupado por el MES en que se generó (para distinguir lo reciente de lo viejo).
+  var aging={};
+  Object.keys(retPiezas).forEach(function(d){
+    var rets=retPiezas[d].slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
+    var P=porDestino[d].pago||0; var porMes={};
+    rets.forEach(function(r){ var mo=r.monto; if(P>=mo){ P-=mo; mo=0; } else { mo-=P; P=0; } if(mo>0.001){ var k=(r.fecha||"?").slice(0,7); porMes[k]=(porMes[k]||0)+mo; } });
+    aging[d]=porMes;
+  });
+  return { porDestino:porDestino, empleados:empl, aging:aging, totalDesc:totalDesc, totalPago:totalPago, sinClasificar:sinClasificar };
 }
 
 function renderModulo2(){
@@ -1689,40 +1702,62 @@ function ejecutarModulo2(){
     }catch(err){ if(note) note.textContent="Error: "+err.message; }
   });
 }
+function mesNombre(k){ if(!k||k==="?") return "sin fecha"; var m=["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]; var p=k.split("-"); return (m[parseInt(p[1],10)]||p[1])+" "+p[0]; }
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
-  var pend=net.totalDesc-net.totalPago;
+  var pendPeriodo=net.totalDesc-net.totalPago;
+  var saldoIni=R.parsed.saldoInicial;
+  var deudaVieja = saldoIni<0 ? -saldoIni : 0; // saldo acreedor (deuda) de antes del período
+  var pendTotal = pendPeriodo + deudaVieja;
+  // Mes más reciente presente en el aging (lo pendiente de ESE mes es normal → se paga el mes siguiente;
+  // lo de meses anteriores es un saldo VIEJO por revisar).
+  var meses=[]; Object.keys(net.aging).forEach(function(d){ Object.keys(net.aging[d]).forEach(function(k){ if(k!=="?") meses.push(k); }); });
+  var mesActual = meses.length? meses.sort().slice(-1)[0] : null;
   var html='<div class="results-head"><h2>Retenciones pendientes por pagar</h2>' +
     '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
   html+='<div class="summary-bar">' +
-    '<span class="chip">Saldo inicial: B/ '+R.parsed.saldoInicial.toFixed(2)+'</span>' +
     '<span class="chip">Descontado: B/ '+net.totalDesc.toFixed(2)+'</span>' +
     '<span class="chip">Pagado: B/ '+net.totalPago.toFixed(2)+'</span>' +
-    '<span class="chip alert">Pendiente por pagar: B/ '+pend.toFixed(2)+'</span></div>';
+    '<span class="chip">Pendiente del período: B/ '+pendPeriodo.toFixed(2)+'</span>' +
+    (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
+    '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Destino (acreedor / concepto)</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
   Object.keys(pd).sort().forEach(function(d){ var x=pd[d]; var p=x.desc-x.pago;
     html+='<tr class="ret-dest"><td>'+d+'</td><td>B/ '+x.desc.toFixed(2)+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
       '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+p.toFixed(2)+'</b></td></tr>';
+    // Aging: en qué mes se generó lo pendiente (marca lo viejo).
+    var ag=net.aging[d]||{}; var keys=Object.keys(ag).sort();
+    if(keys.length){
+      var partes=keys.map(function(k){ var viejo=mesActual && k<mesActual;
+        return '<span class="'+(viejo?'ret-viejo':'ret-reciente')+'">'+mesNombre(k)+': B/ '+ag[k].toFixed(2)+(viejo?' ⚠ viejo':'')+'</span>'; });
+      html+='<tr class="ret-aging"><td colspan="4">Pendiente generado en → '+partes.join(' &nbsp;·&nbsp; ')+'</td></tr>';
+    }
     var emps=net.empleados[d]||{}; Object.keys(emps).sort().forEach(function(e){
       html+='<tr class="ret-emp"><td>'+e+'</td><td>B/ '+emps[e].toFixed(2)+'</td><td>—</td><td>—</td></tr>'; });
   });
-  html+='</tbody></table>' +
-    '<p class="ret-nota">El detalle por empleado (descontado) es de referencia; el neteo pendiente es por destino. Los nombres del archivo pueden traer variantes de tipeo.</p>' +
+  html+='</tbody></table>';
+  if(deudaVieja>0.01){
+    html+='<div class="ret-saldoini">⚠ <b>Saldo anterior a este período: B/ '+deudaVieja.toFixed(2)+'</b> (saldo inicial '+saldoIni.toFixed(2)+'). Es una deuda que venía de antes del primer movimiento del archivo y no tiene su desglose acá. No se emparejó con ningún pago de este período — revisá el archivo del período anterior para saber a qué acreedor/empleado corresponde y si ya se pagó.</div>';
+  }
+  html+='<p class="ret-nota">El pendiente reciente ('+(mesActual?mesNombre(mesActual):"último mes")+') es lo normal: se descuenta un mes y se paga el siguiente. Lo marcado ⚠ viejo es de meses anteriores y sigue sin pagarse. El detalle por empleado es de referencia (los nombres pueden traer typos); el neteo pendiente es por destino.</p>' +
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
 }
 function exportarRetenciones(){
-  var net=STATE.mod2.result.net, pd=net.porDestino;
-  var rows=[["Destino","Empleado","Descontado","Pagado","Pendiente"]];
+  var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
+  var rows=[["Destino","Empleado / mes","Descontado","Pagado","Pendiente"]];
   Object.keys(pd).sort().forEach(function(d){ var x=pd[d];
     rows.push([d,"",x.desc.toFixed(2),x.pago.toFixed(2),(x.desc-x.pago).toFixed(2)]);
+    var ag=net.aging[d]||{}; Object.keys(ag).sort().forEach(function(k){ rows.push([d,"  pendiente de "+mesNombre(k),"","",ag[k].toFixed(2)]); });
     var emps=net.empleados[d]||{}; Object.keys(emps).sort().forEach(function(e){ rows.push([d,e,emps[e].toFixed(2),"",""]); });
   });
-  rows.push(["TOTAL","",net.totalDesc.toFixed(2),net.totalPago.toFixed(2),(net.totalDesc-net.totalPago).toFixed(2)]);
-  var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:22},{wch:24},{wch:12},{wch:12},{wch:12}];
+  var deudaVieja = R.parsed.saldoInicial<0 ? -R.parsed.saldoInicial : 0;
+  if(deudaVieja>0.01) rows.push(["Saldo anterior a enero (sin desglose)","",  "","", deudaVieja.toFixed(2)]);
+  rows.push(["TOTAL PENDIENTE","","","",(net.totalDesc-net.totalPago+deudaVieja).toFixed(2)]);
+  var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:28},{wch:26},{wch:12},{wch:12},{wch:12}];
   var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Retenciones pendientes");
   XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
 }
