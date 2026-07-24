@@ -454,15 +454,24 @@ function parseReporteConsolidado(rows){
 
   var meses = mesesDominantesReporte(rows, cFecha, subIdx+1);
   var out = [];
+  var lastIso = null;
   for(var r=subIdx+1;r<rows.length;r++){
     var row = rows[r];
     if(!row) continue;
     var fechaRaw = row[cFecha];
-    if(fechaRaw===null||fechaRaw===undefined||normTxt(fechaRaw)==="" ) continue;
-    if(normTxt(fechaRaw).indexOf("TOTAL")!==-1) continue;
-    var iso = fechaReporteConsolidado(fechaRaw, meses);
-    if(!iso) continue;
     var cajera = cCajera>=0 ? row[cCajera] : "";
+    var iso;
+    if(fechaRaw===null||fechaRaw===undefined||normTxt(fechaRaw)===""){
+      // Fila de continuación (2ª cajera del mismo día): la fecha viene vacía y hereda la del día anterior.
+      // Se exige que tenga cajera para no arrastrar la fecha a filas de totales/basura sin fecha.
+      if(!lastIso || !(cajera && normTxt(cajera)!=="")) continue;
+      iso = lastIso;
+    } else {
+      if(normTxt(fechaRaw).indexOf("TOTAL")!==-1) continue;
+      iso = fechaReporteConsolidado(fechaRaw, meses);
+      if(!iso) continue;
+      lastIso = iso;
+    }
     mapCols.forEach(function(m){
       var val = money(row[m.col]);
       if(val){
@@ -669,15 +678,95 @@ function esAchOChequeSinBanco(desc){
   if(clasificarBancoPorTexto(desc)) return false; // ya tiene banco
   return n.indexOf("ACH")!==-1 || /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
 }
+// Rango de fechas dentro de la descripción de un depósito acumulado, ej. "DEL 1 AL 31 DE ENERO 2026"
+// o "DEL 01/01/2026 AL 31/01/2026". Devuelve {ym:"YYYY-MM", diaIni, diaFin} o null si no es un rango.
+var MESES_DEP = {ENERO:1,FEBRERO:2,MARZO:3,ABRIL:4,MAYO:5,JUNIO:6,JULIO:7,AGOSTO:8,SEPTIEMBRE:9,OCTUBRE:10,NOVIEMBRE:11,DICIEMBRE:12};
+function rangoDeposito(desc){
+  var n = normTxt(desc);
+  var m = n.match(/DEL\s+(\d{1,2})\s+AL\s+(\d{1,2})\s+DE\s+([A-Z]+)\s+(\d{4})/);
+  if(m){
+    var mes = MESES_DEP[m[3]]; if(!mes) return null;
+    var d1 = parseInt(m[1],10), d2 = parseInt(m[2],10); if(d1===d2) return null;
+    return { ym: m[4]+"-"+String(mes).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+  }
+  var m2 = n.match(/DEL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s+AL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+  if(m2){
+    var d1=parseInt(m2[1],10), mo=parseInt(m2[5],10), yy=(m2[6]||m2[3]||"");
+    var d2=parseInt(m2[4],10); if(yy.length===2) yy="20"+yy; if(!yy) return null;
+    if(d1===d2 && parseInt(m2[2],10)===mo) return null;
+    return { ym: yy+"-"+String(mo).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+  }
+  return null;
+}
+// Método de un depósito según su texto.
+function metodoDeposito(desc){
+  var n = normTxt(desc);
+  if(n.indexOf("VISA")!==-1) return "VISA";
+  if(n.indexOf("CLAVE")!==-1) return "CLAVE";
+  if(n.indexOf("ACH")!==-1) return "ACH";
+  if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
+  return null;
+}
 function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
-  var repPorBancoDia = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
   // cuadre banco a banco. Se toma un solo lado (credito) para no doble-contar.
   var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; });
+  // Depósitos ACUMULADOS por rango de fechas (ej. "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO"):
+  // el sistema a veces difiere un método al fin de mes en un solo monto. Se sacan del cotejo día por día
+  // y se reconcilian aparte contra la SUMA de los montos diarios de ese método+banco del reporte del rango.
+  var batches = [];
+  cajaFiltrada = cajaFiltrada.filter(function(x){
+    var rango = rangoDeposito(x.descripcion), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
+    if(rango && met && bk){
+      batches.push({ banco:bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
+        monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0 });
+      return false;
+    }
+    return true;
+  });
   var cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
     function(x){ return x.credito; });
+  function batchDe(entry){
+    for(var i=0;i<batches.length;i++){ var b=batches[i];
+      if(b.banco===entry.banco && b.metodo===entry.metodo && entry.fecha && entry.fecha.slice(0,7)===b.ym){
+        var dia=parseInt(entry.fecha.slice(8,10),10);
+        if(dia>=b.diaIni && dia<=b.diaFin) return b;
+      }
+    }
+    return null;
+  }
+  // Un monto diario del reporte queda "cubierto" por un batch (se difirió limpio a fin de mes) si, al
+  // QUITAR ese método diferido, el resto del banco ese día RECONCILIA con el diario. Si no reconcilia,
+  // el día es anómalo (ej. todo el banco quedó registrado en otro banco) y su monto se deja en el cotejo
+  // diario para que salga como diferencia real (y no se cuenta como cubierto por el batch).
+  var repFullBD = sumBy(reporte, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
+  var batchedBD = {};
+  reporte.forEach(function(x){ if(batchDe(x)){ var k=x.banco+"|"+x.fecha; batchedBD[k]=(batchedBD[k]||0)+x.monto; } });
+  // Un día es un "swap de banco completo" (el método NO se difirió, se registró en el banco equivocado)
+  // si ese banco quedó ~vacío en el diario aunque el reporte esperaba depósitos, Y otro banco tiene un
+  // excedente que cubre ese total esperado. En ese caso el monto se deja en el cotejo diario (sale como
+  // "bancos diferentes"); en cualquier otro caso el método se difirió limpio y lo cubre el batch.
+  var BANCOS_DEP = ["STG","Banistmo"];
+  function swapDeBanco(B, D){
+    if((cajaPorBancoDia[B+"|"+D]||0) >= tolerancia) return false;
+    var esperado = repFullBD[B+"|"+D]||0; if(esperado <= tolerancia) return false;
+    for(var i=0;i<BANCOS_DEP.length;i++){ var B2=BANCOS_DEP[i]; if(B2===B) continue;
+      if(((cajaPorBancoDia[B2+"|"+D]||0) - (repFullBD[B2+"|"+D]||0)) >= esperado - tolerancia) return true;
+    }
+    return false;
+  }
+  var cubiertoK = {};
+  Object.keys(batchedBD).forEach(function(k){
+    var p=k.split("|"); if(!swapDeBanco(p[0], p[1])) cubiertoK[k]=true;
+  });
+  var repParaDia = reporte.filter(function(x){
+    var b=batchDe(x);
+    if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; return false; }
+    return true;
+  });
+  var repPorBancoDia = sumBy(repParaDia, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
 
   // Depósitos ACH/cheque que el sistema NO etiquetó con banco, por día (para explicar diferencias
   // "positivas" donde el reporte asigna a un banco pero el sistema registró el depósito sin banco).
@@ -768,6 +857,22 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
         fuente: "Reporte consolidado de caja / Diario Caja General"
       });
     });
+  });
+
+  // Reconciliación de los depósitos acumulados por rango: el monto que registró el sistema vs. la suma
+  // de los depósitos diarios de ese método+banco del reporte dentro del rango (los días "cubiertos").
+  batches.forEach(function(b){
+    var diff = Math.round((b.cubierto - b.monto)*100)/100;
+    if(Math.abs(diff) > tolerancia){
+      hallazgos.push({
+        fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
+        texto: "Depósito acumulado " + b.metodo + " " + b.banco + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
+               b.monto.toFixed(2) + " pero la suma de los depósitos diarios de " + b.metodo + " " + b.banco +
+               " del reporte (días " + b.diaIni + " al " + b.diaFin + ") es B/ " + b.cubierto.toFixed(2) +
+               " (dif. B/ " + diff.toFixed(2) + "). Revisa si algún día quedó registrado en otro banco o método.",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
+    }
   });
 
   // Consistencia del desglose de cheques (2ª pestaña): la suma de los cheques individuales por
