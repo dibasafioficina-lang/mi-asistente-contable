@@ -1617,6 +1617,23 @@ function empleadoRet(texto){
   t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
   return t.trim();
 }
+// Mes (YYYY-MM) al que CORRESPONDE la retención/pago según la descripción (ej. "QUINCENA DE ENERO",
+// "MES DE MAYO", "DICIEMBRE"). Usa el año que aparezca en el texto; si no, el año de la transacción,
+// restando 1 si el mes nombrado es posterior al de registro (ej. "diciembre" registrado en enero = año anterior).
+// Si la descripción no nombra un mes, cae en el mes de la fecha de la transacción.
+var MESES_RET={ENERO:1,FEBRERO:2,MARZO:3,ABRIL:4,MAYO:5,JUNIO:6,JULIO:7,AGOSTO:8,SEPTIEMBRE:9,SETIEMBRE:9,OCTUBRE:10,NOVIEMBRE:11,DICIEMBRE:12};
+function mesRetencion(m){
+  var texto = normTxt(m.desc+" "+(m.subs||[]).join(" "));
+  var mm = texto.match(/\b(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\b/);
+  if(!mm) return m.fecha ? m.fecha.slice(0,7) : "?";
+  var mesNum = MESES_RET[mm[1]];
+  var anioM = texto.match(/\b(20\d{2})\b/);
+  var anio;
+  if(anioM) anio = parseInt(anioM[1],10);
+  else if(m.fecha){ var ty=parseInt(m.fecha.slice(0,4),10), tm=parseInt(m.fecha.slice(5,7),10); anio = mesNum>tm ? ty-1 : ty; }
+  else return "?";
+  return anio+"-"+String(mesNum).padStart(2,"0");
+}
 function parseRetenciones(rows){
   var saldoInicial = 0;
   for(var i=0;i<Math.min(rows.length,3);i++){ if(!rows[i]) continue;
@@ -1685,8 +1702,9 @@ function netearRetenciones(movs){
     if(m.deb>0){ var dp=destinoRet(m.acr||m.desc)||"Otros"; ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; return; }
     if(m.cred<=0) return;
     var cls=clasificarCreditoRet(m, mapa);
-    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; retPiezas["Otros"].push({fecha:m.fecha,monto:m.cred}); sinClasificar.push(m); return; }
-    cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; retPiezas[x.d].push({fecha:m.fecha,monto:x.v}); });
+    var mesC=mesRetencion(m); // mes al que corresponde (según la descripción), para el aging
+    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; retPiezas["Otros"].push({mes:mesC,monto:m.cred}); sinClasificar.push(m); return; }
+    cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; retPiezas[x.d].push({mes:mesC,monto:x.v}); });
     // Detalle por empleado: cada línea de empleado a su destino (acreedor de la línea > aprendido > concepto).
     var header=destinoRet(m.desc); if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
     var hayEmp=false;
@@ -1703,9 +1721,9 @@ function netearRetenciones(movs){
   // cubrir es el pendiente, agrupado por el MES en que se generó (para distinguir lo reciente de lo viejo).
   var aging={};
   Object.keys(retPiezas).forEach(function(d){
-    var rets=retPiezas[d].slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
+    var rets=retPiezas[d].slice().sort(function(a,b){ return (a.mes||"")<(b.mes||"")?-1:1; });
     var P=porDestino[d].pago||0; var porMes={};
-    rets.forEach(function(r){ var mo=r.monto; if(P>=mo){ P-=mo; mo=0; } else { mo-=P; P=0; } if(mo>0.001){ var k=(r.fecha||"?").slice(0,7); porMes[k]=(porMes[k]||0)+mo; } });
+    rets.forEach(function(r){ var mo=r.monto; if(P>=mo){ P-=mo; mo=0; } else { mo-=P; P=0; } if(mo>0.001){ var k=r.mes||"?"; porMes[k]=(porMes[k]||0)+mo; } });
     aging[d]=porMes;
   });
   return { porDestino:porDestino, empleados:empl, aging:aging, totalDesc:totalDesc, totalPago:totalPago, sinClasificar:sinClasificar };
@@ -1713,7 +1731,7 @@ function netearRetenciones(movs){
 
 function renderModulo2(){
   app.innerHTML = headerHtml() +
-    '<div class="crumb"><button id="backBtn2">← Menú</button><span>/</span><span>Revisión de movimientos pendientes</span></div>' +
+    '<div class="crumb"><button id="backBtn2">← Menú</button><span>/</span><span>Retenciones a empleados</span></div>' +
     '<div class="stage"><h3><span class="tag">RETENCIONES</span> Retención a empleados por pagar</h3>' +
     '<p class="desc">Sube el navegador de contabilidad de la cuenta [2.3.1.4] Retención a empleados por pagar. Al personal se le descuenta un mes y la retención se paga al acreedor (banco, cooperativa, etc.) el mes siguiente. El módulo agrupa por <b>destino</b> lo descontado vs lo pagado y muestra el <b>saldo pendiente por pagar</b>.</p>' +
     '<div class="dropzones">' +
@@ -1841,7 +1859,7 @@ function renderMenu(){
       desc:"Reporte de cajeras → Diario Caja General → Diario bancario → Estado de cuenta + validación VISA STG",
       enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tag:TAG_CONCILIATORIO,
       tagText:"7 archivos", action:"Conciliar"},
-    {id:"modulo2", nombre:"Revisión de movimientos pendientes",
+    {id:"modulo2", nombre:"Retenciones a empleados",
       desc:"Retención a empleados por pagar: agrupa lo descontado vs lo pagado por destino y muestra el saldo pendiente.",
       enabled:true, icon:"🧾", iconBg:"var(--accent-purple-bg)", tag:TAG_REVISION,
       tagText:"1 archivo", action:"Revisar"},
