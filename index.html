@@ -212,6 +212,18 @@
   .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
     border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
   .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
+  .ret-tabla{width:100%;border-collapse:collapse;font-size:14px}
+  .ret-tabla th{text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:var(--slate);
+    padding:8px 10px;border-bottom:2px solid var(--line)}
+  .ret-tabla th:first-child{text-align:left}
+  .ret-tabla td{padding:8px 10px;text-align:right;border-bottom:1px solid #EEF1F4}
+  .ret-tabla td:first-child{text-align:left}
+  .ret-tabla tr.ret-dest td{font-weight:800;color:var(--heading);background:#FBF6F9;border-top:1px solid var(--line)}
+  .ret-tabla tr.ret-emp td{color:var(--slate);font-size:13px}
+  .ret-tabla tr.ret-emp td:first-child{padding-left:26px}
+  .pend-pos b{color:#B54B4B}
+  .pend-neg b{color:var(--ok)}
+  .ret-nota{font-size:12px;color:var(--slate);margin-top:12px;line-height:1.5}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
 
@@ -251,8 +263,10 @@ var STATE = {
   files:{
     transitoPrevio:null,
     reporte:null, diarioCaja:null, diarioBanistmo:null, diarioStg:null, diarioBancoGeneral:null,
-    estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null
+    estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
+    retenciones:null
   },
+  mod2:{ result:null },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -1567,9 +1581,156 @@ function celebrarTodo(){ launchConfetti({grande:true, mensaje: fraseAzar(FRASES_
 /* ---------------- UI ---------------- */
 var app = document.getElementById("app");
 
+/* ================= MÓDULO 2 — Retención a empleados por pagar ================= */
+// Destino (acreedor/concepto) al que corresponde una retención, a partir de un texto.
+function destinoRet(txt){
+  var n = normTxt(txt);
+  if(n.indexOf("SON")!==-1) return "Son Import";
+  if(n.indexOf("REFRES")!==-1 || n.indexOf("MAYI")!==-1 || n.indexOf("SHOPPING")!==-1) return "Refresquería";
+  if(n.indexOf("FUNERAL")!==-1) return "Casa de Funerales";
+  if(n.indexOf("CAJA DE AHORRO")!==-1 || n.indexOf("BANCO")!==-1 || n.indexOf("PRESTAMO")!==-1 || n.indexOf("GEORGE")!==-1 || n.indexOf("STG")!==-1 || n.indexOf("NACIONAL")!==-1) return "Banco / Préstamo";
+  if(n.indexOf("COOPERATIVA")!==-1 || n.indexOf("CASESO")!==-1 || n.indexOf("AHORRO")!==-1) return "Cooperativa / Ahorro";
+  return null;
+}
+// Separa "TEXTO monto" → {texto, monto} (monto 0 si la línea no termina en número).
+function partirMontoRet(s){
+  var m = String(s).match(/^(.*?)\s*(-?[\d]+[.,]\d{2})\s*$/);
+  return m ? {texto:m[1].trim(), monto:money(m[2])} : {texto:String(s).trim(), monto:0};
+}
+// ¿El texto es PURO concepto (sin nombre de empleado)? → es un sub-total de concepto, no un empleado.
+function esSoloConceptoRet(texto){
+  var n = normTxt(texto).replace(/DESCUENTO|DESC\.?|NAVIDENO|BANCOS?|AHORRO|IMPORT|\bSON\b|REFRESQUERIA|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|FUNERAL|\bDE\b|\bDEL\b|QUINCENA|PAGO|RETENCION/g,"");
+  return n.replace(/[^A-Z]/g,"").length===0;
+}
+function empleadoRet(texto){
+  var t = normTxt(partirMontoRet(texto).texto);
+  t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
+  return t.trim();
+}
+function parseRetenciones(rows){
+  var saldoInicial = 0;
+  for(var i=0;i<Math.min(rows.length,3);i++){ if(!rows[i]) continue;
+    for(var j=0;j<rows[i].length;j++){ if(/BALANCE INICIAL/i.test(String(rows[i][j]||""))){
+      for(var k=j;k<rows[i].length;k++){ var v=money(rows[i][k]); if(v){ saldoInicial=v; break; } } } } }
+  var hIdx = findHeaderRow(rows, ["Fecha","Débito","Crédito"]); if(hIdx<0) hIdx=1;
+  var h = rows[hIdx];
+  var cAcc=colIdx(h,"Account"), cFecha=colIdx(h,"Fecha"), cFuente=colIdx(h,"Fuente"),
+      cDesc=colIdx(h,"Descripción"), cAcr=colIdx(h,"Acreedor"), cDeb=colIdx(h,"Débito"), cCred=colIdx(h,"Crédito");
+  var cuenta="", movs=[];
+  for(var r=hIdx+1;r<rows.length;r++){ var row=rows[r]; if(!row) continue;
+    var acc = cAcc>=0?String(row[cAcc]||""):"";
+    if(acc.trim()){
+      if(!cuenta) cuenta=acc.trim();
+      movs.push({ fecha: toISODate(cFecha>=0?row[cFecha]:null,false), fuente: cFuente>=0?String(row[cFuente]||""):"",
+        desc: cDesc>=0?String(row[cDesc]||""):"", acr:(cAcr>=0?String(row[cAcr]||""):"").replace(/^ACR\d+\s*-\s*/,""),
+        deb: money(cDeb>=0?row[cDeb]:0), cred: money(cCred>=0?row[cCred]:0), subs:[] });
+    } else if(cDesc>=0 && row[cDesc] && movs.length){ movs[movs.length-1].subs.push(String(row[cDesc])); }
+  }
+  movs = movs.filter(function(m){ return !/ABORTED/i.test(m.desc); });
+  return { saldoInicial:saldoInicial, cuenta:cuenta, movs:movs };
+}
+// Clasifica un crédito (descuento) en uno o varios destinos. Los sub-totales de PURO concepto se suman
+// (crédito multi-concepto); si no cuadran o no hay, el crédito entero va al destino que aparezca en el texto.
+function clasificarCreditoRet(m){
+  var subt=[]; var md=partirMontoRet(m.desc);
+  if(md.monto>0 && destinoRet(md.texto) && esSoloConceptoRet(md.texto)) subt.push({d:destinoRet(md.texto),v:md.monto});
+  m.subs.forEach(function(s){ var p=partirMontoRet(s); if(p.monto>0 && destinoRet(p.texto) && esSoloConceptoRet(p.texto)) subt.push({d:destinoRet(p.texto),v:p.monto}); });
+  var sum=subt.reduce(function(a,x){return a+x.v;},0);
+  if(subt.length && Math.abs(sum-m.cred)<=0.02) return subt;
+  var todo=m.desc+" "+m.subs.join(" "); var d=destinoRet(todo);
+  return d? [{d:d,v:m.cred}] : null;
+}
+function netearRetenciones(movs){
+  var porDestino={}, empl={}, totalDesc=0, totalPago=0, sinClasificar=[];
+  function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!empl[d]) empl[d]={}; }
+  movs.forEach(function(m){
+    if(m.deb>0){ var dp=destinoRet(m.acr||m.desc)||"Otros"; ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; return; }
+    if(m.cred<=0) return;
+    var cls=clasificarCreditoRet(m);
+    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; sinClasificar.push(m); return; }
+    cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; });
+    if(cls.length===1){ var d=cls[0].d;
+      if(m.subs.length){ m.subs.forEach(function(s){ var p=partirMontoRet(s); if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){ var e=empleadoRet(s); if(e) empl[d][e]=(empl[d][e]||0)+p.monto; } }); }
+      else if(m.fuente.indexOf("AP-PAY")!==-1){ var e2=normTxt((m.acr||m.desc.split(" - ")[0])); if(e2 && destinoRet(e2)===null) empl[d][e2]=(empl[d][e2]||0)+m.cred; }
+    }
+  });
+  return { porDestino:porDestino, empleados:empl, totalDesc:totalDesc, totalPago:totalPago, sinClasificar:sinClasificar };
+}
+
+function renderModulo2(){
+  app.innerHTML = headerHtml() +
+    '<div class="crumb"><button id="backBtn2">← Menú</button><span>/</span><span>Revisión de movimientos pendientes</span></div>' +
+    '<div class="stage"><h3><span class="tag">RETENCIONES</span> Retención a empleados por pagar</h3>' +
+    '<p class="desc">Sube el navegador de contabilidad de la cuenta [2.3.1.4] Retención a empleados por pagar. Al personal se le descuenta un mes y la retención se paga al acreedor (banco, cooperativa, etc.) el mes siguiente. El módulo agrupa por <b>destino</b> lo descontado vs lo pagado y muestra el <b>saldo pendiente por pagar</b>.</p>' +
+    '<div class="dropzones">' +
+      dzHtml("retenciones","Navegador de retenciones a empleados","Navegador_Contabilidad_Excel — cuenta [2.3.1.4] Retención a empleados por pagar") +
+    '</div>' +
+    '<div class="run-bar"><button class="btn-run" id="runBtn2"'+(STATE.files.retenciones?'':' disabled')+'>Analizar</button>' +
+    '<span class="run-note" id="runNote2">'+(STATE.files.retenciones?"Listo para analizar.":"Sube el archivo para habilitar.")+'</span></div>' +
+    '</div><div id="resultsArea2"></div>';
+  document.getElementById("backBtn2").onclick=function(){ STATE.view="menu"; render(); };
+  app.querySelectorAll('input[type=file]').forEach(function(inp){ inp.addEventListener("change",function(e){ if(e.target.files[0]){ STATE.files.retenciones=e.target.files[0]; renderModulo2(); } }); });
+  app.querySelectorAll('.dz').forEach(function(dz){
+    dz.addEventListener("dragover",function(e){ e.preventDefault(); dz.classList.add("dragover"); });
+    dz.addEventListener("dragleave",function(){ dz.classList.remove("dragover"); });
+    dz.addEventListener("drop",function(e){ e.preventDefault(); dz.classList.remove("dragover"); if(e.dataTransfer.files[0]){ STATE.files.retenciones=e.dataTransfer.files[0]; renderModulo2(); } });
+  });
+  var rb=document.getElementById("runBtn2"); if(rb) rb.onclick=ejecutarModulo2;
+  if(STATE.mod2.result) renderResultadosMod2();
+}
+function ejecutarModulo2(){
+  var note=document.getElementById("runNote2"); if(note) note.textContent="Leyendo archivo...";
+  readWorkbook(STATE.files.retenciones, function(rows){
+    try{
+      var parsed=parseRetenciones(rows);
+      var net=netearRetenciones(parsed.movs);
+      STATE.mod2.result={ parsed:parsed, net:net };
+      renderModulo2();
+    }catch(err){ if(note) note.textContent="Error: "+err.message; }
+  });
+}
+function renderResultadosMod2(){
+  var area=document.getElementById("resultsArea2"); if(!area) return;
+  var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
+  var pend=net.totalDesc-net.totalPago;
+  var html='<div class="results-head"><h2>Retenciones pendientes por pagar</h2>' +
+    '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
+  html+='<div class="summary-bar">' +
+    '<span class="chip">Saldo inicial: B/ '+R.parsed.saldoInicial.toFixed(2)+'</span>' +
+    '<span class="chip">Descontado: B/ '+net.totalDesc.toFixed(2)+'</span>' +
+    '<span class="chip">Pagado: B/ '+net.totalPago.toFixed(2)+'</span>' +
+    '<span class="chip alert">Pendiente por pagar: B/ '+pend.toFixed(2)+'</span></div>';
+  html+='<div class="step-block"><div class="step-body">';
+  html+='<table class="ret-tabla"><thead><tr><th>Destino (acreedor / concepto)</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
+  Object.keys(pd).sort().forEach(function(d){ var x=pd[d]; var p=x.desc-x.pago;
+    html+='<tr class="ret-dest"><td>'+d+'</td><td>B/ '+x.desc.toFixed(2)+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
+      '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+p.toFixed(2)+'</b></td></tr>';
+    var emps=net.empleados[d]||{}; Object.keys(emps).sort().forEach(function(e){
+      html+='<tr class="ret-emp"><td>'+e+'</td><td>B/ '+emps[e].toFixed(2)+'</td><td>—</td><td>—</td></tr>'; });
+  });
+  html+='</tbody></table>' +
+    '<p class="ret-nota">El detalle por empleado (descontado) es de referencia; el neteo pendiente es por destino. Los nombres del archivo pueden traer variantes de tipeo.</p>' +
+    '</div></div>';
+  area.innerHTML=html;
+  document.getElementById("exportBtn2").onclick=exportarRetenciones;
+}
+function exportarRetenciones(){
+  var net=STATE.mod2.result.net, pd=net.porDestino;
+  var rows=[["Destino","Empleado","Descontado","Pagado","Pendiente"]];
+  Object.keys(pd).sort().forEach(function(d){ var x=pd[d];
+    rows.push([d,"",x.desc.toFixed(2),x.pago.toFixed(2),(x.desc-x.pago).toFixed(2)]);
+    var emps=net.empleados[d]||{}; Object.keys(emps).sort().forEach(function(e){ rows.push([d,e,emps[e].toFixed(2),"",""]); });
+  });
+  rows.push(["TOTAL","",net.totalDesc.toFixed(2),net.totalPago.toFixed(2),(net.totalDesc-net.totalPago).toFixed(2)]);
+  var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:22},{wch:24},{wch:12},{wch:12},{wch:12}];
+  var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Retenciones pendientes");
+  XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
+}
+
 function render(){
   if(STATE.view==="menu") return renderMenu();
   if(STATE.view==="modulo1") return renderModulo1();
+  if(STATE.view==="modulo2") return renderModulo2();
 }
 
 function headerHtml(){
@@ -1602,9 +1763,9 @@ function renderMenu(){
       enabled:true, icon:"💰", iconBg:"var(--brand-lighter)", tag:TAG_CONCILIATORIO,
       tagText:"7 archivos", action:"Conciliar"},
     {id:"modulo2", nombre:"Revisión de movimientos pendientes",
-      desc:"Un solo Excel: se filtran y listan los movimientos sin conciliar.",
-      enabled:false, icon:"🧾", iconBg:"var(--accent-purple-bg)", tag:TAG_REVISION,
-      tagText:"1 archivo", action:"Próximamente"},
+      desc:"Retención a empleados por pagar: agrupa lo descontado vs lo pagado por destino y muestra el saldo pendiente.",
+      enabled:true, icon:"🧾", iconBg:"var(--accent-purple-bg)", tag:TAG_REVISION,
+      tagText:"1 archivo", action:"Revisar"},
     {id:"modulo3", nombre:"Conciliador de auxiliares",
       desc:"Compara el diario contra el auxiliar y enumera las diferencias entre ambas fuentes.",
       enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tag:TAG_CONCILIATORIO,
