@@ -311,6 +311,14 @@ function toISODate(v, mdY){
   }
   m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if(m) return m[0].slice(0,10);
+  // "31-Jan-2026" / "14-Dec-2012" / "5 Ene 2026": día - nombre de mes (inglés o español) - año
+  m = s.match(/^(\d{1,2})[\-\/\s]([A-Za-z]{3,})[\-\/\s](\d{4})$/);
+  if(m){
+    var MES3 = {JAN:1,FEB:2,MAR:3,APR:4,MAY:5,JUN:6,JUL:7,AUG:8,SEP:9,OCT:10,NOV:11,DEC:12,
+                ENE:1,ABR:4,AGO:8,SET:9,DIC:12};
+    var mo = MES3[m[2].slice(0,3).toUpperCase()];
+    if(mo) return m[3]+"-"+String(mo).padStart(2,"0")+"-"+String(parseInt(m[1],10)).padStart(2,"0");
+  }
   return null;
 }
 function daysBetween(iso1, iso2){
