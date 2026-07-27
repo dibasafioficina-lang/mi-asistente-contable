@@ -1842,10 +1842,32 @@ function netearRetenciones(movs){
     if(!he && m.fuente.indexOf("AP-PAY")!==-1){ var e2=normTxt(m.acr||m.desc.split(" - ")[0]); if(e2 && destinoRet(e2)===null) nombres.push(e2); } });
   var canon=canonicalizarNombresRet(nombres);
   function nc(e){ return canon[normTxt(e)]||normTxt(e); }
+  // Mapa empleado(canónico)+monto → destino de su RETENCIÓN (descuento). Sirve para netear las
+  // DEVOLUCIONES: pagos cuyo acreedor es el empleado (no un acreedor conocido, ej. "DEVOLUCIÓN DE
+  // RETENCIÓN DESCONTADA EN PLANILLA"). Sin esto, la devolución cae en "Otros" y no netea contra su
+  // descuento (que quedó en su destino real), y sale como falso "pago sin descuento".
+  var empRetDest={}, empRetDestAny={};
+  movs.forEach(function(m){ if(m.cred<=0) return;
+    var hdr=destinoRet(m.desc); if(!hdr) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) hdr=destinoRet(s); });
+    m.subs.forEach(function(s){ var p=partirLineaRet(s);
+      if(p.monto>0 && !(destinoRet(p.texto)&&esConceptoLiderRet(p.texto))){
+        var emp=empleadoRet(s); if(!emp) return;
+        var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||hdr;
+        if(dl){ empRetDest[nc(emp)+"|"+p.monto.toFixed(2)]=dl; empRetDestAny[nc(emp)]=dl; }
+      }
+    });
+  });
   var porDestino={}, ded={}, pag={}, totalDesc=0, totalPago=0, sinClasificar=[];
   function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!ded[d]) ded[d]=[]; if(!pag[d]) pag[d]=[]; }
   movs.forEach(function(m){
-    if(m.deb>0){ var dp=destinoRet(m.acr||m.desc)||"Otros"; ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; pag[dp].push({fecha:m.fecha, monto:m.deb, acr:m.acr||m.desc}); return; }
+    if(m.deb>0){
+      var dp=destinoRet(m.acr||m.desc);
+      if(!dp){ // devolución a un empleado: enrutar al destino de SU retención para netear su descuento
+        var eqp=nc(normTxt(m.acr||m.desc.split(" - ")[0]));
+        dp = empRetDest[eqp+"|"+m.deb.toFixed(2)] || empRetDestAny[eqp] || "Otros";
+      }
+      ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; pag[dp].push({fecha:m.fecha, monto:m.deb, acr:m.acr||m.desc}); return;
+    }
     if(m.cred<=0) return;
     var cls=clasificarCreditoRet(m, mapa); var mesC=mesRetencion(m);
     if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; ded["Otros"].push({fecha:m.fecha,mes:mesC,emp:"(sin clasificar)",monto:m.cred}); sinClasificar.push(m); return; }
@@ -1855,7 +1877,7 @@ function netearRetenciones(movs){
     var header=destinoRet(m.desc); if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
     var empByD={};
     m.subs.forEach(function(s){ var p=partirLineaRet(s);
-      if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){
+      if(p.monto>0 && !(destinoRet(p.texto)&&esConceptoLiderRet(p.texto))){
         var emp=empleadoRet(s);
         var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||header;
         if(dl){ (empByD[dl]=empByD[dl]||[]).push({emp:(emp?nc(emp):"(sin detalle)"), monto:p.monto}); }
