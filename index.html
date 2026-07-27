@@ -62,13 +62,18 @@
   .crumb .print-btn{margin-left:auto;background:#fff;border:1.5px solid var(--line);color:var(--brand);font-weight:800;
     font-size:13px;padding:7px 16px;border-radius:999px;box-shadow:0 4px 12px rgba(158,104,126,.08)}
   .crumb .print-btn:hover{background:var(--brand);color:#fff;border-color:var(--brand);text-decoration:none}
+  @page{ size: A4 portrait; margin: 8mm; }
   @media print{
     header, .crumb, .dropzones, .run-bar, .desc, .btn-run, .btn-export, input[type=file], .dz{display:none !important}
-    .app{padding:10px !important;max-width:100% !important}
+    .app{padding:0 !important;max-width:100% !important;width:100% !important;zoom:.75}
     body, .app{background:#fff !important}
     .step-block{box-shadow:none !important}
     .step-block, .cierre-caja, .cierre-panel, .saldo-ctx, .ret-saldoini, .finding, .ret-tabla tr{break-inside:avoid}
     .step-body{display:block !important}
+    /* Que todas las columnas quepan en el ancho de la hoja */
+    .ret-tabla{width:100% !important;table-layout:fixed}
+    .ret-tabla th, .ret-tabla td{white-space:normal !important;word-break:break-word;overflow-wrap:anywhere}
+    .cg-cols{grid-template-columns:1fr 1fr !important}
   }
 
   /* Menu de modulos */
