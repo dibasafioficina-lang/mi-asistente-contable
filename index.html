@@ -59,6 +59,17 @@
   .crumb{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--slate);margin-bottom:18px}
   .crumb button{background:none;border:none;color:var(--brand);font-weight:800;cursor:pointer;font-size:14px;padding:0}
   .crumb button:hover{color:var(--brand-dark);text-decoration:underline}
+  .crumb .print-btn{margin-left:auto;background:#fff;border:1.5px solid var(--line);color:var(--brand);font-weight:800;
+    font-size:13px;padding:7px 16px;border-radius:999px;box-shadow:0 4px 12px rgba(158,104,126,.08)}
+  .crumb .print-btn:hover{background:var(--brand);color:#fff;border-color:var(--brand);text-decoration:none}
+  @media print{
+    header, .crumb, .dropzones, .run-bar, .desc, .btn-run, .btn-export, input[type=file], .dz{display:none !important}
+    .app{padding:10px !important;max-width:100% !important}
+    body, .app{background:#fff !important}
+    .step-block{box-shadow:none !important}
+    .step-block, .cierre-caja, .cierre-panel, .saldo-ctx, .ret-saldoini, .finding, .ret-tabla tr{break-inside:avoid}
+    .step-body{display:block !important}
+  }
 
   /* Menu de modulos */
   .hero{margin-bottom:36px;animation:floatIn .5s ease both}
@@ -1920,7 +1931,7 @@ function netearRetenciones(movs){
 
 function renderModulo2(){
   app.innerHTML = headerHtml() +
-    '<div class="crumb"><button id="backBtn2">← Menú</button><span>/</span><span>Retenciones a empleados</span></div>' +
+    '<div class="crumb"><button id="backBtn2">← Menú</button><span>/</span><span>Retenciones a empleados</span><button class="print-btn" id="printBtn2">🖨 Imprimir</button></div>' +
     '<div class="stage"><h3><span class="tag">RETENCIONES</span> Retención a empleados por pagar</h3>' +
     '<p class="desc">Sube el navegador de contabilidad de la cuenta [2.3.1.4] Retención a empleados por pagar. Al personal se le descuenta un mes y la retención se paga al acreedor (banco, cooperativa, etc.) el mes siguiente. El módulo agrupa por <b>destino</b> lo descontado vs lo pagado y muestra el <b>saldo pendiente por pagar</b>.</p>' +
     '<div class="dropzones">' +
@@ -1930,6 +1941,7 @@ function renderModulo2(){
     '<span class="run-note" id="runNote2">'+(STATE.files.retenciones?"Listo para analizar.":"Sube el archivo para habilitar.")+'</span></div>' +
     '</div><div id="resultsArea2"></div>';
   document.getElementById("backBtn2").onclick=function(){ STATE.view="menu"; render(); };
+  document.getElementById("printBtn2").onclick=function(){ window.print(); };
   app.querySelectorAll('input[type=file]').forEach(function(inp){ inp.addEventListener("change",function(e){ if(e.target.files[0]){ STATE.files.retenciones=e.target.files[0]; renderModulo2(); } }); });
   app.querySelectorAll('.dz').forEach(function(dz){
     dz.addEventListener("dragover",function(e){ e.preventDefault(); dz.classList.add("dragover"); });
@@ -2138,7 +2150,7 @@ function stageRunHtml(pasoKey){
 function renderModulo1(){
   app.innerHTML =
     headerHtml() +
-    '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span></div>' +
+    '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span><button class="print-btn" id="printBtn1">🖨 Imprimir</button></div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge" style="background:#B56B86;color:#fff">obligatorio</span></h3>' +
     '<p class="desc">Su único archivo es el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida cuáles de esas partidas ya compensaron usando los estados de cuenta del Paso 2 (si están); las que no, quedan en tránsito. <b>Es obligatorio y no se ejecuta solo: se corre automáticamente junto con el Paso 1.</b></p>' +
@@ -2181,6 +2193,7 @@ function renderModulo1(){
     '<div id="resultsArea"></div>';
 
   document.getElementById("backBtn").onclick = function(){ STATE.view="menu"; render(); };
+  document.getElementById("printBtn1").onclick = function(){ window.print(); };
   function assignFile(key, file){
     if(!file) return;
     STATE.files[key] = file;
