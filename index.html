@@ -255,6 +255,7 @@
   .ret-aging .ret-reciente{color:#3F6E56;font-weight:700}
   .ret-aging .ret-viejo{color:#B5731E;font-weight:800}
   .ret-saldoini{margin-top:14px;padding:12px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:13px;color:#7A5320;line-height:1.5}
+  .ret-siLabel{font-size:11px;font-weight:700;color:#B5731E;background:#FBEFD9;padding:1px 6px;border-radius:6px;margin-left:6px;white-space:nowrap}
   .ret-nota{font-size:12px;color:var(--slate);margin-top:12px;line-height:1.5}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
@@ -1876,7 +1877,7 @@ function aprenderMapaRet(movs){
     if(p.monto>0 && p.hint){ var dh=destinoRet(p.hint); if(dh) mapa[empleadoRet(s)+"|"+p.monto.toFixed(2)]=dh; } }); });
   return mapa;
 }
-function netearRetenciones(movs){
+function netearRetenciones(movs, saldoIniDet){
   var mapa=aprenderMapaRet(movs);
   // Canonicaliza nombres de empleado (typos ≤4 letras / anagramas) para no separar variantes.
   var nombres=[];
@@ -1901,7 +1902,7 @@ function netearRetenciones(movs){
     });
   });
   var porDestino={}, ded={}, pag={}, totalDesc=0, totalPago=0, sinClasificar=[];
-  function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0}; if(!ded[d]) ded[d]=[]; if(!pag[d]) pag[d]=[]; }
+  function ensure(d){ if(!porDestino[d]) porDestino[d]={desc:0,pago:0,saldoIni:0}; if(!ded[d]) ded[d]=[]; if(!pag[d]) pag[d]=[]; }
   movs.forEach(function(m){
     if(m.deb>0){
       var dp=destinoRet(m.acr||m.desc);
@@ -1937,6 +1938,20 @@ function netearRetenciones(movs){
       }
     });
   });
+  // Saldo inicial (Paso 0): cada línea del detalle es una obligación de APERTURA — la retención que ya se
+  // adeudaba de antes del primer movimiento del archivo. Se inyecta como una "deducción" más vieja que
+  // cualquier movimiento (mes vacío → primero en el FIFO) para que los pagos del período la cubran ANTES que
+  // lo del período. Lo que quede sin pagar aparece como pendiente etiquetado "Saldo inicial". El total de la
+  // cuenta no cambia: pendiente = descontado + saldo inicial − pagado.
+  var totalSaldoIni=0;
+  (saldoIniDet||[]).forEach(function(r){
+    var monto=Math.abs(parseFloat(r.monto)); if(isNaN(monto)||monto<=0.001) return;
+    var concepto=String(r.concepto||"").trim();
+    var d=destinoRet(concepto)||"Otros"; ensure(d);
+    var mes=/^\d{4}-\d{2}/.test(r.fecha||"")? String(r.fecha).slice(0,7) : "";
+    ded[d].push({fecha:r.fecha||"", mes:mes, emp:concepto||"(saldo inicial)", monto:monto, saldoIni:true});
+    porDestino[d].saldoIni+=monto; totalSaldoIni+=monto;
+  });
   // FIFO por destino: los pagos cubren las deducciones más viejas; sobran las deducciones PENDIENTES y,
   // si los pagos exceden, los "pagos sin descuento". Se dejan por fuera las deducciones ya pagadas.
   var detalle={}, aging={};
@@ -1945,12 +1960,12 @@ function netearRetenciones(movs){
     var pagos=(pag[d]||[]).slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     var restPago=pagos.reduce(function(s,p){return s+p.monto;},0);
     var pendientes=[], porMes={};
-    deds.forEach(function(x){ var r=x.monto; if(restPago>=r){ restPago-=r; r=0; } else { r-=restPago; restPago=0; } if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; } });
+    deds.forEach(function(x){ var r=x.monto; if(restPago>=r){ restPago-=r; r=0; } else { r-=restPago; restPago=0; } if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r, saldoIni:x.saldoIni}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; } });
     var pagosSinDesc=[]; if(restPago>0.001){ var sob=restPago; for(var i=pagos.length-1;i>=0 && sob>0.001;i--){ var usar=Math.min(sob,pagos[i].monto); pagosSinDesc.unshift({fecha:pagos[i].fecha, monto:usar, acr:pagos[i].acr}); sob-=usar; } }
     detalle[d]={pendientes:pendientes, pagosSinDesc:pagosSinDesc};
     aging[d]=porMes;
   });
-  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, sinClasificar:sinClasificar };
+  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar };
 }
 
 function renderModulo2(){
@@ -1986,7 +2001,7 @@ function ejecutarModulo2(){
   readWorkbook(STATE.files.retenciones, function(rows){
     try{
       var parsed=parseRetenciones(rows);
-      var net=netearRetenciones(parsed.movs);
+      var net=netearRetenciones(parsed.movs, STATE.mod2.saldoIniDetalle);
       STATE.mod2.result={ parsed:parsed, net:net };
       renderModulo2();
     }catch(err){ if(note) note.textContent="Error: "+err.message; }
@@ -2051,11 +2066,16 @@ function bindSaldoIniDetalleMod2(){
   add.onclick=function(){ STATE.mod2.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderModulo2(); };
   var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; renderModulo2(); };
   document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderModulo2(); }; });
-  document.querySelectorAll("input.sidet2").forEach(function(inp){ inp.addEventListener("input",function(){
-    var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
-    if(STATE.mod2.saldoIniDetalle[i]) STATE.mod2.saldoIniDetalle[i][f]=inp.value;
-    actualizarTotalSaldoIniMod2();
-  }); });
+  document.querySelectorAll("input.sidet2").forEach(function(inp){
+    inp.addEventListener("input",function(){
+      var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
+      if(STATE.mod2.saldoIniDetalle[i]) STATE.mod2.saldoIniDetalle[i][f]=inp.value;
+      actualizarTotalSaldoIniMod2();
+    });
+    // Al salir del campo, si ya hay análisis, re-netea los resultados con el saldo inicial actualizado
+    // (solo redibuja resultsArea2, sin reconstruir la tabla del Paso 0 para no perder el foco).
+    inp.addEventListener("change",function(){ if(STATE.mod2.result) renderResultadosMod2(); });
+  });
   var file=document.getElementById("sidet2File"); if(file) file.addEventListener("change",function(e){
     if(!e.target.files[0]) return;
     readWorkbook(e.target.files[0], function(rows){
@@ -2066,11 +2086,17 @@ function bindSaldoIniDetalleMod2(){
 }
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
-  var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
+  var R=STATE.mod2.result;
+  // Se recalcula el neteo en cada render con el detalle del Paso 0 vigente, para que al editar/subir el
+  // saldo inicial las obligaciones de apertura se emparejen con los pagos sin volver a pulsar "Analizar".
+  var net=netearRetenciones(R.parsed.movs, STATE.mod2.saldoIniDetalle); R.net=net;
+  var pd=net.porDestino;
   var pendPeriodo=net.totalDesc-net.totalPago;
   var saldoIni=R.parsed.saldoInicial;
-  var deudaVieja = saldoIni<0 ? -saldoIni : 0; // saldo acreedor (deuda) de antes del período
-  var pendTotal = pendPeriodo + deudaVieja;
+  var deudaArchivo = saldoIni<0 ? -saldoIni : 0; // saldo acreedor (deuda) de antes del período, según el archivo
+  var totalSaldoIni = net.totalSaldoIni||0;      // saldo inicial ya desglosado en el Paso 0 (y neteado)
+  var deudaVieja = Math.max(0, Math.round((deudaArchivo-totalSaldoIni)*100)/100); // remanente aún SIN desglosar
+  var pendTotal = pendPeriodo + totalSaldoIni + deudaVieja;
   // Mes más reciente presente en el aging (lo pendiente de ESE mes es normal → se paga el mes siguiente;
   // lo de meses anteriores es un saldo VIEJO por revisar).
   var meses=[]; Object.keys(net.aging).forEach(function(d){ Object.keys(net.aging[d]).forEach(function(k){ if(k!=="?") meses.push(k); }); });
@@ -2079,18 +2105,20 @@ function renderResultadosMod2(){
     '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
   html+='<div class="summary-bar">' +
     '<span class="chip">Descontado: B/ '+net.totalDesc.toFixed(2)+'</span>' +
+    (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+totalSaldoIni.toFixed(2)+'</span>' : '') +
     '<span class="chip">Pagado: B/ '+net.totalPago.toFixed(2)+'</span>' +
     '<span class="chip">Pendiente del período: B/ '+pendPeriodo.toFixed(2)+'</span>' +
-    (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
+    (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior sin desglosar: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
     '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Empleado / acreedor</th><th>Fecha</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
   // Orden: de más ANTIGUO a más reciente (por el mes más viejo con pendiente); los sin pendiente al final.
   function mesViejo(d){ var ag=net.aging[d]||{}; var ks=Object.keys(ag).filter(function(k){return k!=="?";}).sort(); return ks.length? ks[0] : "9999"; }
   var destinos=Object.keys(pd).sort(function(a,b){ var ma=mesViejo(a), mb=mesViejo(b); if(ma!==mb) return ma<mb?-1:1; return a<b?-1:1; });
-  destinos.forEach(function(d){ var x=pd[d]; var p=x.desc-x.pago;
-    html+='<tr class="ret-dest"><td>'+d+'</td><td></td><td>B/ '+x.desc.toFixed(2)+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
+  destinos.forEach(function(d){ var x=pd[d]; var si=x.saldoIni||0; var p=x.desc+si-x.pago;
+    html+='<tr class="ret-dest"><td>'+d+'</td><td></td><td>B/ '+x.desc.toFixed(2)+(si>0.01?' <span class="ret-siLabel">+ ini '+si.toFixed(2)+'</span>':'')+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
       '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+p.toFixed(2)+'</b></td></tr>';
+    if(si>0.01) html+='<tr class="ret-aging"><td colspan="5">↳ incluye saldo inicial (deuda anterior) B/ '+si.toFixed(2)+' — los pagos lo cubren primero (FIFO); lo que quede aparece abajo como pendiente «Saldo inicial».</td></tr>';
     // Aging: en qué mes se generó lo pendiente (marca lo viejo).
     var ag=net.aging[d]||{}; var keys=Object.keys(ag).sort();
     if(keys.length){
@@ -2104,7 +2132,7 @@ function renderResultadosMod2(){
     // Detalle a nivel de MOVIMIENTO: solo descuentos NO pagados (pendientes) y pagos SIN descuento, con fecha.
     var det=net.detalle[d]||{pendientes:[],pagosSinDesc:[]};
     var filas=[];
-    det.pendientes.forEach(function(r){ filas.push({fecha:r.fecha, nombre:r.emp, desc:r.monto, pago:null, pend:r.monto}); });
+    det.pendientes.forEach(function(r){ filas.push({fecha:r.fecha, nombre:(r.saldoIni?"⌛ Saldo inicial — "+String(r.emp||""):r.emp), desc:r.monto, pago:null, pend:r.monto, saldoIni:r.saldoIni}); });
     det.pagosSinDesc.forEach(function(r){ filas.push({fecha:r.fecha, nombre:"⚠ pago sin descuento — "+String(r.acr||"").slice(0,42), desc:null, pago:r.monto, pend:-r.monto}); });
     filas.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     filas.forEach(function(f){
@@ -2116,7 +2144,7 @@ function renderResultadosMod2(){
   });
   html+='</tbody></table>';
   if(deudaVieja>0.01){
-    html+='<div class="ret-saldoini">⚠ <b>Saldo anterior a este período: B/ '+deudaVieja.toFixed(2)+'</b> (saldo inicial '+saldoIni.toFixed(2)+'). Es una deuda de antes del primer movimiento del archivo, sin desglose acá y sin emparejar con pagos de este período — revisá el archivo anterior para saber a qué corresponde.</div>';
+    html+='<div class="ret-saldoini">⚠ <b>Saldo anterior sin desglosar: B/ '+deudaVieja.toFixed(2)+'</b> (saldo inicial del archivo '+saldoIni.toFixed(2)+'; ya desglosado en el Paso 0: B/ '+totalSaldoIni.toFixed(2)+'). Esta parte todavía no tiene detalle en el Paso 0, así que no se pudo emparejar con pagos — completá el Paso 0 para que se netee como los demás.</div>';
   }
   html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. Como la retención de un mes se paga el mes SIGUIENTE, lo pendiente del mes en curso y del mes anterior (dentro de su ventana normal de pago) NO se marca como atrasado; solo lleva ⚠ viejo lo que ya debió pagarse (su mes de pago quedó atrás). Los nombres se normalizan (typos/variantes).</p>' +
     '</div></div>';
@@ -2126,18 +2154,20 @@ function renderResultadosMod2(){
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
   var rows=[["Destino","Empleado / acreedor","Fecha","Descontado","Pagado","Pendiente"]];
-  Object.keys(pd).sort().forEach(function(d){ var x=pd[d];
-    rows.push([d,"","",x.desc.toFixed(2),x.pago.toFixed(2),(x.desc-x.pago).toFixed(2)]);
+  Object.keys(pd).sort().forEach(function(d){ var x=pd[d]; var si=x.saldoIni||0;
+    rows.push([d,(si>0.01?"(incluye saldo inicial "+si.toFixed(2)+")":""),"",(x.desc+si).toFixed(2),x.pago.toFixed(2),(x.desc+si-x.pago).toFixed(2)]);
     var det=net.detalle[d]||{pendientes:[],pagosSinDesc:[]};
     var filas=[];
-    det.pendientes.forEach(function(r){ filas.push([r.fecha,r.emp,r.monto.toFixed(2),"",r.monto.toFixed(2)]); });
+    det.pendientes.forEach(function(r){ filas.push([r.fecha,(r.saldoIni?"Saldo inicial - "+(r.emp||""):r.emp),r.monto.toFixed(2),"",r.monto.toFixed(2)]); });
     det.pagosSinDesc.forEach(function(r){ filas.push([r.fecha,"pago sin descuento - "+(r.acr||""),"",r.monto.toFixed(2),(-r.monto).toFixed(2)]); });
     filas.sort(function(a,b){ return (a[0]||"")<(b[0]||"")?-1:1; });
     filas.forEach(function(f){ rows.push([d,f[1],f[0],f[2],f[3],f[4]]); });
   });
-  var deudaVieja = R.parsed.saldoInicial<0 ? -R.parsed.saldoInicial : 0;
-  if(deudaVieja>0.01) rows.push(["Saldo anterior a enero (sin desglose)","","","","", deudaVieja.toFixed(2)]);
-  rows.push(["TOTAL PENDIENTE","","","","",(net.totalDesc-net.totalPago+deudaVieja).toFixed(2)]);
+  var totalSaldoIni=net.totalSaldoIni||0;
+  var deudaArchivo = R.parsed.saldoInicial<0 ? -R.parsed.saldoInicial : 0;
+  var deudaVieja = Math.max(0, Math.round((deudaArchivo-totalSaldoIni)*100)/100);
+  if(deudaVieja>0.01) rows.push(["Saldo anterior sin desglosar","","","","", deudaVieja.toFixed(2)]);
+  rows.push(["TOTAL PENDIENTE","","","","",(net.totalDesc-net.totalPago+totalSaldoIni+deudaVieja).toFixed(2)]);
   var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:22},{wch:26},{wch:12},{wch:12},{wch:12},{wch:12}];
   var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Retenciones pendientes");
   XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
