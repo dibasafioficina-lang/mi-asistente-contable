@@ -228,6 +228,18 @@
   .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
     border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
   .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
+  .sidet-panel{background:#EEF3FA;border-color:#D5E1F0}
+  .sidet-panel .cierre-title{color:#3C5670}
+  .sidet-tabla{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;background:#fff;border-radius:10px;overflow:hidden}
+  .sidet-tabla th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:var(--slate);padding:7px 8px;border-bottom:1px solid var(--line);background:#F7FAFD}
+  .sidet-tabla td{padding:5px 8px;border-bottom:1px solid #EEF1F4}
+  .sidet-tabla .cg-inp{width:100%;border-color:#CBD9EA}
+  .sidet-vacio{color:var(--slate);font-style:italic;padding:14px 8px;text-align:center}
+  .sidet-bar{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .sidet-upload{cursor:pointer;position:relative;overflow:hidden}
+  .sidet-upload input{position:absolute;left:0;top:0;width:100%;height:100%;opacity:0;cursor:pointer}
+  .sidet-del{background:none;border:none;color:#B54B4B;font-weight:800;cursor:pointer;font-size:15px;line-height:1}
+  .sidet-del:hover{color:#8f2f2f}
   .ret-tabla{width:100%;border-collapse:collapse;font-size:14px}
   .ret-tabla th{text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:var(--slate);
     padding:8px 10px;border-bottom:2px solid var(--line)}
@@ -291,6 +303,7 @@ var STATE = {
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
   saldoCajaGeneral:null,
+  saldoIniDetalle:[],
   checks:{}
 };
 
@@ -2313,6 +2326,8 @@ function renderResultados(){
   // Cuando la CAJA (Paso 1 y 2) cuadra, se muestra el cierre CONSOLIDADO de Caja General arriba, y abajo
   // SOLO los pasos que todavía tengan diferencias (no se repiten los cuadrados). Si la caja aún no cuadra,
   // se muestra el detalle por paso + el panel de partidas en tránsito.
+  // Paso 0 de Caja General: detalle del saldo inicial (visible siempre que haya un saldo de Caja General).
+  if(STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.inicial!=null){ html += saldoIniDetalleHtml(); }
   var cajaLista = pasoCuadrado("paso1") && pasoCuadrado("paso2");
   if(cajaLista){
     html += cierreCajaHtml();
@@ -2418,6 +2433,7 @@ function renderResultados(){
   var btnT = document.getElementById("btnTransito");
   if(btnT) btnT.onclick = exportarEnTransito;
   if(cajaLista) bindCajaInputs(); // campos editables del cierre de Caja General (saldo inicial / sistema)
+  bindSaldoIniDetalle(); // Paso 0: detalle editable del saldo inicial (manual o por Excel)
 }
 
 function exportarChecklist(){
@@ -2559,6 +2575,89 @@ function bindCajaInputs(){
   ci.addEventListener("input", recalc);
   cs.addEventListener("input", recalc);
   if(cm) cm.addEventListener("input", recalc);
+}
+
+/* -------- Paso 0 de Caja General: detalle del saldo inicial (manual o por Excel) -------- */
+function sumaSaldoIniDetalle(){
+  return Math.round((STATE.saldoIniDetalle||[]).reduce(function(a,r){ var v=parseFloat(r.monto); return a+(isNaN(v)?0:v); },0)*100)/100;
+}
+function saldoIniDetalleHtml(){
+  var s = STATE.saldoCajaGeneral || {};
+  if(s.inicial==null) return "";
+  var det = STATE.saldoIniDetalle || [];
+  var total = sumaSaldoIniDetalle();
+  var dif = Math.round((total - s.inicial)*100)/100;
+  var ok = Math.abs(dif) < 0.01;
+  var filas = det.map(function(r,i){
+    return '<tr>' +
+      '<td><input class="cg-inp sidet" data-i="'+i+'" data-f="fecha" type="date" value="'+(r.fecha||"")+'"></td>' +
+      '<td><input class="cg-inp sidet" data-i="'+i+'" data-f="concepto" type="text" value="'+String(r.concepto||"").replace(/"/g,"&quot;")+'" placeholder="Concepto"></td>' +
+      '<td><input class="cg-inp sidet" data-i="'+i+'" data-f="monto" type="number" step="0.01" value="'+(r.monto!=null&&r.monto!==""?r.monto:"")+'"></td>' +
+      '<td><button class="sidet-del" data-i="'+i+'" title="Eliminar fila">✕</button></td></tr>';
+  }).join("");
+  if(!det.length) filas = '<tr><td colspan="4" class="sidet-vacio">Sin detalle todavía. Agregá filas o subí un Excel (columnas: Fecha, Concepto, Monto).</td></tr>';
+  return '<div class="cierre-caja sidet-panel">' +
+    '<div class="cierre-title">Paso 0 — Detalle del saldo inicial de Caja General</div>' +
+    '<p class="cg-note">Saldo inicial del sistema: <b>B/ '+s.inicial.toFixed(2)+'</b>'+(s.fechaInicial?' ('+s.fechaInicial+')':'')+'. Es el dinero en tránsito arrastrado del mes anterior — ingresá de qué se compone, a mano o por Excel.</p>' +
+    '<table class="ret-tabla sidet-tabla"><thead><tr><th style="width:140px">Fecha</th><th>Concepto</th><th style="width:120px">Monto</th><th style="width:34px"></th></tr></thead><tbody>'+filas+'</tbody></table>' +
+    '<div class="sidet-bar">' +
+      '<button id="sidetAdd" class="btn-export">＋ Agregar fila</button>' +
+      '<label class="btn-export sidet-upload">Subir Excel<input id="sidetFile" type="file" accept=".xlsx,.xls,.csv"></label>' +
+      (det.length? '<button id="sidetClear" class="btn-export">Limpiar</button>':'') +
+    '</div>' +
+    '<div class="cg-box" style="margin-top:12px;background:#fff">' +
+      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidetTotal">B/ '+total.toFixed(2)+'</b></div>' +
+      '<div class="cg-row cg-dif"><span id="sidetDifLbl">'+(ok?'✓ Cuadra con el saldo inicial':'Diferencia vs saldo inicial')+'</span>' +
+        '<b id="sidetDif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+dif.toFixed(2))+'</b></div>' +
+    '</div>' +
+  '</div>';
+}
+function actualizarTotalSaldoIni(){
+  var s = STATE.saldoCajaGeneral || {}; if(s.inicial==null) return;
+  var total = sumaSaldoIniDetalle();
+  var dif = Math.round((total - s.inicial)*100)/100;
+  var ok = Math.abs(dif) < 0.01;
+  var t=document.getElementById("sidetTotal"); if(t) t.textContent="B/ "+total.toFixed(2);
+  var d=document.getElementById("sidetDif"); if(d){ d.textContent=ok?"✓":"B/ "+dif.toFixed(2); d.style.color=ok?"var(--ok)":"#B54B4B"; }
+  var l=document.getElementById("sidetDifLbl"); if(l) l.textContent=ok?"✓ Cuadra con el saldo inicial":"Diferencia vs saldo inicial";
+}
+function bindSaldoIniDetalle(){
+  if(!STATE.saldoIniDetalle) STATE.saldoIniDetalle=[];
+  var add=document.getElementById("sidetAdd"); if(!add) return;
+  add.onclick=function(){ STATE.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderResultados(); };
+  var clr=document.getElementById("sidetClear"); if(clr) clr.onclick=function(){ STATE.saldoIniDetalle=[]; renderResultados(); };
+  document.querySelectorAll(".sidet-del").forEach(function(b){ b.onclick=function(){ STATE.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderResultados(); }; });
+  document.querySelectorAll("input.sidet").forEach(function(inp){ inp.addEventListener("input",function(){
+    var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
+    if(STATE.saldoIniDetalle[i]) STATE.saldoIniDetalle[i][f]=inp.value;
+    actualizarTotalSaldoIni();
+  }); });
+  var file=document.getElementById("sidetFile"); if(file) file.addEventListener("change",function(e){
+    if(!e.target.files[0]) return;
+    readWorkbook(e.target.files[0], function(rows){
+      try{ STATE.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
+      renderResultados();
+    });
+  });
+}
+// Lee un Excel con el detalle del saldo inicial. Columnas flexibles: Fecha, Concepto/Descripción, Monto/Importe.
+function parseSaldoIniDetalle(rows){
+  var hIdx = findHeaderRow(rows, ["Fecha","Monto"]);
+  if(hIdx===-1) hIdx = findHeaderRow(rows, ["Fecha","Concepto"]);
+  var out=[];
+  if(hIdx===-1){ // sin encabezado claro: col 0=fecha, 1=concepto, 2=monto
+    rows.forEach(function(r){ if(!r) return; var f=toISODate(r[0],false); var c=String(r[1]||""); var mo=money(r[2]!=null?r[2]:r[1]);
+      if(f || (mo && c)) out.push({fecha:f||"", concepto:c, monto:mo}); });
+    return out;
+  }
+  var cF=colIdx(rows[hIdx],"Fecha");
+  var cC=colIdx(rows[hIdx],"Concepto"); if(cC<0)cC=colIdx(rows[hIdx],"Descripcion");
+  var cM=colIdx(rows[hIdx],"Monto"); if(cM<0)cM=colIdx(rows[hIdx],"Importe"); if(cM<0)cM=colIdx(rows[hIdx],"Saldo");
+  for(var r=hIdx+1;r<rows.length;r++){ var row=rows[r]; if(!row) continue;
+    var f=toISODate(cF>=0?row[cF]:null,false); var c=cC>=0?String(row[cC]||""):""; var mo=money(cM>=0?row[cM]:null);
+    if(f || (mo && c) || (mo && f)) out.push({fecha:f||"", concepto:c, monto:mo});
+  }
+  return out;
 }
 function exportarEnTransito(){
   var items = recolectarEnTransito();
