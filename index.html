@@ -1968,6 +1968,8 @@ function ejecutarModulo2(){
   });
 }
 function mesNombre(k){ if(!k||k==="?") return "sin fecha"; var m=["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]; var p=k.split("-"); return (m[parseInt(p[1],10)]||p[1])+" "+p[0]; }
+// Mes siguiente a "YYYY-MM" (la retención de un mes se paga el mes siguiente).
+function mesSiguiente(k){ if(!k||k==="?") return k; var p=k.split("-"); var y=parseInt(p[0],10), m=parseInt(p[1],10)+1; if(m>12){m=1;y++;} return y+"-"+String(m).padStart(2,"0"); }
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
@@ -1998,7 +2000,10 @@ function renderResultadosMod2(){
     // Aging: en qué mes se generó lo pendiente (marca lo viejo).
     var ag=net.aging[d]||{}; var keys=Object.keys(ag).sort();
     if(keys.length){
-      var partes=keys.map(function(k){ var viejo=mesActual && k<mesActual;
+      // Una retención se paga el mes SIGUIENTE al de su generación; solo es "vieja" (atrasada) si su mes
+      // de pago (M+1) ya quedó atrás respecto al mes más reciente. Así el mes en curso y el anterior
+      // (dentro de su ventana normal de pago) NO se marcan como atrasados.
+      var partes=keys.map(function(k){ var viejo=mesActual && k!=="?" && mesSiguiente(k)<mesActual;
         return '<span class="'+(viejo?'ret-viejo':'ret-reciente')+'">'+mesNombre(k)+': B/ '+ag[k].toFixed(2)+(viejo?' ⚠ viejo':'')+'</span>'; });
       html+='<tr class="ret-aging"><td colspan="5">Pendiente generado en → '+partes.join(' &nbsp;·&nbsp; ')+'</td></tr>';
     }
@@ -2019,7 +2024,7 @@ function renderResultadosMod2(){
   if(deudaVieja>0.01){
     html+='<div class="ret-saldoini">⚠ <b>Saldo anterior a este período: B/ '+deudaVieja.toFixed(2)+'</b> (saldo inicial '+saldoIni.toFixed(2)+'). Es una deuda de antes del primer movimiento del archivo, sin desglose acá y sin emparejar con pagos de este período — revisá el archivo anterior para saber a qué corresponde.</div>';
   }
-  html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. El pendiente reciente ('+(mesActual?mesNombre(mesActual):"último mes")+') es lo normal (se descuenta un mes y se paga el siguiente); lo ⚠ viejo lleva meses sin pagarse. Los nombres se normalizan (typos/variantes).</p>' +
+  html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. Como la retención de un mes se paga el mes SIGUIENTE, lo pendiente del mes en curso y del mes anterior (dentro de su ventana normal de pago) NO se marca como atrasado; solo lleva ⚠ viejo lo que ya debió pagarse (su mes de pago quedó atrás). Los nombres se normalizan (typos/variantes).</p>' +
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
