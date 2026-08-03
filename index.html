@@ -238,8 +238,8 @@
   .sidet-bar{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
   .sidet-upload{cursor:pointer;position:relative;overflow:hidden}
   .sidet-upload input{position:absolute;left:0;top:0;width:100%;height:100%;opacity:0;cursor:pointer}
-  .sidet-del{background:none;border:none;color:#B54B4B;font-weight:800;cursor:pointer;font-size:15px;line-height:1}
-  .sidet-del:hover{color:#8f2f2f}
+  .sidet-del,.sidet-del2{background:none;border:none;color:#B54B4B;font-weight:800;cursor:pointer;font-size:15px;line-height:1}
+  .sidet-del:hover,.sidet-del2:hover{color:#8f2f2f}
   .ret-tabla{width:100%;border-collapse:collapse;font-size:14px}
   .ret-tabla th{text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:var(--slate);
     padding:8px 10px;border-bottom:2px solid var(--line)}
@@ -298,7 +298,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null },
+  mod2:{ result:null, saldoIniDetalle:[] },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -1983,6 +1983,71 @@ function ejecutarModulo2(){
 function mesNombre(k){ if(!k||k==="?") return "sin fecha"; var m=["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]; var p=k.split("-"); return (m[parseInt(p[1],10)]||p[1])+" "+p[0]; }
 // Mes siguiente a "YYYY-MM" (la retención de un mes se paga el mes siguiente).
 function mesSiguiente(k){ if(!k||k==="?") return k; var p=k.split("-"); var y=parseInt(p[0],10), m=parseInt(p[1],10)+1; if(m>12){m=1;y++;} return y+"-"+String(m).padStart(2,"0"); }
+/* -------- Paso 0 de Retenciones: detalle del saldo inicial / deuda anterior (manual o Excel) -------- */
+function sumaSaldoIniDetalleMod2(){
+  return Math.round((STATE.mod2.saldoIniDetalle||[]).reduce(function(a,r){ var v=parseFloat(r.monto); return a+(isNaN(v)?0:v); },0)*100)/100;
+}
+function saldoIniDetalleMod2Html(){
+  var R=STATE.mod2.result; if(!R||R.parsed.saldoInicial==null) return "";
+  var saldoIni=R.parsed.saldoInicial;
+  var objetivo=Math.round(Math.abs(saldoIni)*100)/100;
+  if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
+  var det=STATE.mod2.saldoIniDetalle;
+  var total=sumaSaldoIniDetalleMod2();
+  var dif=Math.round((total-objetivo)*100)/100;
+  var ok=Math.abs(dif)<0.01;
+  var filas=det.map(function(r,i){
+    return '<tr>' +
+      '<td><input class="cg-inp sidet2" data-i="'+i+'" data-f="fecha" type="date" value="'+(r.fecha||"")+'"></td>' +
+      '<td><input class="cg-inp sidet2" data-i="'+i+'" data-f="concepto" type="text" value="'+String(r.concepto||"").replace(/"/g,"&quot;")+'" placeholder="Acreedor / empleado / concepto"></td>' +
+      '<td><input class="cg-inp sidet2" data-i="'+i+'" data-f="monto" type="number" step="0.01" value="'+(r.monto!=null&&r.monto!==""?r.monto:"")+'"></td>' +
+      '<td><button class="sidet-del2" data-i="'+i+'" title="Eliminar fila">✕</button></td></tr>';
+  }).join("");
+  if(!det.length) filas='<tr><td colspan="4" class="sidet-vacio">Sin detalle todavía. Agregá filas o subí un Excel (columnas: Fecha, Concepto, Monto).</td></tr>';
+  return '<div class="cierre-caja sidet-panel">' +
+    '<div class="cierre-title">Paso 0 — Detalle del saldo inicial (deuda anterior)</div>' +
+    '<p class="cg-note">Saldo anterior a este período: <b>B/ '+objetivo.toFixed(2)+'</b> (saldo inicial '+saldoIni.toFixed(2)+'). Es la retención adeudada de antes del primer movimiento del archivo — ingresá de qué se compone (acreedor/empleado + monto), a mano o por Excel.</p>' +
+    '<table class="ret-tabla sidet-tabla"><thead><tr><th style="width:140px">Fecha</th><th>Acreedor / empleado / concepto</th><th style="width:120px">Monto</th><th style="width:34px"></th></tr></thead><tbody>'+filas+'</tbody></table>' +
+    '<div class="sidet-bar">' +
+      '<button id="sidet2Add" class="btn-export">＋ Agregar fila</button>' +
+      '<label class="btn-export sidet-upload">Subir Excel<input id="sidet2File" type="file" accept=".xlsx,.xls,.csv"></label>' +
+      (det.length? '<button id="sidet2Clear" class="btn-export">Limpiar</button>':'') +
+    '</div>' +
+    '<div class="cg-box" style="margin-top:12px;background:#fff">' +
+      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidet2Total">B/ '+total.toFixed(2)+'</b></div>' +
+      '<div class="cg-row cg-dif"><span id="sidet2DifLbl">'+(ok?'✓ Cuadra con el saldo anterior':'Diferencia vs saldo anterior')+'</span>' +
+        '<b id="sidet2Dif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+dif.toFixed(2))+'</b></div>' +
+    '</div>' +
+  '</div>';
+}
+function actualizarTotalSaldoIniMod2(){
+  var R=STATE.mod2.result; if(!R||R.parsed.saldoInicial==null) return;
+  var objetivo=Math.round(Math.abs(R.parsed.saldoInicial)*100)/100;
+  var total=sumaSaldoIniDetalleMod2();
+  var dif=Math.round((total-objetivo)*100)/100; var ok=Math.abs(dif)<0.01;
+  var t=document.getElementById("sidet2Total"); if(t)t.textContent="B/ "+total.toFixed(2);
+  var d=document.getElementById("sidet2Dif"); if(d){ d.textContent=ok?"✓":"B/ "+dif.toFixed(2); d.style.color=ok?"var(--ok)":"#B54B4B"; }
+  var l=document.getElementById("sidet2DifLbl"); if(l)l.textContent=ok?'✓ Cuadra con el saldo anterior':'Diferencia vs saldo anterior';
+}
+function bindSaldoIniDetalleMod2(){
+  if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
+  var add=document.getElementById("sidet2Add"); if(!add) return;
+  add.onclick=function(){ STATE.mod2.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderResultadosMod2(); };
+  var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; renderResultadosMod2(); };
+  document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderResultadosMod2(); }; });
+  document.querySelectorAll("input.sidet2").forEach(function(inp){ inp.addEventListener("input",function(){
+    var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
+    if(STATE.mod2.saldoIniDetalle[i]) STATE.mod2.saldoIniDetalle[i][f]=inp.value;
+    actualizarTotalSaldoIniMod2();
+  }); });
+  var file=document.getElementById("sidet2File"); if(file) file.addEventListener("change",function(e){
+    if(!e.target.files[0]) return;
+    readWorkbook(e.target.files[0], function(rows){
+      try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
+      renderResultadosMod2();
+    });
+  });
+}
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
@@ -2002,6 +2067,8 @@ function renderResultadosMod2(){
     '<span class="chip">Pendiente del período: B/ '+pendPeriodo.toFixed(2)+'</span>' +
     (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
     '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
+  // Paso 0: detalle del saldo inicial (deuda anterior), visible cuando hay saldo inicial distinto de 0.
+  if(saldoIni!=null && Math.abs(saldoIni)>0.01){ html += saldoIniDetalleMod2Html(); }
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Empleado / acreedor</th><th>Fecha</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
   // Orden: de más ANTIGUO a más reciente (por el mes más viejo con pendiente); los sin pendiente al final.
@@ -2041,6 +2108,7 @@ function renderResultadosMod2(){
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
+  bindSaldoIniDetalleMod2(); // Paso 0: detalle editable del saldo inicial (manual o Excel)
 }
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
