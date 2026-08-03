@@ -1732,7 +1732,9 @@ var app = document.getElementById("app");
 function destinoRet(txt){
   var n = normTxt(txt);
   if(n.indexOf("SON")!==-1) return "Son Import";
-  if(n.indexOf("REFRES")!==-1 || n.indexOf("MAYI")!==-1 || n.indexOf("SHOPPING")!==-1) return "Refresquería";
+  // Refresquería: la razón social cambió con el tiempo pero es el mismo acreedor/servicio retenido:
+  // "Refresquería", "Shopping Market", "Shopping Refresquería", "Maryan Safi", "Mayi".
+  if(n.indexOf("REFRES")!==-1 || n.indexOf("MAYI")!==-1 || n.indexOf("SHOPPING")!==-1 || n.indexOf("MARYAN")!==-1) return "Refresquería";
   if(n.indexOf("FUNERAL")!==-1 || n.indexOf("CASA FUN")!==-1 || n.indexOf("FUN VIDA")!==-1) return "Casa de Funerales";
   if(n.indexOf("CAJA DE AHORRO")!==-1 || n.indexOf("BANCO")!==-1 || n.indexOf("PRESTAMO")!==-1 || n.indexOf("GEORGE")!==-1 || n.indexOf("STG")!==-1 || n.indexOf("NACIONAL")!==-1 || n.indexOf("NALPMA")!==-1) return "Banco / Préstamo";
   if(n.indexOf("COOPERATIVA")!==-1 || n.indexOf("CASESO")!==-1 || n.indexOf("AHORRO")!==-1) return "Cooperativa / Ahorro";
@@ -1755,14 +1757,14 @@ function partirLineaRet(s){
 }
 // ¿El texto es PURO concepto (sin nombre de empleado)? → es un sub-total de concepto, no un empleado.
 function esSoloConceptoRet(texto){
-  var n = normTxt(texto).replace(/DESCUENTO|DESC\.?|NAVIDENO|BANCOS?|AHORRO|IMPORT|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|FUNERAL|CASA FUN|VIDA|NALPMA|\bDE\b|\bDEL\b|QUINCENA|PAGO|RETENCION/g,"");
+  var n = normTxt(texto).replace(/DESCUENTO|DESC\.?|NAVIDENO|BANCOS?|AHORRO|IMPORT|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|SHOPPING|MARKET|MARYAN|SAFI|MAYI|COOPERATIVA|ECASESO|CASESO|PRESTAMO|FUNERAL|CASA FUN|VIDA|NALPMA|\bDE\b|\bDEL\b|QUINCENA|PAGO|RETENCION/g,"");
   return n.replace(/[^A-Z]/g,"").length===0;
 }
 // Una línea es un SUB-TOTAL de concepto si EMPIEZA con una palabra de concepto, aunque después traiga un
 // nombre de empleado (ej. "REFRESQUERIA MABE : 2.00"). Se distingue de una línea de empleado, que empieza
 // con el NOMBRE (ej. "ARACELYS BANCO 94.13"). Así los créditos multi-concepto se parten aunque una de sus
 // líneas de concepto identifique al empleado.
-var CONCEPTO_LIDER_RET = /^(DESC|DESCUENTO|BANCOS?|AHORRO|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|CASA|FUNERAL|NALPMA|MAYI|SHOPPING)\b/;
+var CONCEPTO_LIDER_RET = /^(DESC|DESCUENTO|BANCOS?|AHORRO|\bSON\b|REFRESQUERIA|REFRESQ|REFRES|COOPERATIVA|ECASESO|CASESO|PRESTAMO|CASA|FUNERAL|NALPMA|MAYI|SHOPPING|MARYAN)\b/;
 function esConceptoLiderRet(texto){
   var n = normTxt(texto);
   return CONCEPTO_LIDER_RET.test(n) && destinoRet(n)!==null;
