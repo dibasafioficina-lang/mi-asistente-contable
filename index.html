@@ -2033,7 +2033,43 @@ function netearRetenciones(movs, saldoIniDet){
     if(finalReal<-0.01){ sobrepagos.push({acreedor:k, empleado:emps, monto:Math.round(-finalReal*100)/100, opening:op}); }
     else if(adel.length){ adelantos.push({acreedor:k, empleado:emps, opening:op, eventos:adel}); }
   });
-  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos };
+  // ---- Retenciones SALTADAS: una retención vieja quedó sin pagar mientras se pagaron períodos POSTERIORES ----
+  // El neteo por saldo corrido (FIFO) las esconde porque un adelanto anterior tapa el hueco. Se matchea por el
+  // PERÍODO que declara cada pago (mes + quincena, ej. "2DA DE MARZO"), y POR MONTO (un pago mensual de 126.54
+  // cubre dos quincenas). Los pagos sin período se aplican FIFO pero solo a retenciones YA existentes. Solo se
+  // evalúan las CUENTAS BANCARIAS INDIVIDUALES (cada retención tiene su pago dedicado); los destinos bulk
+  // (Son Import, Cooperativa, Refresquería) se pagan en lote y no se pueden atribuir por período/empleado.
+  function mesEnDesc(txt){ var n=normTxt(txt); for(var mk in MESES_RET){ if(n.indexOf(mk)!==-1) return MESES_RET[mk]; } return null; }
+  function quincenaEnDesc(txt){ var n=normTxt(txt); if(/\b(SEGUNDA|2DA|2 DA|2A)\b/.test(n)) return 2; if(/\b(PRIMERA|1RA|1 RA|1A)\b/.test(n)) return 1; return null; }
+  function periodoRet(m){ var iso=mesRetencion(m); var q=quincenaEnDesc(m.desc); if(!q){ var d=parseInt((m.fecha||"").slice(8,10),10); q=(d&&d<=15)?1:2; } return iso+"-Q"+q; }
+  function periodoPago(m){ if(mesEnDesc(m.desc)==null) return null; var iso=mesRetencion(m); var q=quincenaEnDesc(m.desc); return iso+"-Q"+(q||"M"); }
+  var retB={}, pagB={};
+  movs.forEach(function(m){
+    if(m.deb>0){ if(destinoRet(m.acr||m.desc)!==BANCO) return; var kp=bancoDe(m.acr);
+      (pagB[kp]=pagB[kp]||[]).push({fecha:m.fecha||"", monto:m.deb, ref:m.ref, per:periodoPago(m)}); return; }
+    if(m.cred<=0) return;
+    var hdr=destinoRet(m.desc); if(!hdr) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) hdr=destinoRet(s); });
+    m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto<=0) return; if(destinoRet(p.texto)&&esConceptoLiderRet(p.texto)) return;
+      var emp=empleadoRet(s); var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||hdr; if(dl!==BANCO) return;
+      var kr=subDeEmp(nc(emp))||"Banco / Préstamo (sin banco)";
+      (retB[kr]=retB[kr]||[]).push({fecha:m.fecha||"", monto:p.monto, ref:m.ref, per:periodoRet(m), emp:emp?nc(emp):""}); });
+  });
+  var saltadas=[];
+  Object.keys(retB).forEach(function(k){
+    var rets=retB[k].slice().sort(function(a,b){return (a.fecha||"")<(b.fecha||"")?-1:1;});
+    var pagos=(pagB[k]||[]).slice().sort(function(a,b){return (a.fecha||"")<(b.fecha||"")?-1:1;});
+    var pers={}, orden=[];
+    rets.forEach(function(r){ if(!pers[r.per]){ pers[r.per]={per:r.per,pend:0,fecha:r.fecha,lines:[]}; orden.push(r.per); } var P=pers[r.per]; P.pend+=r.monto; P.lines.push(r); if((r.fecha||"")<(P.fecha||"")) P.fecha=r.fecha; });
+    orden.sort();
+    function aplicar(monto, filtro){ for(var i=0;i<orden.length && monto>0.001;i++){ var P=pers[orden[i]]; if(P.pend<=0.001) continue; if(filtro && !filtro(P)) continue; var u=Math.min(monto,P.pend); P.pend-=u; monto-=u; } return monto; }
+    pagos.forEach(function(p){ if(!p.per) return; var q=p.per.slice(-1), mes=p.per.slice(0,7); p.rem=aplicar(p.monto, function(P){ return q==="M"? P.per.slice(0,7)===mes : P.per===p.per; }); });
+    pagos.forEach(function(p){ var mm=p.per?(p.rem||0):p.monto; if(mm<=0.001) return; aplicar(mm, function(P){ return (P.fecha||"")<=(p.fecha||""); }); });
+    var pagadosPers=orden.filter(function(per){ return pers[per].pend<=0.01; });
+    orden.filter(function(per){ return pers[per].pend>0.01; }).forEach(function(per){
+      if(pagadosPers.some(function(pp){ return pp>per; })){ var P=pers[per]; saltadas.push({acreedor:k, empleado:P.lines.map(function(l){return l.emp;}).filter(Boolean).join(", "), fecha:P.fecha, periodo:per, monto:Math.round(P.pend*100)/100, ref:P.lines[0]?P.lines[0].ref:""}); }
+    });
+  });
+  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos, saltadas:saltadas };
 }
 
 function renderModulo2(){
@@ -2152,13 +2188,21 @@ function bindSaldoIniDetalleMod2(){
     });
   });
 }
+// "2026-03-Q1" → "1ra quincena de mar 2026" (para mostrar el período de una retención saltada).
+function quincenaLabel(per){ if(!per) return ""; var p=per.split("-Q"); var q=p[1]==="2"?"2da":"1ra"; return q+" quincena de "+mesNombre(p[0]); }
 // Paneles de sobrepagos (alerta) y pagos adelantados (informativo). El neteo por acreedor abre "Banco /
 // Préstamo" por banco/empleado, así se ve cuándo un pago superó la retención (ej. Yennifer/St. Georges).
 function sobrepagosHtml(net){
   var sp=(net.sobrepagos||[]).slice().sort(function(a,b){return b.monto-a.monto;});
   var ad=(net.adelantos||[]).slice().sort(function(a,b){return b.eventos.length-a.eventos.length;});
-  if(!sp.length && !ad.length) return "";
+  var sk=(net.saltadas||[]).slice().sort(function(a,b){return (a.periodo||"")<(b.periodo||"")?-1:1;});
+  if(!sp.length && !ad.length && !sk.length) return "";
   var h="";
+  if(sk.length){
+    h+='<div class="sp-panel sp-alert"><div class="sp-title">✗ Retenciones saltadas — quedaron sin pagar mientras se pagaron quincenas POSTERIORES de la misma cuenta</div><table class="sp-tabla"><tbody>';
+    sk.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td>'+quincenaLabel(s.periodo)+'</td><td>'+(s.ref||'')+'</td><td class="sp-monto">B/ '+s.monto.toFixed(2)+'</td></tr>'; });
+    h+='</tbody></table></div>';
+  }
   if(sp.length){
     h+='<div class="sp-panel sp-alert"><div class="sp-title">⚠ Sobrepagos detectados — se pagó MÁS de lo retenido (contando el saldo inicial del Paso 0)</div><table class="sp-tabla"><tbody>';
     sp.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td class="sp-monto">B/ '+s.monto.toFixed(2)+' de más</td></tr>'; });
@@ -2263,13 +2307,14 @@ function exportarRetenciones(){
   rows.push(["TOTAL PENDIENTE","","","","",(net.totalDesc-net.totalPago+totalSaldoIni+deudaVieja).toFixed(2)]);
   var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:22},{wch:26},{wch:12},{wch:12},{wch:12},{wch:12}];
   var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Retenciones pendientes");
-  // Hoja 2: sobrepagos y pagos adelantados (diagnóstico por acreedor)
-  if((net.sobrepagos&&net.sobrepagos.length)||(net.adelantos&&net.adelantos.length)){
-    var sr=[["Tipo","Acreedor","Empleado","Fecha","Pago","Exceso / de más"]];
+  // Hoja 2: saltadas, sobrepagos y pagos adelantados (diagnóstico por acreedor)
+  if((net.saltadas&&net.saltadas.length)||(net.sobrepagos&&net.sobrepagos.length)||(net.adelantos&&net.adelantos.length)){
+    var sr=[["Tipo","Acreedor","Empleado","Fecha / Período","Pago","Monto"]];
+    (net.saltadas||[]).forEach(function(s){ sr.push(["RETENCION SALTADA",s.acreedor,s.empleado||"",quincenaLabel(s.periodo)+(s.ref?" ("+s.ref+")":""),"",s.monto.toFixed(2)]); });
     (net.sobrepagos||[]).forEach(function(s){ sr.push(["SOBREPAGO NETO",s.acreedor,s.empleado||"","","",s.monto.toFixed(2)]); });
     (net.adelantos||[]).forEach(function(a){ a.eventos.forEach(function(e){ sr.push(["Pago adelantado",a.acreedor,a.empleado||"",e.fecha||"",e.montoPago.toFixed(2),e.exceso.toFixed(2)]); }); });
-    var ws2=XLSX.utils.aoa_to_sheet(sr); ws2['!cols']=[{wch:16},{wch:24},{wch:22},{wch:12},{wch:12},{wch:14}];
-    XLSX.utils.book_append_sheet(wb,ws2,"Sobrepagos y adelantos");
+    var ws2=XLSX.utils.aoa_to_sheet(sr); ws2['!cols']=[{wch:18},{wch:24},{wch:22},{wch:30},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb,ws2,"Hallazgos de pago");
   }
   XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
 }
