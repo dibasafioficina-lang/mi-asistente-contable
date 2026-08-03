@@ -2062,7 +2062,13 @@ function netearRetenciones(movs, saldoIniDet){
     rets.forEach(function(r){ if(!pers[r.per]){ pers[r.per]={per:r.per,pend:0,fecha:r.fecha,lines:[]}; orden.push(r.per); } var P=pers[r.per]; P.pend+=r.monto; P.lines.push(r); if((r.fecha||"")<(P.fecha||"")) P.fecha=r.fecha; });
     orden.sort();
     function aplicar(monto, filtro){ for(var i=0;i<orden.length && monto>0.001;i++){ var P=pers[orden[i]]; if(P.pend<=0.001) continue; if(filtro && !filtro(P)) continue; var u=Math.min(monto,P.pend); P.pend-=u; monto-=u; } return monto; }
-    pagos.forEach(function(p){ if(!p.per) return; var q=p.per.slice(-1), mes=p.per.slice(0,7); p.rem=aplicar(p.monto, function(P){ return q==="M"? P.per.slice(0,7)===mes : P.per===p.per; }); });
+    pagos.forEach(function(p){ if(!p.per) return; var q=p.per.slice(-1), mes=p.per.slice(0,7);
+      // Regla de Diba: si el período declarado AÚN NO EXISTE a la fecha del pago (ninguna retención de ese
+      // período registrada hasta esa fecha), la etiqueta está mal puesta (ej. "SEGUNDA DE JULIO" pagada el
+      // 03-jul cuando la retención de jul-Q2 se registró el 27-jul) → se ignora y el pago se aplica FIFO.
+      var existe=orden.some(function(per){ return (q==="M"? per.slice(0,7)===mes : per===p.per) && (pers[per].fecha||"")<=(p.fecha||""); });
+      if(!existe){ p.per=null; return; }
+      p.rem=aplicar(p.monto, function(P){ return q==="M"? P.per.slice(0,7)===mes : P.per===p.per; }); });
     pagos.forEach(function(p){ var mm=p.per?(p.rem||0):p.monto; if(mm<=0.001) return; aplicar(mm, function(P){ return (P.fecha||"")<=(p.fecha||""); }); });
     var pagadosPers=orden.filter(function(per){ return pers[per].pend<=0.01; });
     orden.filter(function(per){ return pers[per].pend>0.01; }).forEach(function(per){
@@ -2278,6 +2284,11 @@ function renderResultadosMod2(){
         '<td>'+(f.pago!=null?"B/ "+f.pago.toFixed(2):"—")+'</td>' +
         '<td class="'+(f.pend>0.01?'pend-pos':(f.pend<-0.01?'pend-neg':''))+'">B/ '+f.pend.toFixed(2)+'</td></tr>';
     });
+    // Destinos que se pagan EN LOTE (un pago cubre a varios empleados): si hay confusión (pagos sin
+    // descuento), el sistema no puede atribuirlo por quincena/empleado — se pide el desglose al contador.
+    if(d!=="Banco / Préstamo" && det.pagosSinDesc.length){
+      html+='<tr class="ret-aging"><td colspan="5">✉ Este acreedor se paga en lote y hay pagos que no calzan con las retenciones — <b>pedí al contador el desglose del lote pagado</b> para atribuirlos.</td></tr>';
+    }
   });
   html+='</tbody></table>';
   if(deudaVieja>0.01){
