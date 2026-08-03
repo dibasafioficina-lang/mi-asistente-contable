@@ -298,7 +298,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIniDetalle:[] },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[] },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -1957,17 +1957,23 @@ function renderModulo2(){
     '</div>' +
     '<div class="run-bar"><button class="btn-run" id="runBtn2"'+(STATE.files.retenciones?'':' disabled')+'>Analizar</button>' +
     '<span class="run-note" id="runNote2">'+(STATE.files.retenciones?"Listo para analizar.":"Sube el archivo para habilitar.")+'</span></div>' +
-    '</div><div id="resultsArea2"></div>';
+    '</div>' + saldoIniDetalleMod2Html() + '<div id="resultsArea2"></div>';
   document.getElementById("backBtn2").onclick=function(){ STATE.view="menu"; render(); };
   document.getElementById("printBtn2").onclick=function(){ window.print(); };
-  app.querySelectorAll('input[type=file]').forEach(function(inp){ inp.addEventListener("change",function(e){ if(e.target.files[0]){ STATE.files.retenciones=e.target.files[0]; renderModulo2(); } }); });
+  app.querySelectorAll('.dropzones input[type=file]').forEach(function(inp){ inp.addEventListener("change",function(e){ if(e.target.files[0]) subirRetenciones(e.target.files[0]); }); });
   app.querySelectorAll('.dz').forEach(function(dz){
     dz.addEventListener("dragover",function(e){ e.preventDefault(); dz.classList.add("dragover"); });
     dz.addEventListener("dragleave",function(){ dz.classList.remove("dragover"); });
-    dz.addEventListener("drop",function(e){ e.preventDefault(); dz.classList.remove("dragover"); if(e.dataTransfer.files[0]){ STATE.files.retenciones=e.dataTransfer.files[0]; renderModulo2(); } });
+    dz.addEventListener("drop",function(e){ e.preventDefault(); dz.classList.remove("dragover"); if(e.dataTransfer.files[0]) subirRetenciones(e.dataTransfer.files[0]); });
   });
   var rb=document.getElementById("runBtn2"); if(rb) rb.onclick=ejecutarModulo2;
+  bindSaldoIniDetalleMod2(); // Paso 0: detalle del saldo inicial (aparece al subir el archivo)
   if(STATE.mod2.result) renderResultadosMod2();
+}
+// Sube el navegador de retenciones: guarda el archivo, lee el saldo inicial (para el Paso 0) y re-renderiza.
+function subirRetenciones(file){
+  STATE.files.retenciones=file; STATE.mod2.saldoIni=null; renderModulo2();
+  readWorkbook(file, function(rows){ try{ STATE.mod2.saldoIni=parseRetenciones(rows).saldoInicial; }catch(e){} renderModulo2(); });
 }
 function ejecutarModulo2(){
   var note=document.getElementById("runNote2"); if(note) note.textContent="Leyendo archivo...";
@@ -1984,12 +1990,16 @@ function mesNombre(k){ if(!k||k==="?") return "sin fecha"; var m=["","ene","feb"
 // Mes siguiente a "YYYY-MM" (la retención de un mes se paga el mes siguiente).
 function mesSiguiente(k){ if(!k||k==="?") return k; var p=k.split("-"); var y=parseInt(p[0],10), m=parseInt(p[1],10)+1; if(m>12){m=1;y++;} return y+"-"+String(m).padStart(2,"0"); }
 /* -------- Paso 0 de Retenciones: detalle del saldo inicial / deuda anterior (manual o Excel) -------- */
+// Saldo inicial de la cuenta: del resultado analizado o del que se leyó al subir el archivo.
+function mod2SaldoInicial(){
+  if(STATE.mod2.result && STATE.mod2.result.parsed && STATE.mod2.result.parsed.saldoInicial!=null) return STATE.mod2.result.parsed.saldoInicial;
+  return STATE.mod2.saldoIni!=null ? STATE.mod2.saldoIni : null;
+}
 function sumaSaldoIniDetalleMod2(){
   return Math.round((STATE.mod2.saldoIniDetalle||[]).reduce(function(a,r){ var v=parseFloat(r.monto); return a+(isNaN(v)?0:v); },0)*100)/100;
 }
 function saldoIniDetalleMod2Html(){
-  var R=STATE.mod2.result; if(!R||R.parsed.saldoInicial==null) return "";
-  var saldoIni=R.parsed.saldoInicial;
+  var saldoIni=mod2SaldoInicial(); if(saldoIni==null) return "";
   var objetivo=Math.round(Math.abs(saldoIni)*100)/100;
   if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
   var det=STATE.mod2.saldoIniDetalle;
@@ -2021,8 +2031,8 @@ function saldoIniDetalleMod2Html(){
   '</div>';
 }
 function actualizarTotalSaldoIniMod2(){
-  var R=STATE.mod2.result; if(!R||R.parsed.saldoInicial==null) return;
-  var objetivo=Math.round(Math.abs(R.parsed.saldoInicial)*100)/100;
+  var saldoIni=mod2SaldoInicial(); if(saldoIni==null) return;
+  var objetivo=Math.round(Math.abs(saldoIni)*100)/100;
   var total=sumaSaldoIniDetalleMod2();
   var dif=Math.round((total-objetivo)*100)/100; var ok=Math.abs(dif)<0.01;
   var t=document.getElementById("sidet2Total"); if(t)t.textContent="B/ "+total.toFixed(2);
@@ -2032,9 +2042,9 @@ function actualizarTotalSaldoIniMod2(){
 function bindSaldoIniDetalleMod2(){
   if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
   var add=document.getElementById("sidet2Add"); if(!add) return;
-  add.onclick=function(){ STATE.mod2.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderResultadosMod2(); };
-  var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; renderResultadosMod2(); };
-  document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderResultadosMod2(); }; });
+  add.onclick=function(){ STATE.mod2.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderModulo2(); };
+  var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; renderModulo2(); };
+  document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderModulo2(); }; });
   document.querySelectorAll("input.sidet2").forEach(function(inp){ inp.addEventListener("input",function(){
     var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
     if(STATE.mod2.saldoIniDetalle[i]) STATE.mod2.saldoIniDetalle[i][f]=inp.value;
@@ -2044,7 +2054,7 @@ function bindSaldoIniDetalleMod2(){
     if(!e.target.files[0]) return;
     readWorkbook(e.target.files[0], function(rows){
       try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
-      renderResultadosMod2();
+      renderModulo2();
     });
   });
 }
@@ -2067,8 +2077,6 @@ function renderResultadosMod2(){
     '<span class="chip">Pendiente del período: B/ '+pendPeriodo.toFixed(2)+'</span>' +
     (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
     '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
-  // Paso 0: detalle del saldo inicial (deuda anterior), visible cuando hay saldo inicial distinto de 0.
-  if(saldoIni!=null && Math.abs(saldoIni)>0.01){ html += saldoIniDetalleMod2Html(); }
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Empleado / acreedor</th><th>Fecha</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
   // Orden: de más ANTIGUO a más reciente (por el mes más viejo con pendiente); los sin pendiente al final.
@@ -2108,7 +2116,6 @@ function renderResultadosMod2(){
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
-  bindSaldoIniDetalleMod2(); // Paso 0: detalle editable del saldo inicial (manual o Excel)
 }
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
