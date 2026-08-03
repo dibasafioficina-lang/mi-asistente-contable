@@ -1741,13 +1741,17 @@ function destinoRet(txt){
 // Separa "TEXTO monto" → {texto, monto} (monto 0 si la línea no termina en número).
 function partirMontoRet(s){
   var m = String(s).match(/^(.*?)\s*(-?[\d]+[.,]\d{2})\s*$/);
-  return m ? {texto:m[1].trim(), monto:money(m[2])} : {texto:String(s).trim(), monto:0};
+  // El guion en el detalle es solo cómo se digitó, NO un signo negativo: el signo real lo da la columna
+  // Débito/Crédito del movimiento. Las sub-líneas son siempre magnitudes → valor absoluto.
+  return m ? {texto:m[1].trim(), monto:Math.abs(money(m[2]))} : {texto:String(s).trim(), monto:0};
 }
 // Como partirMontoRet pero el monto puede estar en el MEDIO: "AMABELIS 7.00 CASA FUN VIDA" →
 // {texto:"AMABELIS", monto:7.00, hint:"CASA FUN VIDA"} (el hint es el acreedor específico de la línea).
 function partirLineaRet(s){
   var m = String(s).match(/^(.*?)\s+(-?[\d]+[.,]\d{2})\b(.*)$/);
-  return m ? {texto:m[1].trim(), monto:money(m[2]), hint:m[3].trim()} : {texto:String(s).trim(), monto:0, hint:""};
+  // El guion es solo cómo se digitó, no un negativo (ej. "Aracellys -85.67" = 85.67); el signo real lo
+  // da la columna Débito/Crédito del movimiento. Se toma el valor absoluto.
+  return m ? {texto:m[1].trim(), monto:Math.abs(money(m[2])), hint:m[3].trim()} : {texto:String(s).trim(), monto:0, hint:""};
 }
 // ¿El texto es PURO concepto (sin nombre de empleado)? → es un sub-total de concepto, no un empleado.
 function esSoloConceptoRet(texto){
