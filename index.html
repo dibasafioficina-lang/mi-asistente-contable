@@ -268,6 +268,25 @@
   .adel-acr{margin:10px 0 2px;color:#573B46}
   .adel-eventos td{font-size:12px;color:var(--slate)}
   .adel-eventos .sp-exc{text-align:right;color:#B5731E;font-weight:700;white-space:nowrap}
+  .lm-panel{margin:16px 0;padding:14px 18px;border-radius:14px;background:#fff;border:1px solid #EEE1E7;box-shadow:0 2px 10px rgba(158,104,126,.06)}
+  .lm-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+  .lm-title{font-weight:800;color:var(--heading);font-size:15px}
+  .lm-search{display:flex;gap:8px;flex:1;min-width:280px;justify-content:flex-end}
+  .lm-search input{flex:1;max-width:340px;padding:8px 12px;border:1px solid #E3D4DB;border-radius:999px;font:inherit;font-size:13px}
+  .lm-search input:focus{outline:none;border-color:var(--brand)}
+  .lm-nota{font-size:12px;color:var(--slate);margin-top:10px;line-height:1.5}
+  .lm-vacio{color:#B54B4B;font-weight:600}
+  .lm-sujetos{margin-top:10px;font-size:12px;color:var(--slate)}
+  .lm-scroll{overflow-x:auto;margin-top:8px}
+  .lm-tabla{min-width:640px}
+  .lm-tabla td{padding:5px 10px;font-size:12.5px}
+  .lm-tabla tr.lm-pago td{background:#FAFBFC}
+  .lm-ref{font-size:11px;color:var(--slate)}
+  .lm-monto,.lm-saldo{text-align:right;font-weight:700;white-space:nowrap}
+  .lm-saldo{color:var(--heading)}
+  .lm-tot{margin-top:12px;padding:10px 14px;border-radius:10px;background:#FBF7F9}
+  .lm-tot-row{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+  .lm-tot-final{border-top:1px solid #E9DDE3;margin-top:6px;padding-top:8px;font-weight:800;font-size:14px}
   .ret-nota{font-size:12px;color:var(--slate);margin-top:12px;line-height:1.5}
   .cuadrado-badge::before{content:"✓ "}
   .stage-run-note.locked{color:#9A6E1E;font-weight:700}
@@ -311,7 +330,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[] },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"" },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -330,7 +349,12 @@ function normTxt(s){
 function money(v){
   if(v===null||v===undefined||v==="") return 0;
   if(typeof v==="number") return v;
-  var s = String(v).replace(/B\/\.?/gi,"").replace(/\$/g,"").replace(/,/g,"").trim();
+  var s = String(v).replace(/B\/\.?/gi,"").replace(/\$/g,"").trim();
+  // Coma DECIMAL (se digita así a veces: "20,00"): una sola coma seguida de 1-2 dígitos al final y sin punto
+  // decimal → se convierte en punto. Si hay punto, o el grupo tras la coma es de 3 dígitos, la coma es
+  // separador de miles ("1,234.56", "1,234") y se elimina.
+  if(/^[^.]*,\d{1,2}$/.test(s)) s = s.replace(",", ".");
+  s = s.replace(/,/g,"");
   var neg = false;
   if(s.indexOf("(")===0){ neg=true; s=s.replace(/[()]/g,""); }
   if(s.indexOf("-")===0){ neg=true; s=s.replace("-",""); }
@@ -1924,11 +1948,11 @@ function netearRetenciones(movs, saldoIniDet){
         var eqp=nc(normTxt(m.acr||m.desc.split(" - ")[0]));
         dp = empRetDest[eqp+"|"+m.deb.toFixed(2)] || empRetDestAny[eqp] || "Otros";
       }
-      ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; pag[dp].push({fecha:m.fecha, monto:m.deb, acr:m.acr||m.desc, desc:m.desc||m.acr}); return;
+      ensure(dp); porDestino[dp].pago+=m.deb; totalPago+=m.deb; pag[dp].push({fecha:m.fecha, monto:m.deb, acr:m.acr||m.desc, desc:m.desc||m.acr, ref:m.ref||""}); return;
     }
     if(m.cred<=0) return;
     var cls=clasificarCreditoRet(m, mapa); var mesC=mesRetencion(m);
-    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; ded["Otros"].push({fecha:m.fecha,mes:mesC,emp:"(sin clasificar)",monto:m.cred}); sinClasificar.push(m); return; }
+    if(!cls){ ensure("Otros"); porDestino["Otros"].desc+=m.cred; totalDesc+=m.cred; ded["Otros"].push({fecha:m.fecha,mes:mesC,emp:"(sin clasificar)",monto:m.cred,ref:m.ref||""}); sinClasificar.push(m); return; }
     cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; });
     // Detalle por empleado, reconciliado contra 'cls' por destino (el detalle debe sumar EXACTO lo clasificado).
     var clsByD={}; cls.forEach(function(x){ clsByD[x.d]=(clsByD[x.d]||0)+x.v; });
@@ -1946,9 +1970,9 @@ function netearRetenciones(movs, saldoIniDet){
     Object.keys(clsByD).forEach(function(d){
       var piezas=empByD[d]||[]; var sum=piezas.reduce(function(s,p){return s+p.monto;},0);
       if(piezas.length && Math.abs(sum-clsByD[d])<=0.02){
-        piezas.forEach(function(p){ ded[d].push({fecha:m.fecha, mes:mesC, emp:p.emp, monto:p.monto}); });
+        piezas.forEach(function(p){ ded[d].push({fecha:m.fecha, mes:mesC, emp:p.emp, monto:p.monto, ref:m.ref||""}); });
       } else {
-        ded[d].push({fecha:m.fecha, mes:mesC, emp:empAP, monto:clsByD[d]});
+        ded[d].push({fecha:m.fecha, mes:mesC, emp:empAP, monto:clsByD[d], ref:m.ref||""});
       }
     });
   });
@@ -2075,7 +2099,10 @@ function netearRetenciones(movs, saldoIniDet){
       if(pagadosPers.some(function(pp){ return pp>per; })){ var P=pers[per]; saltadas.push({acreedor:k, empleado:P.lines.map(function(l){return l.emp;}).filter(Boolean).join(", "), fecha:P.fecha, periodo:per, monto:Math.round(P.pend*100)/100, ref:P.lines[0]?P.lines[0].ref:""}); }
     });
   });
-  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos, saltadas:saltadas };
+  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos, saltadas:saltadas,
+    // Movimientos ya clasificados por destino — el libro mayor los reusa para que sus cifras coincidan
+    // exactamente con el resumen (ded incluye los fallbacks del clasificador; empBanco mapea banco↔empleado).
+    ded:ded, pag:pag, empBanco:empBanco };
 }
 
 function renderModulo2(){
@@ -2196,6 +2223,65 @@ function bindSaldoIniDetalleMod2(){
 }
 // "2026-03-Q1" → "1ra quincena de mar 2026" (para mostrar el período de una retención saltada).
 function quincenaLabel(per){ if(!per) return ""; var p=per.split("-Q"); var q=p[1]==="2"?"2da":"1ra"; return q+" quincena de "+mesNombre(p[0]); }
+
+/* -------- Libro mayor por persona / acreedor -------- */
+// Arma el libro cronológico de un empleado o acreedor: retención en POSITIVO (aumenta la deuda), pago en
+// NEGATIVO (la cancela), con saldo corrido. Reusa la misma clasificación del neteo para que las cifras
+// coincidan con el resto del módulo. El filtro `q` matchea el empleado de la sub-línea (retenciones) o el
+// acreedor/descripción (pagos); así "itza" trae sus retenciones y los pagos del banco que la nombran.
+function libroMayorRet(net, q){
+  var nq=normTxt(q); if(!nq) return null;
+  function coincide(txt){ return normTxt(txt).indexOf(nq)!==-1; }
+  var BANCO="Banco / Préstamo";
+  // ¿Lo buscado es un empleado que aparece en las retenciones? Se ignoran las líneas del saldo inicial: su
+  // "empleado" es el concepto del Paso 0 (ej. "Son Import"), que haría pasar un acreedor por empleado.
+  var buscaEmpleado=false;
+  Object.keys(net.ded).forEach(function(d){ net.ded[d].forEach(function(x){ if(!x.saldoIni && x.emp && coincide(x.emp)) buscaEmpleado=true; }); });
+  // Si es un ACREEDOR: a qué destino pertenece y —para un banco puntual— qué empleados paga. Se filtra por ese
+  // destino para que el libro de un banco no arrastre la cooperativa ni Son Import del mismo empleado.
+  var destAcr=null, empsDelAcr={};
+  Object.keys(net.pag).forEach(function(d){ net.pag[d].forEach(function(x){
+    if(!coincide((x.acr||"")+" "+(x.desc||""))) return;
+    destAcr=destAcr||d;
+    Object.keys(net.empBanco||{}).forEach(function(e){ if(coincide(net.empBanco[e])) empsDelAcr[e]=1; }); }); });
+  // Un acreedor de pago EN LOTE (Son Import, Cooperativa, Refresquería) no nombra empleados en sus pagos:
+  // ahí el libro son todas las retenciones de SU destino.
+  var acrEnLote = !buscaEmpleado && destAcr && destAcr!==BANCO;
+  var filas=[], suj={};
+  Object.keys(net.ded).forEach(function(d){ net.ded[d].forEach(function(x){
+    if(x.saldoIni) return; // el saldo inicial ya se detalla en el Paso 0
+    var ok = !!(x.emp && coincide(x.emp));
+    if(!ok && !buscaEmpleado && destAcr) ok = acrEnLote ? (d===destAcr) : (d===destAcr && !!empsDelAcr[x.emp]);
+    if(!ok) return;
+    filas.push({fecha:x.fecha||"", tipo:"Retención", concepto:x.emp||"(sin detalle)", destino:d, ref:x.ref||"", mes:x.mes, monto:x.monto});
+    if(x.emp) suj[x.emp]=1; }); });
+  Object.keys(net.pag).forEach(function(d){ net.pag[d].forEach(function(x){
+    // En un acreedor de pago en lote se toman TODOS los pagos de su destino: la razón social cambia entre
+    // pagos (Refresquería / Shopping Market / Maryan Safi) y un match textual dejaría pagos afuera.
+    var ok = coincide((x.acr||"")+" "+(x.desc||"")) || (acrEnLote && d===destAcr);
+    if(!ok) return;
+    filas.push({fecha:x.fecha||"", tipo:"Pago", concepto:x.acr||x.desc||"", destino:d, ref:x.ref||"", monto:-x.monto});
+    if(x.acr) suj[normTxt(x.acr)]=1; }); });
+  if(!filas.length) return null;
+  filas.sort(function(a,b){ if((a.fecha||"")!==(b.fecha||"")) return (a.fecha||"")<(b.fecha||"")?-1:1; return b.monto-a.monto; }); // retención antes que pago el mismo día
+  var saldo=0, totRet=0, totPago=0;
+  filas.forEach(function(f){ saldo=Math.round((saldo+f.monto)*100)/100; f.saldo=saldo; if(f.monto>0) totRet+=f.monto; else totPago+=-f.monto; });
+  return { filas:filas, totalRet:Math.round(totRet*100)/100, totalPago:Math.round(totPago*100)/100, saldo:saldo, sujetos:Object.keys(suj) };
+}
+// Nombres de empleados y acreedores presentes, para las sugerencias del buscador. Los nombres de empleado se
+// canonicalizan (el archivo trae variantes con typos: "ARACELLY"/"ARACELYS"/"AEACELLY GAITAN").
+function sujetosRet(movs){
+  var nombres=[], acr={};
+  movs.forEach(function(m){
+    if(m.deb>0){ var a=String(m.acr||"").trim(); if(a) acr[a]=1; return; }
+    if(m.cred<=0) return;
+    m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto<=0) return; if(destinoRet(p.texto)&&esConceptoLiderRet(p.texto)) return;
+      var e=empleadoRet(s); if(e) nombres.push(e); });
+  });
+  var canon=canonicalizarNombresRet(nombres), emp={};
+  nombres.forEach(function(n){ emp[canon[normTxt(n)]||normTxt(n)]=1; });
+  return { empleados:Object.keys(emp).sort(), acreedores:Object.keys(acr).sort() };
+}
 // Paneles de sobrepagos (alerta) y pagos adelantados (informativo). El neteo por acreedor abre "Banco /
 // Préstamo" por banco/empleado, así se ve cuándo un pago superó la retención (ej. Yennifer/St. Georges).
 function sobrepagosHtml(net){
@@ -2226,6 +2312,44 @@ function sobrepagosHtml(net){
   }
   return h;
 }
+// Panel del libro mayor: buscador + tabla cronológica del sujeto consultado.
+function libroMayorHtml(movs, net){
+  var q=STATE.mod2.libroQ||"";
+  var sj=sujetosRet(movs);
+  var opts=sj.empleados.concat(sj.acreedores).map(function(n){ return '<option value="'+String(n).replace(/"/g,"&quot;")+'">'; }).join("");
+  var h='<div class="lm-panel">' +
+    '<div class="lm-head"><div class="lm-title">📖 Libro mayor por persona / acreedor</div>' +
+    '<div class="lm-search"><input id="lmInput" type="text" list="lmSug" placeholder="Escribí un nombre (ej. Itza, St. Georges, Son Import)" value="'+String(q).replace(/"/g,"&quot;")+'">' +
+    '<datalist id="lmSug">'+opts+'</datalist>' +
+    '<button id="lmBtn" class="btn-export">Buscar</button>' +
+    (q?'<button id="lmClear" class="btn-export">Limpiar</button>':'') + '</div></div>';
+  if(!q) return h+'<p class="lm-nota">Buscá un empleado o acreedor para ver su libro completo: cada retención en positivo (suma a la deuda), cada pago en negativo (la cancela) y el saldo corrido.</p></div>';
+  var L=libroMayorRet(net,q);
+  if(!L) return h+'<p class="lm-nota lm-vacio">Sin movimientos para «'+q+'». Probá con otro nombre.</p></div>';
+  h+='<div class="lm-sujetos">Coincidencias: '+L.sujetos.join(' · ')+'</div>';
+  h+='<div class="lm-scroll"><table class="ret-tabla lm-tabla"><thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Destino</th><th>Comprobante</th><th>Monto</th><th>Saldo</th></tr></thead><tbody>';
+  L.filas.forEach(function(f){
+    h+='<tr class="'+(f.monto>0?'lm-ret':'lm-pago')+'"><td>'+(f.fecha||"")+'</td><td>'+f.tipo+'</td>' +
+      '<td>'+String(f.concepto||"").slice(0,38)+'</td><td>'+f.destino+'</td><td class="lm-ref">'+(f.ref||"")+'</td>' +
+      '<td class="lm-monto '+(f.monto>0?'pend-pos':'pend-neg')+'">'+(f.monto>0?"+":"")+f.monto.toFixed(2)+'</td>' +
+      '<td class="lm-saldo">'+f.saldo.toFixed(2)+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  h+='<div class="lm-tot"><div class="lm-tot-row"><span>Total retenido</span><b class="pend-pos">+'+L.totalRet.toFixed(2)+'</b></div>' +
+    '<div class="lm-tot-row"><span>Total pagado</span><b class="pend-neg">-'+L.totalPago.toFixed(2)+'</b></div>' +
+    '<div class="lm-tot-row lm-tot-final"><span>Saldo '+(L.saldo>0.01?'pendiente por pagar':(L.saldo<-0.01?'a favor (pagado de más)':'— cuadra en cero'))+'</span>' +
+    '<b class="'+(L.saldo>0.01?'pend-pos':(L.saldo<-0.01?'pend-neg':''))+'">B/ '+L.saldo.toFixed(2)+'</b></div></div>';
+  return h+'</div>';
+}
+function bindLibroMayor(movs){
+  var inp=document.getElementById("lmInput"), btn=document.getElementById("lmBtn"), clr=document.getElementById("lmClear");
+  if(!inp) return;
+  function buscar(){ STATE.mod2.libroQ=inp.value.trim(); renderResultadosMod2(); }
+  if(btn) btn.onclick=buscar;
+  inp.addEventListener("keydown",function(e){ if(e.key==="Enter") buscar(); });
+  inp.addEventListener("change",buscar); // elegir una sugerencia del datalist
+  if(clr) clr.onclick=function(){ STATE.mod2.libroQ=""; renderResultadosMod2(); };
+}
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
   var R=STATE.mod2.result;
@@ -2253,6 +2377,7 @@ function renderResultadosMod2(){
     (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior sin desglosar: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
     '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
   html+=sobrepagosHtml(net);
+  html+=libroMayorHtml(R.parsed.movs, net);
   html+='<div class="step-block"><div class="step-body">';
   html+='<table class="ret-tabla"><thead><tr><th>Empleado / acreedor</th><th>Fecha</th><th>Descontado</th><th>Pagado</th><th>Pendiente</th></tr></thead><tbody>';
   // Orden: de más ANTIGUO a más reciente (por el mes más viejo con pendiente); los sin pendiente al final.
@@ -2298,6 +2423,7 @@ function renderResultadosMod2(){
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
+  bindLibroMayor(R.parsed.movs);
 }
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
