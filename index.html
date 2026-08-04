@@ -276,6 +276,11 @@
   .lm-search input:focus{outline:none;border-color:var(--brand)}
   .lm-nota{font-size:12px;color:var(--slate);margin-top:10px;line-height:1.5}
   .lm-vacio{color:#B54B4B;font-weight:600}
+  .lm-filtros{margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--slate)}
+  .lm-filtros label{font-weight:700;color:var(--heading)}
+  .lm-filtros select{padding:6px 10px;border:1px solid #E3D4DB;border-radius:999px;font:inherit;font-size:12.5px;background:#fff;color:var(--heading)}
+  .lm-filtros select:focus{outline:none;border-color:var(--brand)}
+  .lm-chip-dest{font-size:11px;font-weight:700;color:var(--brand);background:#FBF0F4;padding:2px 8px;border-radius:999px}
   .lm-sujetos{margin-top:10px;font-size:12px;color:var(--slate)}
   .lm-scroll{overflow-x:auto;margin-top:8px}
   .lm-tabla{min-width:640px}
@@ -330,7 +335,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"" },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"" },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -2229,7 +2234,7 @@ function quincenaLabel(per){ if(!per) return ""; var p=per.split("-Q"); var q=p[
 // NEGATIVO (la cancela), con saldo corrido. Reusa la misma clasificación del neteo para que las cifras
 // coincidan con el resto del módulo. El filtro `q` matchea el empleado de la sub-línea (retenciones) o el
 // acreedor/descripción (pagos); así "itza" trae sus retenciones y los pagos del banco que la nombran.
-function libroMayorRet(net, q){
+function libroMayorRet(net, q, dest){
   var nq=normTxt(q); if(!nq) return null;
   function coincide(txt){ return normTxt(txt).indexOf(nq)!==-1; }
   var BANCO="Banco / Préstamo";
@@ -2263,10 +2268,17 @@ function libroMayorRet(net, q){
     filas.push({fecha:x.fecha||"", tipo:"Pago", concepto:x.acr||x.desc||"", destino:d, ref:x.ref||"", monto:-x.monto});
     if(x.acr) suj[normTxt(x.acr)]=1; }); });
   if(!filas.length) return null;
+  // Destinos presentes ANTES de filtrar (para poblar el selector); luego se aplica el filtro y el saldo
+  // corrido se recalcula solo sobre las filas visibles, así el libro de un destino cuadra por sí mismo.
+  var dests={}; filas.forEach(function(f){ dests[f.destino]=1; });
+  var destinos=Object.keys(dests).sort();
+  if(dest && dests[dest]) filas=filas.filter(function(f){ return f.destino===dest; });
+  else dest=null;
+  if(!filas.length) return null;
   filas.sort(function(a,b){ if((a.fecha||"")!==(b.fecha||"")) return (a.fecha||"")<(b.fecha||"")?-1:1; return b.monto-a.monto; }); // retención antes que pago el mismo día
   var saldo=0, totRet=0, totPago=0;
   filas.forEach(function(f){ saldo=Math.round((saldo+f.monto)*100)/100; f.saldo=saldo; if(f.monto>0) totRet+=f.monto; else totPago+=-f.monto; });
-  return { filas:filas, totalRet:Math.round(totRet*100)/100, totalPago:Math.round(totPago*100)/100, saldo:saldo, sujetos:Object.keys(suj) };
+  return { filas:filas, totalRet:Math.round(totRet*100)/100, totalPago:Math.round(totPago*100)/100, saldo:saldo, sujetos:Object.keys(suj), destinos:destinos, destino:dest };
 }
 // Nombres de empleados y acreedores presentes, para las sugerencias del buscador. Los nombres de empleado se
 // canonicalizan (el archivo trae variantes con typos: "ARACELLY"/"ARACELYS"/"AEACELLY GAITAN").
@@ -2323,9 +2335,17 @@ function libroMayorHtml(movs, net){
     '<datalist id="lmSug">'+opts+'</datalist>' +
     '<button id="lmBtn" class="btn-export">Buscar</button>' +
     (q?'<button id="lmClear" class="btn-export">Limpiar</button>':'') + '</div></div>';
-  if(!q) return h+'<p class="lm-nota">Buscá un empleado o acreedor para ver su libro completo: cada retención en positivo (suma a la deuda), cada pago en negativo (la cancela) y el saldo corrido.</p></div>';
-  var L=libroMayorRet(net,q);
+  if(!q) return h+'<p class="lm-nota">Buscá un empleado o acreedor para ver su libro completo: cada retención en positivo (suma a la deuda), cada pago en negativo (la cancela) y el saldo corrido. Después podés filtrar por destino.</p></div>';
+  var dq=STATE.mod2.libroDest||"";
+  var L=libroMayorRet(net,q,dq);
   if(!L) return h+'<p class="lm-nota lm-vacio">Sin movimientos para «'+q+'». Probá con otro nombre.</p></div>';
+  // Filtro por destino: solo los destinos que tiene este sujeto.
+  if(L.destinos.length>1){
+    h+='<div class="lm-filtros"><label for="lmDest">Destino:</label><select id="lmDest">' +
+      '<option value=""'+(L.destino?'':' selected')+'>Todos ('+L.destinos.length+')</option>' +
+      L.destinos.map(function(d){ return '<option value="'+String(d).replace(/"/g,"&quot;")+'"'+(L.destino===d?' selected':'')+'>'+d+'</option>'; }).join("") +
+      '</select>' + (L.destino?'<span class="lm-chip-dest">filtrado: '+L.destino+'</span>':'') + '</div>';
+  }
   h+='<div class="lm-sujetos">Coincidencias: '+L.sujetos.join(' · ')+'</div>';
   h+='<div class="lm-scroll"><table class="ret-tabla lm-tabla"><thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Destino</th><th>Comprobante</th><th>Monto</th><th>Saldo</th></tr></thead><tbody>';
   L.filas.forEach(function(f){
@@ -2335,20 +2355,24 @@ function libroMayorHtml(movs, net){
       '<td class="lm-saldo">'+f.saldo.toFixed(2)+'</td></tr>';
   });
   h+='</tbody></table></div>';
-  h+='<div class="lm-tot"><div class="lm-tot-row"><span>Total retenido</span><b class="pend-pos">+'+L.totalRet.toFixed(2)+'</b></div>' +
-    '<div class="lm-tot-row"><span>Total pagado</span><b class="pend-neg">-'+L.totalPago.toFixed(2)+'</b></div>' +
-    '<div class="lm-tot-row lm-tot-final"><span>Saldo '+(L.saldo>0.01?'pendiente por pagar':(L.saldo<-0.01?'a favor (pagado de más)':'— cuadra en cero'))+'</span>' +
+  var sufDest = L.destino? ' — '+L.destino : '';
+  h+='<div class="lm-tot"><div class="lm-tot-row"><span>Total retenido'+sufDest+'</span><b class="pend-pos">+'+L.totalRet.toFixed(2)+'</b></div>' +
+    '<div class="lm-tot-row"><span>Total pagado'+sufDest+'</span><b class="pend-neg">-'+L.totalPago.toFixed(2)+'</b></div>' +
+    '<div class="lm-tot-row lm-tot-final"><span>Saldo '+(L.saldo>0.01?'pendiente por pagar':(L.saldo<-0.01?'a favor (pagado de más)':'— cuadra en cero'))+sufDest+'</span>' +
     '<b class="'+(L.saldo>0.01?'pend-pos':(L.saldo<-0.01?'pend-neg':''))+'">B/ '+L.saldo.toFixed(2)+'</b></div></div>';
   return h+'</div>';
 }
 function bindLibroMayor(movs){
-  var inp=document.getElementById("lmInput"), btn=document.getElementById("lmBtn"), clr=document.getElementById("lmClear");
+  var inp=document.getElementById("lmInput"), btn=document.getElementById("lmBtn"), clr=document.getElementById("lmClear"),
+      sel=document.getElementById("lmDest");
+  if(sel) sel.onchange=function(){ STATE.mod2.libroDest=sel.value; renderResultadosMod2(); };
   if(!inp) return;
-  function buscar(){ STATE.mod2.libroQ=inp.value.trim(); renderResultadosMod2(); }
+  // Al cambiar de sujeto se limpia el destino: los destinos del anterior no aplican al nuevo.
+  function buscar(){ var v=inp.value.trim(); if(v!==STATE.mod2.libroQ) STATE.mod2.libroDest=""; STATE.mod2.libroQ=v; renderResultadosMod2(); }
   if(btn) btn.onclick=buscar;
   inp.addEventListener("keydown",function(e){ if(e.key==="Enter") buscar(); });
   inp.addEventListener("change",buscar); // elegir una sugerencia del datalist
-  if(clr) clr.onclick=function(){ STATE.mod2.libroQ=""; renderResultadosMod2(); };
+  if(clr) clr.onclick=function(){ STATE.mod2.libroQ=""; STATE.mod2.libroDest=""; renderResultadosMod2(); };
 }
 function renderResultadosMod2(){
   var area=document.getElementById("resultsArea2"); if(!area) return;
