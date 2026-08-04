@@ -260,6 +260,24 @@
   .ret-aging .ret-viejo{color:#B5731E;font-weight:800}
   .ret-saldoini{margin-top:14px;padding:12px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:13px;color:#7A5320;line-height:1.5}
   .ret-siLabel{font-size:11px;font-weight:700;color:#B5731E;background:#FBEFD9;padding:1px 6px;border-radius:6px;margin-left:6px;white-space:nowrap}
+  /* Alerta condicionante: comprobantes sin detalle por empleado */
+  .sd-panel{margin:16px 0;padding:16px 20px;border-radius:14px;background:#FDECEC;border:2px solid #D98A8A;font-size:13px}
+  .sd-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between}
+  .sd-title{font-weight:800;font-size:15px;color:#8E2F2F;line-height:1.35;flex:1;min-width:240px}
+  .sd-copy{padding:6px 14px;border:1px solid #D98A8A;border-radius:999px;background:#fff;font:inherit;
+    font-size:12px;font-weight:700;color:#8E2F2F;cursor:pointer;white-space:nowrap}
+  .sd-copy:hover{background:#FFF6F6}
+  .sd-impacto{margin:10px 0 0;color:#7A3B3B;line-height:1.55}
+  .sd-lista{margin:14px 0 0;padding-left:22px}
+  .sd-item{margin-bottom:14px;color:#5C3A3A}
+  .sd-comp{font-size:13.5px}
+  .sd-sug{margin-top:6px;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.75)}
+  .sd-sug-lbl{font-weight:800;color:#3F6E56}
+  .sd-sug-lineas{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px}
+  .sd-chip{font-size:12px;background:#EEF5F0;border:1px solid #CBE0D3;border-radius:999px;padding:2px 10px;color:#2F5B45;white-space:nowrap}
+  .sd-aviso{margin-top:6px;font-size:11.5px;color:#8A6A2F;font-style:italic}
+  .sd-sin{margin-top:6px;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.75);color:#8E2F2F}
+  .sd-pie{margin:12px 0 0;font-size:12px;color:#7A3B3B}
   .sp-panel{margin:14px 0;padding:12px 16px;border-radius:12px;font-size:13px}
   .sp-alert{background:#FBEAEA;border:1px solid #E6B7B7}
   .sp-info{background:#FBF4E7;border:1px solid #EBD8B4}
@@ -2034,16 +2052,25 @@ function netearRetenciones(movs, saldoIniDet){
   var BANCO="Banco / Préstamo";
   var empList=[]; (function(){ var seen={}; nombres.forEach(function(n){ var c=nc(n); if(c && !seen[c]){ seen[c]=1; empList.push(c); } }); })();
   function bancoDe(acr){ return String(acr||"").split(" - ")[0].trim(); }
+  // Tokens de un texto para buscar nombres. Se generan de DOS formas y se unen, porque el archivo trae la Ñ
+  // rota de distintas maneras: "MU?OZ" (se perdió el carácter) y "MUÃ‘OZ" (doble encoding). Partir en cada
+  // símbolo dejaría "MU"+"OZ" —irreconocible—, así que también se parte solo por espacios y se limpian los
+  // símbolos internos, dejando "MUOZ"/"MUAOZ", a un carácter de "MUNOZ".
+  function tokensRet(txt){ var n=normTxt(txt), set={};
+    n.split(/[^A-Z0-9]+/).forEach(function(w){ if(w) set[w]=1; });
+    n.split(/\s+/).forEach(function(w){ var c=w.replace(/[^A-Z0-9]/g,""); if(c) set[c]=1; });
+    return Object.keys(set);
+  }
   // Empleado nombrado en un texto: primero match estricto por palabra completa (evita "ANA" en "PANAMA");
-  // si falla, tolera typos/mojibake por levenshtein≤1 en palabras largas (≥5) — ej. "YENNIFER"→"YENIFER".
-  function empEnTexto(txt){ var toks=normTxt(txt).split(/[^A-Z0-9]+/).filter(Boolean); var set={}; toks.forEach(function(w){ set[w]=1; }); var best=null;
+  // si falla, tolera typos/mojibake por levenshtein en palabras largas — ej. "YENNIFER"→"YENIFER".
+  function empEnTexto(txt){ var toks=tokensRet(txt); var set={}; toks.forEach(function(w){ set[w]=1; }); var best=null;
     empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=3;}); if(ws.length && ws.every(function(w){return set[w];}) && (!best||e.length>best.length)) best=e; });
     if(best) return best;
-    // Fallback tolerante: los pagos traen typos y mojibake en el nombre ("MUÃ‘OZ" por MUÑOZ, "ARALYS" por
-    // ARACELYS). Se permite distancia 1 en palabras ≥5 y 2 en palabras ≥6, exigiendo que TODAS las palabras
-    // largas del nombre estén — con eso "ARALYS GAITAN" cae en ARACELYS GAITAN sin confundir a otro empleado.
+    // Fallback tolerante: los pagos traen typos y la Ñ rota ("MU?OZ", "MUÃ‘OZ" por MUÑOZ; "ARALYS" por
+    // ARACELYS). Se exige que TODAS las palabras largas del nombre estén, con distancia 1 (o 2 si ambas
+    // tienen 6+ letras) — así "ARALYS GAITAN" y "MUOZ" caen en su empleado sin confundirse con otro.
     empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=5;});
-      if(ws.length && ws.every(function(w){ return toks.some(function(t){ return t.length>=5 && levenshtein(t,w)<=(w.length>=6&&t.length>=6?2:1); }); }) && (!best||e.length>best.length)) best=e; });
+      if(ws.length && ws.every(function(w){ return toks.some(function(t){ return t.length>=4 && levenshtein(t,w)<=(w.length>=6&&t.length>=6?2:1); }); }) && (!best||e.length>best.length)) best=e; });
     return best;
   }
   // Match laxo para el concepto del Paso 0 (texto corto, a veces solo el nombre de pila, ej. "Banco -
@@ -2082,16 +2109,76 @@ function netearRetenciones(movs, saldoIniDet){
     Object.keys(subs).forEach(function(k){
       var deds=subs[k].deds.slice().sort(function(a,b){ return (a.mes||a.fecha||"")<(b.mes||b.fecha||"")?-1:1; });
       var pagos=subs[k].pagos.slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
-      var restPago=pagos.reduce(function(s,p){return s+p.monto;},0);
-      deds.forEach(function(x){ var r=x.monto; if(restPago>=r){ restPago-=r; r=0; } else { r-=restPago; restPago=0; }
-        if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r, saldoIni:x.saldoIni, sub:(d===BANCO?k:null)}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; } });
-      if(restPago>0.001){ var sob=restPago; for(var i=pagos.length-1;i>=0 && sob>0.001;i--){ var usar=Math.min(sob,pagos[i].monto); pagosSinDesc.push({fecha:pagos[i].fecha, monto:usar, acr:pagos[i].acr}); sob-=usar; } }
+      // Se consume pago por pago (en vez de una bolsa) para poder registrar A QUIÉN se aplicó cada uno: en
+      // los acreedores que cobran en lote (Cooperativa, Son Import, Refresquería) un solo PAY cubre a varios
+      // empleados, y el desglose es lo que permite revisar la aplicación individual.
+      var ip=0, usado=0;
+      deds.forEach(function(x){
+        var r=x.monto;
+        while(r>0.001 && ip<pagos.length){
+          var disp=pagos[ip].monto-usado; if(disp<=0.001){ ip++; usado=0; continue; }
+          var aplica=Math.min(disp,r);
+          (pagos[ip].aplicado=pagos[ip].aplicado||[]).push({emp:x.emp, monto:aplica, fecha:x.fecha, mes:x.mes, ref:x.ref, saldoIni:x.saldoIni});
+          r-=aplica; usado+=aplica;
+          if(pagos[ip].monto-usado<=0.001){ ip++; usado=0; }
+        }
+        if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r, saldoIni:x.saldoIni, ref:x.ref, sub:k}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; }
+      });
+      // Lo que sobra de los pagos (sin deducción que los respalde) son "pagos sin descuento". Se registra
+      // igual en `aplicado` —marcado como sobrante— para que el desglose cubra el 100% del pago y el libro
+      // por persona no pierda importes.
+      for(var i=ip;i<pagos.length;i++){
+        var sobra=pagos[i].monto-(i===ip?usado:0);
+        if(sobra>0.001){
+          pagosSinDesc.push({fecha:pagos[i].fecha, monto:sobra, acr:pagos[i].acr, ref:pagos[i].ref});
+          (pagos[i].aplicado=pagos[i].aplicado||[]).push({emp:k, monto:sobra, sobrante:true});
+        }
+      }
     });
     pendientes.sort(function(a,b){ return (a.mes||a.fecha||"")<(b.mes||b.fecha||"")?-1:1; });
     pagosSinDesc.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     detalle[d]={pendientes:pendientes, pagosSinDesc:pagosSinDesc};
     aging[d]=porMes;
   });
+  // ---- Comprobantes SIN detalle por empleado (hay que pedir su corrección) ----
+  // Un ME- cuyo detalle no nombra a los empleados (o cuyas sub-líneas no cuadran con el monto del asiento)
+  // no permite aplicar los pagos de forma individual: su monto queda atribuido a "(sin detalle)" y arrastra
+  // el pendiente sin dueño. Se listan para solicitar la corrección en el sistema de origen.
+  // Desglose de los comprobantes que SÍ traen detalle, agrupado por comprobante y destino. Sirve para
+  // sugerir —por intuición— cómo se compone un comprobante que no lo trae: si otro mes del mismo acreedor
+  // suma exactamente lo mismo, lo más probable es que se reparta igual entre las mismas personas.
+  var patronPorDest={};
+  Object.keys(ded).forEach(function(d){ var porRef={};
+    ded[d].forEach(function(x){ if(x.saldoIni) return; if(x.emp==="(sin detalle)"||x.emp==="(sin clasificar)") return;
+      var k=x.ref||("?"+x.fecha); if(!porRef[k]) porRef[k]={ref:x.ref, fecha:x.fecha, total:0, lineas:[]};
+      porRef[k].total=Math.round((porRef[k].total+x.monto)*100)/100; porRef[k].lineas.push({emp:x.emp, monto:x.monto}); });
+    patronPorDest[d]=Object.keys(porRef).map(function(k){ return porRef[k]; });
+  });
+  function sugerirDesglose(destino, monto, fecha){
+    var cands=(patronPorDest[destino]||[]).filter(function(p){ return Math.abs(p.total-monto)<=0.02 && p.lineas.length>1; });
+    if(!cands.length) return null;
+    // el más cercano en el tiempo: la nómina cambia poco entre meses contiguos
+    cands.sort(function(a,b){ return Math.abs(new Date(a.fecha)-new Date(fecha)) - Math.abs(new Date(b.fecha)-new Date(fecha)); });
+    return cands[0];
+  }
+  var sinDetalle=[];
+  Object.keys(ded).forEach(function(d){ ded[d].forEach(function(x){
+    if(x.saldoIni) return;
+    if(x.emp==="(sin detalle)" || x.emp==="(sin clasificar)"){
+      var sug=sugerirDesglose(d, x.monto, x.fecha);
+      sinDetalle.push({ref:x.ref||"(sin comprobante)", fecha:x.fecha, destino:d, monto:x.monto,
+        motivo:(x.emp==="(sin clasificar)"?"el asiento no indica el acreedor":"el detalle no nombra a los empleados o no cuadra con el monto del asiento"),
+        sugerencia:sug});
+    }
+  }); });
+  sinDetalle.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
+  // Aplicación de cada pago: a qué empleados se imputó (clave para los acreedores que cobran en lote).
+  var aplicaciones=[];
+  Object.keys(pag).forEach(function(d){ pag[d].forEach(function(x){
+    if(!x.aplicado || !x.aplicado.length) return;
+    aplicaciones.push({fecha:x.fecha, ref:x.ref, acr:x.acr, destino:d, monto:x.monto, lotes:x.aplicado.slice()});
+  }); });
+  aplicaciones.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
   // ---- Sobrepagos y pagos adelantados (por acreedor; "Banco / Préstamo" se abre por banco/empleado) ----
   // Dentro de "Banco / Préstamo" cada banco es la cuenta de un empleado (St. Georges=Yenifer, Banco Nacional=
   // Itza, Caja de Ahorros=Aracelys/Esther). La sub-cuenta se LLAVEA por el NOMBRE DEL BANCO (el campo acr del
@@ -2169,7 +2256,7 @@ function netearRetenciones(movs, saldoIniDet){
   return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos, saltadas:saltadas,
     // Movimientos ya clasificados por destino — el libro mayor los reusa para que sus cifras coincidan
     // exactamente con el resumen (ded incluye los fallbacks del clasificador; empBanco mapea banco↔empleado).
-    ded:ded, pag:pag, empBanco:empBanco };
+    ded:ded, pag:pag, empBanco:empBanco, sinDetalle:sinDetalle, aplicaciones:aplicaciones };
 }
 
 function renderModulo2(){
@@ -2359,6 +2446,60 @@ function sujetosRet(movs){
   nombres.forEach(function(n){ emp[canon[normTxt(n)]||normTxt(n)]=1; });
   return { empleados:Object.keys(emp).sort(), acreedores:Object.keys(acr).sort() };
 }
+// Fecha ISO → "26-feb" (para leer las listas de comprobantes sin tanto ruido).
+function fechaCorta(iso){ if(!iso) return "?"; var p=String(iso).split("-"); var m=["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  return p[2]+"-"+(m[parseInt(p[1],10)]||p[1]); }
+// ALERTA CONDICIONANTE: comprobantes sin detalle por empleado. Va ARRIBA de todo porque mientras existan,
+// los pagos de esos acreedores no se pueden imputar por persona y el pendiente individual sale incompleto.
+// Para cada uno se propone el desglose probable (otro comprobante del mismo acreedor que suma igual), de
+// modo que corregirlo sea mecánico; queda marcado como estimación para que se coteje con el físico.
+function sinDetalleHtml(net){
+  var sd=net.sinDetalle||[]; if(!sd.length) return "";
+  var total=sd.reduce(function(a,b){ return a+b.monto; },0);
+  var conSug=sd.filter(function(s){ return s.sugerencia; }).length;
+  var h='<div class="sd-panel"><div class="sd-head">' +
+    '<div class="sd-title">⛔ Falta el detalle por empleado en '+sd.length+' comprobante(s) — corregilos antes de usar el reporte</div>' +
+    '<button class="sd-copy" id="sdCopy">📋 Copiar lista</button></div>' +
+    '<p class="sd-impacto"><b>B/ '+total.toFixed(2)+'</b> no se pueden imputar a una persona. Mientras no se corrijan: los pagos de esos acreedores se aplican al bulto, el pendiente por empleado sale incompleto y ese monto aparece como <b>«(sin detalle)»</b> en el resto del reporte.</p>';
+  h+='<ol class="sd-lista">';
+  sd.forEach(function(s){
+    h+='<li class="sd-item"><div class="sd-comp"><b>'+s.ref+'</b> · '+fechaCorta(s.fecha)+' · '+s.destino+' · <b>B/ '+s.monto.toFixed(2)+'</b></div>';
+    if(s.sugerencia){
+      h+='<div class="sd-sug"><span class="sd-sug-lbl">Desglose probable</span> — mismo monto que <b>'+s.sugerencia.ref+'</b> ('+fechaCorta(s.sugerencia.fecha)+'):<div class="sd-sug-lineas">';
+      s.sugerencia.lineas.forEach(function(l){ h+='<span class="sd-chip">'+l.emp+' <b>'+l.monto.toFixed(2)+'</b></span>'; });
+      h+='</div><div class="sd-aviso">Es una estimación por coincidencia de monto — cotejala con el comprobante físico antes de digitarla.</div></div>';
+    } else {
+      h+='<div class="sd-sin">✗ Ningún otro comprobante de este acreedor suma lo mismo, así que no se puede estimar el desglose. <b>Pedir el detalle real</b> a quien lo digitó.</div>';
+    }
+    h+='</li>';
+  });
+  h+='</ol>';
+  h+='<p class="sd-pie">'+conSug+' de '+sd.length+' tienen desglose probable. Al corregirlos en el sistema y volver a exportar el navegador, este aviso desaparece y los pagos se aplican por persona automáticamente.</p>';
+  return h+'</div>';
+}
+// Texto plano de la lista, para pegar en un correo o mensaje a quien digita los asientos.
+function sinDetalleTexto(net){
+  var sd=net.sinDetalle||[]; var t="COMPROBANTES QUE NECESITAN DETALLE POR EMPLEADO\n";
+  t+="Cuenta [2.3.1.4] Retención a empleados por pagar\n";
+  t+=sd.length+" comprobante(s) · B/ "+sd.reduce(function(a,b){return a+b.monto;},0).toFixed(2)+"\n\n";
+  sd.forEach(function(s,i){
+    t+=(i+1)+") "+s.ref+" · "+fechaCorta(s.fecha)+" · "+s.destino+" · B/ "+s.monto.toFixed(2)+"\n";
+    if(s.sugerencia){ t+="   Desglose probable (igual a "+s.sugerencia.ref+" del "+fechaCorta(s.sugerencia.fecha)+"):\n";
+      s.sugerencia.lineas.forEach(function(l){ t+="     - "+l.emp+": "+l.monto.toFixed(2)+"\n"; });
+      t+="   (estimado por monto — verificar contra el comprobante)\n";
+    } else t+="   Sin desglose estimable: se necesita el detalle real.\n";
+    t+="\n";
+  });
+  return t;
+}
+function bindSinDetalle(net){
+  var b=document.getElementById("sdCopy"); if(!b) return;
+  b.onclick=function(){
+    var txt=sinDetalleTexto(net);
+    try{ navigator.clipboard.writeText(txt).then(function(){ b.textContent="✓ Copiado"; setTimeout(function(){ b.textContent="📋 Copiar lista"; },1800); }); }
+    catch(e){ alert(txt); }
+  };
+}
 // Paneles de sobrepagos (alerta) y pagos adelantados (informativo). El neteo por acreedor abre "Banco /
 // Préstamo" por banco/empleado, así se ve cuándo un pago superó la retención (ej. Yennifer/St. Georges).
 function sobrepagosHtml(net){
@@ -2491,6 +2632,7 @@ function renderResultadosMod2(){
   var mesActual = meses.length? meses.sort().slice(-1)[0] : null;
   var html='<div class="results-head"><h2>Retenciones pendientes por pagar</h2>' +
     '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
+  html+=sinDetalleHtml(net); // va primero: condiciona la lectura de todo lo demás
   html+='<div class="summary-bar">' +
     '<span class="chip">Descontado: B/ '+net.totalDesc.toFixed(2)+'</span>' +
     (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+totalSaldoIni.toFixed(2)+'</span>' : '') +
@@ -2547,6 +2689,7 @@ function renderResultadosMod2(){
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
   bindLibroMayor(R.parsed.movs);
   bindAdelantos(net);
+  bindSinDetalle(net);
 }
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
