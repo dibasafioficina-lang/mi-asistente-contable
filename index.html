@@ -1833,12 +1833,21 @@ function esConceptoLiderRet(texto){
   var n = normTxt(texto);
   return CONCEPTO_LIDER_RET.test(n) && destinoRet(n)!==null;
 }
+// ALIAS de empleados: una misma persona registrada con nombres de pila distintos (nombre compuesto o error
+// de digitación). La fusión automática por typos (mismoNombreRet, ≤4 letras) NO los une —y no debe: unir dos
+// nombres de pila distintos sería riesgoso (pueden ser familiares)— así que se declaran a mano.
+// Clave = nombre alterno normalizado; valor = nombre con el que se lo debe agrupar.
+// Confirmado por Diba (2026-08-04): Omaira Villarreal es Esther Villarreal (nombre compuesto).
+var ALIAS_EMPLEADO_RET = {
+  "OMAIRA VILLARREAL": "ESTHER VILLARREAL"
+};
 function empleadoRet(texto){
   var t = normTxt(partirLineaRet(texto).texto);
   t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
   // Limpia puntuación de borde (ej. "ARACELYS GAITAN:" → "ARACELYS GAITAN") para no romper la fusión de
   // nombres ni el emparejamiento empleado↔pago.
-  return t.replace(/^[^A-Z0-9]+/,"").replace(/[^A-Z0-9]+$/,"").trim();
+  t = t.replace(/^[^A-Z0-9]+/,"").replace(/[^A-Z0-9]+$/,"").trim();
+  return ALIAS_EMPLEADO_RET[t] || t;
 }
 // Mes (YYYY-MM) al que CORRESPONDE la retención/pago según la descripción (ej. "QUINCENA DE ENERO",
 // "MES DE MAYO", "DICIEMBRE"). Usa el año que aparezca en el texto; si no, el año de la transacción,
