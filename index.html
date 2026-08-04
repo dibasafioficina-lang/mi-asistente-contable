@@ -74,6 +74,10 @@
     .ret-tabla{width:100% !important;table-layout:fixed}
     .ret-tabla th, .ret-tabla td{white-space:normal !important;word-break:break-word;overflow-wrap:anywhere}
     .cg-cols{grid-template-columns:1fr 1fr !important}
+    /* El detalle de los adelantos se imprime completo aunque el bloque esté plegado en pantalla */
+    .adel-eventos.adel-oculto{display:table !important}
+    .adel-todos, .adel-caret{display:none !important}
+    .adel-bloque{break-inside:avoid}
   }
 
   /* Menu de modulos */
@@ -265,7 +269,18 @@
   .sp-tabla td{padding:4px 8px;border-bottom:1px solid rgba(0,0,0,.06)}
   .sp-acr .sp-emp,.adel-acr .sp-emp{font-size:12px;color:var(--slate);font-weight:600}
   .sp-monto{text-align:right;font-weight:800;color:#B54B4B;white-space:nowrap}
-  .adel-acr{margin:10px 0 2px;color:#573B46}
+  .adel-bloque{margin:8px 0;border-radius:10px;background:rgba(255,255,255,.55);overflow:hidden}
+  .adel-acr{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;background:none;
+    font:inherit;font-size:13px;color:#573B46;text-align:left;cursor:pointer;border-radius:10px}
+  .adel-acr:hover{background:rgba(255,255,255,.9)}
+  .adel-acr.abierto{border-radius:10px 10px 0 0}
+  .adel-caret{color:#B5731E;font-size:11px;width:12px;flex:none}
+  .adel-total{margin-left:auto;font-weight:800;color:#B5731E;white-space:nowrap}
+  .adel-todos{margin-left:12px;padding:3px 12px;border:1px solid #EBD8B4;border-radius:999px;background:#fff;
+    font:inherit;font-size:11px;font-weight:700;color:#7A5320;cursor:pointer}
+  .adel-todos:hover{background:#FDF6E9}
+  .adel-eventos{margin:0 12px 8px}
+  .adel-eventos.adel-oculto{display:none}
   .adel-eventos td{font-size:12px;color:var(--slate)}
   .adel-eventos .sp-exc{text-align:right;color:#B5731E;font-weight:700;white-space:nowrap}
   .lm-panel{margin:16px 0;padding:14px 18px;border-radius:14px;background:#fff;border:1px solid #EEE1E7;box-shadow:0 2px 10px rgba(158,104,126,.06)}
@@ -335,7 +350,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"" },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"", adelAbiertos:null },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -343,6 +358,13 @@ var STATE = {
   saldoIniDetalle:[],
   checks:{}
 };
+
+/* -------- Preferencias de vista (persisten entre sesiones) --------
+   Solo guardan cómo se ve el reporte (qué bloques quedan desplegados), nunca datos contables: los archivos
+   se vuelven a subir en cada sesión. Va envuelto en try/catch porque en modo privado localStorage falla. */
+var PREF_KEY="miAsistenteContable.prefs";
+function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}")||{}; }catch(e){ return {}; } }
+function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
 function normTxt(s){
@@ -1995,16 +2017,69 @@ function netearRetenciones(movs, saldoIniDet){
     ded[d].push({fecha:r.fecha||"", mes:mes, emp:concepto||"(saldo inicial)", monto:monto, saldoIni:true});
     porDestino[d].saldoIni+=monto; totalSaldoIni+=monto;
   });
-  // FIFO por destino: los pagos cubren las deducciones más viejas; sobran las deducciones PENDIENTES y,
-  // si los pagos exceden, los "pagos sin descuento". Se dejan por fuera las deducciones ya pagadas.
+  // ---- Identificación de sub-cuentas dentro de "Banco / Préstamo" ----
+  // Cada banco es la cuenta de un empleado (St. Georges=Yenifer, Banco Nacional=Itza, Caja de Ahorros=
+  // Aracelys/Esther). La sub-cuenta se LLAVEA por el NOMBRE DEL BANCO (el campo acr del pago viene siempre
+  // limpio; el nombre del empleado a veces trae mojibake "MUÃ‘OZ"). Las retenciones nombran al empleado, así
+  // que se aprende empleado→banco desde los pagos.
+  var BANCO="Banco / Préstamo";
+  var empList=[]; (function(){ var seen={}; nombres.forEach(function(n){ var c=nc(n); if(c && !seen[c]){ seen[c]=1; empList.push(c); } }); })();
+  function bancoDe(acr){ return String(acr||"").split(" - ")[0].trim(); }
+  // Empleado nombrado en un texto: primero match estricto por palabra completa (evita "ANA" en "PANAMA");
+  // si falla, tolera typos/mojibake por levenshtein≤1 en palabras largas (≥5) — ej. "YENNIFER"→"YENIFER".
+  function empEnTexto(txt){ var toks=normTxt(txt).split(/[^A-Z0-9]+/).filter(Boolean); var set={}; toks.forEach(function(w){ set[w]=1; }); var best=null;
+    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=3;}); if(ws.length && ws.every(function(w){return set[w];}) && (!best||e.length>best.length)) best=e; });
+    if(best) return best;
+    // Fallback tolerante: los pagos traen typos y mojibake en el nombre ("MUÃ‘OZ" por MUÑOZ, "ARALYS" por
+    // ARACELYS). Se permite distancia 1 en palabras ≥5 y 2 en palabras ≥6, exigiendo que TODAS las palabras
+    // largas del nombre estén — con eso "ARALYS GAITAN" cae en ARACELYS GAITAN sin confundir a otro empleado.
+    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=5;});
+      if(ws.length && ws.every(function(w){ return toks.some(function(t){ return t.length>=5 && levenshtein(t,w)<=(w.length>=6&&t.length>=6?2:1); }); }) && (!best||e.length>best.length)) best=e; });
+    return best;
+  }
+  // Match laxo para el concepto del Paso 0 (texto corto, a veces solo el nombre de pila, ej. "Banco -
+  // Yennifer"): basta que UNA palabra ≥4 del empleado coincida (lev≤1). Solo se usa para el saldo inicial.
+  function empEnConcepto(txt){ var toks=normTxt(txt).split(/[^A-Z0-9]+/).filter(Boolean); var best=null;
+    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=4;}); var hit=ws.some(function(w){ return toks.some(function(t){ return t.length>=4 && levenshtein(t,w)<=1; }); }); if(hit && (!best||e.length>best.length)) best=e; });
+    return best; }
+  // empleado(canónico) → banco, aprendido de los pagos (empleado nombrado en la desc + banco en acr).
+  var empBanco={};
+  (pag[BANCO]||[]).forEach(function(x){ var e=empEnTexto(x.desc||x.acr||""); if(e) empBanco[e]=bancoDe(x.acr); });
+  function subDePago(x){ return bancoDe(x.acr); }
+  function subDeEmp(emp){ return empBanco[emp] || null; }
+  var SIN_EMP="(sin identificar)";
+  // Sub-cuenta de una línea dentro de "Banco / Préstamo" = EL EMPLEADO, no el banco: la retención bancaria es
+  // el préstamo de esa persona (los pagos dicen "PAGO DE PRÉSTAMO <empleado>") y un mismo banco puede llevar
+  // varios empleados (Caja de Ahorros = Aracelys + Esther). Así el pendiente por persona coincide con su libro
+  // mayor. Fuera de Banco el acreedor cobra en lote → una sola sub-cuenta por destino.
+  function subDeDed(d,x){ if(d!==BANCO) return d;
+    if(x.saldoIni) return empEnTexto(x.emp)||empEnConcepto(x.emp)||SIN_EMP;
+    return (x.emp && x.emp!=="(sin detalle)")? x.emp : SIN_EMP; }
+  function subDePag(d,x){ return d!==BANCO ? d : (empEnTexto(x.desc||x.acr||"")||SIN_EMP); }
+
+  // FIFO POR SUB-CUENTA: los pagos cubren las deducciones más viejas DE SU PROPIA cuenta. Antes se neteaba
+  // por destino completo, y como "Banco / Préstamo" agrupa varios bancos/empleados, un pago de St. Georges
+  // podía cancelar una retención más vieja de Itza — el pendiente por empleado no coincidía con su libro
+  // mayor. Neteando por sub-cuenta ambos dan lo mismo. El total del destino no cambia: la suma de pendientes
+  // menos los pagos sin descuento sigue siendo desc + saldo inicial − pagado.
   var detalle={}, aging={};
   Object.keys(porDestino).forEach(function(d){
-    var deds=(ded[d]||[]).slice().sort(function(a,b){ return (a.mes||a.fecha||"")<(b.mes||b.fecha||"")?-1:1; });
-    var pagos=(pag[d]||[]).slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
-    var restPago=pagos.reduce(function(s,p){return s+p.monto;},0);
-    var pendientes=[], porMes={};
-    deds.forEach(function(x){ var r=x.monto; if(restPago>=r){ restPago-=r; r=0; } else { r-=restPago; restPago=0; } if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r, saldoIni:x.saldoIni}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; } });
-    var pagosSinDesc=[]; if(restPago>0.001){ var sob=restPago; for(var i=pagos.length-1;i>=0 && sob>0.001;i--){ var usar=Math.min(sob,pagos[i].monto); pagosSinDesc.unshift({fecha:pagos[i].fecha, monto:usar, acr:pagos[i].acr}); sob-=usar; } }
+    var subs={};
+    // La sub-cuenta se guarda en la línea (x.sub) porque el libro mayor la reusa para emparejar el saldo
+    // inicial, cuyo "empleado" es el concepto del Paso 0 (ej. "Banco - Yennifer") y no el nombre canónico.
+    (ded[d]||[]).forEach(function(x){ var k=subDeDed(d,x); x.sub=k; (subs[k]=subs[k]||{deds:[],pagos:[]}).deds.push(x); });
+    (pag[d]||[]).forEach(function(x){ var k=subDePag(d,x); x.sub=k; (subs[k]=subs[k]||{deds:[],pagos:[]}).pagos.push(x); });
+    var pendientes=[], pagosSinDesc=[], porMes={};
+    Object.keys(subs).forEach(function(k){
+      var deds=subs[k].deds.slice().sort(function(a,b){ return (a.mes||a.fecha||"")<(b.mes||b.fecha||"")?-1:1; });
+      var pagos=subs[k].pagos.slice().sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
+      var restPago=pagos.reduce(function(s,p){return s+p.monto;},0);
+      deds.forEach(function(x){ var r=x.monto; if(restPago>=r){ restPago-=r; r=0; } else { r-=restPago; restPago=0; }
+        if(r>0.001){ pendientes.push({fecha:x.fecha, mes:x.mes, emp:x.emp, monto:r, saldoIni:x.saldoIni, sub:(d===BANCO?k:null)}); porMes[x.mes||"?"]=(porMes[x.mes||"?"]||0)+r; } });
+      if(restPago>0.001){ var sob=restPago; for(var i=pagos.length-1;i>=0 && sob>0.001;i--){ var usar=Math.min(sob,pagos[i].monto); pagosSinDesc.push({fecha:pagos[i].fecha, monto:usar, acr:pagos[i].acr}); sob-=usar; } }
+    });
+    pendientes.sort(function(a,b){ return (a.mes||a.fecha||"")<(b.mes||b.fecha||"")?-1:1; });
+    pagosSinDesc.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     detalle[d]={pendientes:pendientes, pagosSinDesc:pagosSinDesc};
     aging[d]=porMes;
   });
@@ -2017,28 +2092,6 @@ function netearRetenciones(movs, saldoIniDet){
   //   • PAGO ADELANTADO (informativo): un pago deja el saldo del PERÍODO en negativo — se pagó antes de que se
   //     registrara la retención — pero al final del período la cuenta cuadra (o solo queda debiendo).
   //   • SOBREPAGO NETO REAL (alerta): incluyendo el saldo inicial del Paso 0, la cuenta TERMINA pagada de más.
-  var BANCO="Banco / Préstamo";
-  var empList=[]; (function(){ var seen={}; nombres.forEach(function(n){ var c=nc(n); if(c && !seen[c]){ seen[c]=1; empList.push(c); } }); })();
-  function bancoDe(acr){ return String(acr||"").split(" - ")[0].trim(); }
-  // Empleado nombrado en un texto: primero match estricto por palabra completa (evita "ANA" en "PANAMA");
-  // si falla, tolera typos/mojibake por levenshtein≤1 en palabras largas (≥5) — ej. "YENNIFER"→"YENIFER".
-  function empEnTexto(txt){ var toks=normTxt(txt).split(/[^A-Z0-9]+/).filter(Boolean); var set={}; toks.forEach(function(w){ set[w]=1; }); var best=null;
-    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=3;}); if(ws.length && ws.every(function(w){return set[w];}) && (!best||e.length>best.length)) best=e; });
-    if(best) return best;
-    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=5;}); if(ws.length && ws.every(function(w){return toks.some(function(t){return t.length>=5 && levenshtein(t,w)<=1;});}) && (!best||e.length>best.length)) best=e; });
-    return best;
-  }
-  // Match laxo para el concepto del Paso 0 (texto corto, a veces solo el nombre de pila, ej. "Banco -
-  // Yennifer"): basta que UNA palabra ≥4 del empleado coincida (lev≤1). Solo se usa para el saldo inicial.
-  function empEnConcepto(txt){ var toks=normTxt(txt).split(/[^A-Z0-9]+/).filter(Boolean); var best=null;
-    empList.forEach(function(e){ var ws=e.split(" ").filter(function(w){return w.length>=4;}); var hit=ws.some(function(w){ return toks.some(function(t){ return t.length>=4 && levenshtein(t,w)<=1; }); }); if(hit && (!best||e.length>best.length)) best=e; });
-    return best; }
-  // empleado(canónico) → banco, aprendido de los pagos (empleado nombrado en la desc + banco en acr).
-  var empBanco={};
-  (pag[BANCO]||[]).forEach(function(x){ var e=empEnTexto(x.desc||x.acr||""); if(e) empBanco[e]=bancoDe(x.acr); });
-  // sub-cuenta de una línea: en Banco = el banco (del pago por acr, de la retención/opening por empleado→banco).
-  function subDePago(x){ return bancoDe(x.acr); }
-  function subDeEmp(emp){ return empBanco[emp] || null; }
   var openSub={}, subEmp={};
   function addEmp(k,e){ if(e){ (subEmp[k]=subEmp[k]||{})[e]=1; } }
   (saldoIniDet||[]).forEach(function(r){ var monto=Math.abs(parseFloat(r.monto)); if(isNaN(monto)||monto<=0.001) return;
@@ -2254,16 +2307,19 @@ function libroMayorRet(net, q, dest){
   var acrEnLote = !buscaEmpleado && destAcr && destAcr!==BANCO;
   var filas=[], suj={};
   Object.keys(net.ded).forEach(function(d){ net.ded[d].forEach(function(x){
-    if(x.saldoIni) return; // el saldo inicial ya se detalla en el Paso 0
-    var ok = !!(x.emp && coincide(x.emp));
+    // El saldo inicial del Paso 0 se incluye como fila de APERTURA: es deuda que la cuenta ya traía, y el
+    // detalle de pendientes también lo netea. Si se omitiera, el saldo del libro no coincidiría con el detalle.
+    var ok = !!(x.emp && coincide(x.emp)) || !!(x.sub && coincide(x.sub));
     if(!ok && !buscaEmpleado && destAcr) ok = acrEnLote ? (d===destAcr) : (d===destAcr && !!empsDelAcr[x.emp]);
     if(!ok) return;
-    filas.push({fecha:x.fecha||"", tipo:"Retención", concepto:x.emp||"(sin detalle)", destino:d, ref:x.ref||"", mes:x.mes, monto:x.monto});
+    filas.push({fecha:x.fecha||"", tipo:(x.saldoIni?"Saldo inicial":"Retención"), concepto:x.emp||"(sin detalle)", destino:d, ref:x.ref||"", mes:x.mes, monto:x.monto, saldoIni:x.saldoIni});
     if(x.emp) suj[x.emp]=1; }); });
   Object.keys(net.pag).forEach(function(d){ net.pag[d].forEach(function(x){
-    // En un acreedor de pago en lote se toman TODOS los pagos de su destino: la razón social cambia entre
-    // pagos (Refresquería / Shopping Market / Maryan Safi) y un match textual dejaría pagos afuera.
-    var ok = coincide((x.acr||"")+" "+(x.desc||"")) || (acrEnLote && d===destAcr);
+    // Se usa la MISMA atribución que el neteo (x.sub): el nombre en la desc del pago trae typos ("ARALYS"
+    // por ARACELYS) que un match textual dejaría afuera, y entonces el saldo del libro no coincidiría con el
+    // detalle de pendientes. En un acreedor de pago en lote se toman todos los pagos de su destino, porque la
+    // razón social cambia entre pagos (Refresquería / Shopping Market / Maryan Safi).
+    var ok = coincide((x.acr||"")+" "+(x.desc||"")) || !!(x.sub && coincide(x.sub)) || (acrEnLote && d===destAcr);
     if(!ok) return;
     filas.push({fecha:x.fecha||"", tipo:"Pago", concepto:x.acr||x.desc||"", destino:d, ref:x.ref||"", monto:-x.monto});
     if(x.acr) suj[normTxt(x.acr)]=1; }); });
@@ -2313,16 +2369,49 @@ function sobrepagosHtml(net){
     h+='</tbody></table></div>';
   }
   if(ad.length){
-    h+='<div class="sp-panel sp-info"><div class="sp-title">⏩ Pagos adelantados — se pagó antes de registrar la retención, pero la cuenta cuadra en el período (informativo)</div>';
+    // Cada acreedor es un bloque desplegable; qué bloques quedan abiertos se recuerda entre sesiones.
+    var abiertos=adelAbiertos();
+    var nAbiertos=ad.filter(function(a){ return abiertos[adelKey(a)]!==false; }).length;
+    h+='<div class="sp-panel sp-info"><div class="sp-title">⏩ Pagos adelantados — se pagó antes de registrar la retención, pero la cuenta cuadra en el período (informativo)' +
+      '<button class="adel-todos" id="adelTodos" data-abrir="'+(nAbiertos<ad.length?"1":"0")+'">'+(nAbiertos<ad.length?"Desplegar todo":"Plegar todo")+'</button></div>';
     ad.forEach(function(a){
-      h+='<div class="adel-acr"><b>'+a.acreedor+'</b>'+(a.empleado?' <span class="sp-emp">'+a.empleado+'</span>':'')+' — '+a.eventos.length+' pago(s) adelantado(s)'+(a.opening>0.01?' · saldo inicial B/ '+a.opening.toFixed(2):'')+'</div>';
-      h+='<table class="sp-tabla adel-eventos"><tbody>';
+      var k=adelKey(a), ab=abiertos[k]!==false, total=a.eventos.reduce(function(s,e){ return s+e.exceso; },0);
+      h+='<div class="adel-bloque">' +
+        '<button class="adel-acr'+(ab?' abierto':'')+'" data-k="'+String(k).replace(/"/g,"&quot;")+'">' +
+        '<span class="adel-caret">'+(ab?'▾':'▸')+'</span>' +
+        '<b>'+a.acreedor+'</b>'+(a.empleado?' <span class="sp-emp">'+a.empleado+'</span>':'') +
+        ' — '+a.eventos.length+' pago(s) adelantado(s)'+(a.opening>0.01?' · saldo inicial B/ '+a.opening.toFixed(2):'') +
+        '<span class="adel-total">B/ '+total.toFixed(2)+'</span></button>';
+      // Las filas se emiten siempre y se ocultan por CSS: así la impresión incluye el detalle completo
+      // aunque el bloque esté plegado en pantalla.
+      h+='<table class="sp-tabla adel-eventos'+(ab?'':' adel-oculto')+'"><tbody>';
       a.eventos.forEach(function(e){ h+='<tr><td>'+(e.fecha||'')+'</td><td>pago B/ '+e.montoPago.toFixed(2)+'</td><td class="sp-exc">adelantado B/ '+e.exceso.toFixed(2)+'</td></tr>'; });
-      h+='</tbody></table>';
+      h+='</tbody></table></div>';
     });
     h+='</div>';
   }
   return h;
+}
+// Clave estable de un acreedor del reporte de adelantos (para recordar si su bloque queda desplegado).
+function adelKey(a){ return (a.acreedor||"")+"|"+(a.empleado||""); }
+// Mapa clave→abierto. Por defecto TODOS abiertos (solo se guarda lo que el usuario pliega o despliega).
+function adelAbiertos(){
+  if(!STATE.mod2.adelAbiertos) STATE.mod2.adelAbiertos=leerPrefs().adelAbiertos||{};
+  return STATE.mod2.adelAbiertos;
+}
+function fijarAdelAbierto(k, abierto){
+  var m=adelAbiertos(); m[k]=abierto; guardarPref("adelAbiertos", m); renderResultadosMod2();
+}
+function bindAdelantos(net){
+  document.querySelectorAll(".adel-acr").forEach(function(b){
+    b.onclick=function(){ var k=b.getAttribute("data-k"); fijarAdelAbierto(k, adelAbiertos()[k]===false); };
+  });
+  var todos=document.getElementById("adelTodos");
+  if(todos) todos.onclick=function(){
+    var abrir=todos.getAttribute("data-abrir")==="1", m=adelAbiertos();
+    (net.adelantos||[]).forEach(function(a){ m[adelKey(a)]=abrir; });
+    guardarPref("adelAbiertos", m); renderResultadosMod2();
+  };
 }
 // Panel del libro mayor: buscador + tabla cronológica del sujeto consultado.
 function libroMayorHtml(movs, net){
@@ -2448,6 +2537,7 @@ function renderResultadosMod2(){
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
   bindLibroMayor(R.parsed.movs);
+  bindAdelantos(net);
 }
 function exportarRetenciones(){
   var R=STATE.mod2.result, net=R.net, pd=net.porDestino;
