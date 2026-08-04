@@ -74,10 +74,6 @@
     .ret-tabla{width:100% !important;table-layout:fixed}
     .ret-tabla th, .ret-tabla td{white-space:normal !important;word-break:break-word;overflow-wrap:anywhere}
     .cg-cols{grid-template-columns:1fr 1fr !important}
-    /* El detalle de los adelantos se imprime completo aunque el bloque esté plegado en pantalla */
-    .adel-eventos.adel-oculto{display:table !important}
-    .adel-todos, .adel-caret{display:none !important}
-    .adel-bloque{break-inside:avoid}
   }
 
   /* Menu de modulos */
@@ -285,22 +281,8 @@
   .sp-info .sp-title{color:#7A5320}
   .sp-tabla{width:100%;border-collapse:collapse}
   .sp-tabla td{padding:4px 8px;border-bottom:1px solid rgba(0,0,0,.06)}
-  .sp-acr .sp-emp,.adel-acr .sp-emp{font-size:12px;color:var(--slate);font-weight:600}
+  .sp-acr .sp-emp{font-size:12px;color:var(--slate);font-weight:600}
   .sp-monto{text-align:right;font-weight:800;color:#B54B4B;white-space:nowrap}
-  .adel-bloque{margin:8px 0;border-radius:10px;background:rgba(255,255,255,.55);overflow:hidden}
-  .adel-acr{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;background:none;
-    font:inherit;font-size:13px;color:#573B46;text-align:left;cursor:pointer;border-radius:10px}
-  .adel-acr:hover{background:rgba(255,255,255,.9)}
-  .adel-acr.abierto{border-radius:10px 10px 0 0}
-  .adel-caret{color:#B5731E;font-size:11px;width:12px;flex:none}
-  .adel-total{margin-left:auto;font-weight:800;color:#B5731E;white-space:nowrap}
-  .adel-todos{margin-left:12px;padding:3px 12px;border:1px solid #EBD8B4;border-radius:999px;background:#fff;
-    font:inherit;font-size:11px;font-weight:700;color:#7A5320;cursor:pointer}
-  .adel-todos:hover{background:#FDF6E9}
-  .adel-eventos{margin:0 12px 8px}
-  .adel-eventos.adel-oculto{display:none}
-  .adel-eventos td{font-size:12px;color:var(--slate)}
-  .adel-eventos .sp-exc{text-align:right;color:#B5731E;font-weight:700;white-space:nowrap}
   .lm-panel{margin:16px 0;padding:14px 18px;border-radius:14px;background:#fff;border:1px solid #EEE1E7;box-shadow:0 2px 10px rgba(158,104,126,.06)}
   .lm-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
   .lm-title{font-weight:800;color:var(--heading);font-size:15px}
@@ -368,7 +350,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"", adelAbiertos:null },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"" },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -385,6 +367,13 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
+// Formato de las cifras que se MUESTRAN: separador de miles + 2 decimales (1,000.00). Los cálculos y las
+// claves internas siguen usando el número crudo.
+function fmt(n){
+  var v=Number(n); if(isNaN(v)) v=0;
+  var neg=v<0, partes=Math.abs(v).toFixed(2).split(".");
+  return (neg?"-":"")+partes[0].replace(/\B(?=(\d{3})+(?!\d))/g,",")+"."+partes[1];
+}
 function normTxt(s){
   if(s===null||s===undefined) return "";
   s = String(s);
@@ -935,7 +924,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
       var bancoSistema = dS > 0 ? "Banistmo" : "STG";  // el sistema lo depositó aquí
       hallazgos.push({
         fecha:fecha, banco:bancoInforme, monto:monto, clase:"diff",
-        texto: "El monto B/ " + monto.toFixed(2) + " del " + fecha + " tiene bancos diferentes: el informe de cajeras lo reporta en " +
+        texto: "El monto B/ " + fmt(monto) + " del " + fecha + " tiene bancos diferentes: el informe de cajeras lo reporta en " +
                bancoInforme + " y el diario de Caja General lo registró en " + bancoSistema +
                ". Verifica el informe de caja y el navegador de Caja General." + comprobanteTxt(fecha),
         fuente: "Reporte consolidado de caja / Diario Caja General"
@@ -960,7 +949,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
           match.usado = true;
           hallazgos.push({
             fecha:fecha, banco:bk, monto:diff, clase:"sin_confirmar",
-            texto: bk + " " + fecha + ": la cajera reportó B/ " + diff.toFixed(2) +
+            texto: bk + " " + fecha + ": la cajera reportó B/ " + fmt(diff) +
                    " para este banco y el sistema tiene el depósito (\"" + String(match.desc).trim() +
                    "\") pero sin etiqueta de banco, así que no se puede confirmar a qué banco entró." + comprobanteTxt(fecha, match.ref),
             fuente: "Reporte consolidado de caja / Diario Caja General"
@@ -971,8 +960,8 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
 
       hallazgos.push({
         fecha:fecha, banco:bk, monto:diff, clase:"diff",
-        texto: "Diferencia " + bk + " " + fecha + ": reporte de cajeras B/ " + info.a.toFixed(2) +
-               " vs. diario Caja General (depósitos a " + bk + ") B/ " + info.b.toFixed(2) + " (dif. B/ " + diff.toFixed(2) + ")" + comprobanteTxt(fecha),
+        texto: "Diferencia " + bk + " " + fecha + ": reporte de cajeras B/ " + fmt(info.a) +
+               " vs. diario Caja General (depósitos a " + bk + ") B/ " + fmt(info.b) + " (dif. B/ " + fmt(diff) + ")" + comprobanteTxt(fecha),
         fuente: "Reporte consolidado de caja / Diario Caja General"
       });
     });
@@ -986,9 +975,9 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
       hallazgos.push({
         fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
         texto: "Depósito acumulado " + b.metodo + " " + b.banco + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
-               b.monto.toFixed(2) + " pero la suma de los depósitos diarios de " + b.metodo + " " + b.banco +
-               " del reporte (días " + b.diaIni + " al " + b.diaFin + ") es B/ " + b.cubierto.toFixed(2) +
-               " (dif. B/ " + diff.toFixed(2) + "). Revisa si algún día quedó registrado en otro banco o método.",
+               fmt(b.monto) + " pero la suma de los depósitos diarios de " + b.metodo + " " + b.banco +
+               " del reporte (días " + b.diaIni + " al " + b.diaFin + ") es B/ " + fmt(b.cubierto) +
+               " (dif. B/ " + fmt(diff) + "). Revisa si algún día quedó registrado en otro banco o método.",
         fuente: "Reporte consolidado de caja / Diario Caja General"
       });
     }
@@ -1008,8 +997,8 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
       if(Math.abs(dch) > tolerancia){
         hallazgos.push({
           fecha:fecha, banco:bk, monto:dch, clase:"diff",
-          texto: "Cheques " + bk + " " + fecha + ": el desglose individual suma B/ " + det.toFixed(2) +
-                 " pero el total de cheques del reporte es B/ " + tot.toFixed(2) + " (dif. B/ " + dch.toFixed(2) + ").",
+          texto: "Cheques " + bk + " " + fecha + ": el desglose individual suma B/ " + fmt(det) +
+                 " pero el total de cheques del reporte es B/ " + fmt(tot) + " (dif. B/ " + fmt(dch) + ").",
           fuente: "Reporte de cajeras (desglose de cheques vs. total)"
         });
       }
@@ -1232,7 +1221,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
           concepto:concepto, comprobante:refRaw, motivo:"último día del mes",
-          texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " (\"" + concepto +
+          texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " (\"" + concepto +
                  "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el banco)." + ref,
           fuente: "Diario Caja General / Estado de cuenta " + banco
         });
@@ -1250,7 +1239,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           comboOtro.idxs.forEach(function(i){ bancoCred[otro][i].usado = true; });
           hallazgos.push({
             fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
-            texto: "Cheque de B/ " + objetivo.toFixed(2) + " (" + dep.fecha + ") que Caja General asignó a " + banco +
+            texto: "Cheque de B/ " + fmt(objetivo) + " (" + dep.fecha + ") que Caja General asignó a " + banco +
                    " aparece depositado en " + otro + ". Verifica el banco de destino." + ref,
             fuente: "Diario Caja General / Estado de cuenta " + otro
           });
@@ -1258,7 +1247,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           hallazgos.push({
             fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
             concepto:concepto, comprobante:refRaw, motivo:"cheque pendiente por cambiar",
-            texto: "Cheque de B/ " + objetivo.toFixed(2) + " (" + dep.fecha + ") registrado como depósito a " + banco +
+            texto: "Cheque de B/ " + fmt(objetivo) + " (" + dep.fecha + ") registrado como depósito a " + banco +
                    " no aparece en ningún estado de cuenta — probablemente en tránsito (pendiente por cambiar)." + ref,
             fuente: "Diario Caja General / Estados de cuenta"
           });
@@ -1269,7 +1258,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // 4) resto: diferencia real
       hallazgos.push({
         fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
-        texto: banco + " " + dep.fecha + ": B/ " + objetivo.toFixed(2) + " que el reporte/Caja General registró como depósito a " +
+        texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " que el reporte/Caja General registró como depósito a " +
                banco + " (\"" + String(dep.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + banco + "." + ref,
         fuente: "Diario Caja General / Estado de cuenta " + banco
       });
@@ -1289,7 +1278,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         if(ultimoDia && x.fecha===ultimoDia){
           hallazgos.push({ fecha:x.fecha, banco:banco, monto:x.monto, clase:"en_transito",
             concepto:"Cheque (detalle individual)", comprobante:"", motivo:"último día del mes",
-            texto:"Cheque de B/ "+x.monto.toFixed(2)+" ("+x.fecha+", "+banco+") es del último día del mes — queda en tránsito para el mes siguiente.",
+            texto:"Cheque de B/ "+fmt(x.monto)+" ("+x.fecha+", "+banco+") es del último día del mes — queda en tránsito para el mes siguiente.",
             fuente:"Desglose de cheques / Estado de cuenta "+banco });
         } else {
           chs.push({ fecha:x.fecha, monto:x.monto, usado:false });
@@ -1314,7 +1303,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         if(ch.usado) return;
         hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
           concepto:"Cheque (detalle individual)", comprobante:"", motivo:"cheque pendiente por cambiar",
-          texto:"Cheque de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
+          texto:"Cheque de B/ "+fmt(ch.monto)+" ("+ch.fecha+", "+banco+") aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
           fuente:"Desglose de cheques / Estado de cuenta "+banco });
       });
     });
@@ -1362,7 +1351,7 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
       x._chqUsado = true;
       hallazgos.push({ fecha:x.fecha, banco:banco, monto:x.debito, clase:"en_transito",
         concepto:(x.descripcion||"").trim(), comprobante:"", motivo:"último día del mes",
-        texto: banco + " " + x.fecha + ": B/ " + x.debito.toFixed(2) + " (\"" + (x.descripcion||"").trim() +
+        texto: banco + " " + x.fecha + ": B/ " + fmt(x.debito) + " (\"" + (x.descripcion||"").trim() +
                "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el estado de cuenta).",
         fuente: "Diario " + banco + " / Estado de cuenta " + banco });
       return;
@@ -1384,7 +1373,7 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
     c.src._chqUsado = true;
     hallazgos.push({ fecha:c.fecha, banco:banco, monto:c.monto, clase:"en_transito",
       concepto:(c.src.descripcion||"").trim(), comprobante:"", motivo:"cheque pendiente por cambiar",
-      texto: "Cheque de B/ " + c.monto.toFixed(2) + " (" + c.fecha + ", " + banco + ") registrado en el diario aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
+      texto: "Cheque de B/ " + fmt(c.monto) + " (" + c.fecha + ", " + banco + ") registrado en el diario aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
       fuente: "Diario " + banco + " / Estado de cuenta " + banco });
   });
 }
@@ -1422,9 +1411,9 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       var finDeMes = ultimoDia && diasAlCierre <= lag;
       var motivo = finDeMes ? (f.fecha===ultimoDia ? "último día del mes" : "depósito de fin de mes") : "pendiente por compensar en banco";
       var texto = finDeMes
-        ? cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+        ? cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (\"" + desc +
           "\") es un depósito de los últimos días del mes que aún no compensa en el estado — queda en tránsito para el mes siguiente."
-        : cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+        : cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (\"" + desc +
           "\") está registrado en el diario/informe pero aún no aparece en el estado de cuenta — pendiente por compensar en banco.";
       hallazgos.push({
         fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
@@ -1439,7 +1428,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       if(esBrinks(desc)){
         hallazgos.push({
           fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"efectivo",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " es un depósito en efectivo (Brinks: \"" + desc +
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " es un depósito en efectivo (Brinks: \"" + desc +
                  "\") — corresponde al efectivo del reporte de cajeras, no es diferencia.",
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Reporte (efectivo brinks)"
         });
@@ -1450,7 +1439,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
         hallazgos.push({
           fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
           concepto:desc, comprobante:"", motivo:"compensación del mes anterior (confirmar)",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " (\"" + desc +
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (\"" + desc +
                  "\") aparece el primer día del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo).",
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
         });
@@ -1458,7 +1447,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       }
       hallazgos.push({
         fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"diff",
-        texto: cfg.nombre + " " + f.fecha + ": B/ " + f.monto.toFixed(2) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
+        texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
         fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
       });
     });
@@ -1486,8 +1475,8 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
     else {
       hallazgos.push({
         fecha:d.fecha, banco:"STG", monto:d.neto,
-        texto:"VISA " + d.fecha + ": venta bruta B/ " + d.bruto.toFixed(2) + " menos retenciones B/ " + Math.abs(d.retenciones).toFixed(2) +
-              " = neto esperado B/ " + d.neto.toFixed(2) + " sin depósito 'Remisión V/Mc' correspondiente en el estado de cuenta STG",
+        texto:"VISA " + d.fecha + ": venta bruta B/ " + fmt(d.bruto) + " menos retenciones B/ " + fmt(Math.abs(d.retenciones)) +
+              " = neto esperado B/ " + fmt(d.neto) + " sin depósito 'Remisión V/Mc' correspondiente en el estado de cuenta STG",
         fuente:"Informe de retenciones VISA STG / Estado de cuenta STG"
       });
     }
@@ -1824,7 +1813,7 @@ function destinoRet(txt){
 }
 // Separa "TEXTO monto" → {texto, monto} (monto 0 si la línea no termina en número).
 function partirMontoRet(s){
-  var m = String(s).match(/^(.*?)\s*(-?[\d]+[.,]\d{2})\s*$/);
+  var m = String(s).match(/^(.*?)[\s:.\-]*(-?[\d]+[.,]\d{2})\s*$/);
   // El guion en el detalle es solo cómo se digitó, NO un signo negativo: el signo real lo da la columna
   // Débito/Crédito del movimiento. Las sub-líneas son siempre magnitudes → valor absoluto.
   return m ? {texto:m[1].trim(), monto:Math.abs(money(m[2]))} : {texto:String(s).trim(), monto:0};
@@ -1832,7 +1821,9 @@ function partirMontoRet(s){
 // Como partirMontoRet pero el monto puede estar en el MEDIO: "AMABELIS 7.00 CASA FUN VIDA" →
 // {texto:"AMABELIS", monto:7.00, hint:"CASA FUN VIDA"} (el hint es el acreedor específico de la línea).
 function partirLineaRet(s){
-  var m = String(s).match(/^(.*?)\s+(-?[\d]+[.,]\d{2})\b(.*)$/);
+  // El separador entre el nombre y el monto varía: espacio, ":" pegado al número ("YENIFER MUÑOZ :20.00"),
+  // ": " o "-". Si solo se aceptara el espacio, esas líneas devolverían monto 0 y el detalle no cuadraría.
+  var m = String(s).match(/^(.*?)[\s:]+(-?[\d]+[.,]\d{2})\b(.*)$/);
   // El guion es solo cómo se digitó, no un negativo (ej. "Aracellys -85.67" = 85.67); el signo real lo
   // da la columna Débito/Crédito del movimiento. Se toma el valor absoluto.
   return m ? {texto:m[1].trim(), monto:Math.abs(money(m[2])), hint:m[3].trim()} : {texto:String(s).trim(), monto:0, hint:""};
@@ -1859,6 +1850,16 @@ function esConceptoLiderRet(texto){
 var ALIAS_EMPLEADO_RET = {
   "OMAIRA VILLARREAL": "ESTHER VILLARREAL"
 };
+// Destino "de cabecera" de un asiento: el concepto que aplica a las líneas de empleado que no lo indican.
+// Puede venir (a) de la descripción, (b) de una línea suelta sin monto ("DESCUENTO DE BANCOS"), o
+// (c) de una línea de concepto que YA trae importe y empleado ("DESC DE SON IMPORT AMABELIS: 10.00") —
+// sin este último caso, las demás líneas del asiento se quedaban sin destino y el detalle no cuadraba.
+function headerDestinoRet(m){
+  var h=destinoRet(m.desc);
+  if(!h) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) h=destinoRet(s); });
+  if(!h) m.subs.forEach(function(s){ var p=partirLineaRet(s); if(!h && esConceptoLiderRet(p.texto)) h=destinoRet(p.texto); });
+  return h;
+}
 function empleadoRet(texto){
   var t = normTxt(partirLineaRet(texto).texto);
   t = t.replace(/^(DESCUENTO|DESC\.?)( DE)?\s+/,"").replace(/^(SON IMPORT|BANCOS?|AHORRO( NAVIDENO)?|REFRESQUERIA|COOPERATIVA|PRESTAMO|SON)\s+/,"");
@@ -1947,8 +1948,7 @@ function clasificarCreditoRet(m, mapa){
   var sum=subt.reduce(function(a,x){return a+x.v;},0);
   if(subt.length && Math.abs(sum-m.cred)<=0.02) return subt;
   // 2) por LÍNEA de empleado: el acreedor de la línea (hint) o el aprendido prevalece sobre el concepto del lote.
-  var header=destinoRet(m.desc);
-  if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
+  var header=headerDestinoRet(m);
   var pz=[], se=0;
   m.subs.forEach(function(s){ var p=partirLineaRet(s);
     if(p.monto>0 && !(destinoRet(p.texto)&&esSoloConceptoRet(p.texto))){
@@ -1984,7 +1984,7 @@ function netearRetenciones(movs, saldoIniDet){
   // descuento (que quedó en su destino real), y sale como falso "pago sin descuento".
   var empRetDest={}, empRetDestAny={};
   movs.forEach(function(m){ if(m.cred<=0) return;
-    var hdr=destinoRet(m.desc); if(!hdr) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) hdr=destinoRet(s); });
+    var hdr=headerDestinoRet(m);
     m.subs.forEach(function(s){ var p=partirLineaRet(s);
       if(p.monto>0 && !(destinoRet(p.texto)&&esConceptoLiderRet(p.texto))){
         var emp=empleadoRet(s); if(!emp) return;
@@ -2010,20 +2010,31 @@ function netearRetenciones(movs, saldoIniDet){
     cls.forEach(function(x){ ensure(x.d); porDestino[x.d].desc+=x.v; totalDesc+=x.v; });
     // Detalle por empleado, reconciliado contra 'cls' por destino (el detalle debe sumar EXACTO lo clasificado).
     var clsByD={}; cls.forEach(function(x){ clsByD[x.d]=(clsByD[x.d]||0)+x.v; });
-    var header=destinoRet(m.desc); if(!header) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) header=destinoRet(s); });
-    var empByD={};
-    m.subs.forEach(function(s){ var p=partirLineaRet(s);
-      if(p.monto>0 && !(destinoRet(p.texto)&&esConceptoLiderRet(p.texto))){
+    var header=headerDestinoRet(m);
+    // Una línea que EMPIEZA con un concepto es normalmente un sub-total ("REFRESQUERIA 2.00"), pero a veces
+    // el concepto y el empleado van juntos ("DESC DE SON IMPORT AMABELIS: 10.00"). Descartarla siempre
+    // perdería ese importe y el detalle no cuadraría. Se arman las piezas de las DOS maneras y se elige la
+    // que reconcilie con lo clasificado; si ambas reconcilian gana la estricta (la de siempre).
+    function piezasDe(incluirConceptoLider){
+      var r={};
+      m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto<=0) return;
+        if(destinoRet(p.texto) && esConceptoLiderRet(p.texto)){
+          if(!incluirConceptoLider) return;
+          if(esSoloConceptoRet(p.texto)) return; // puro concepto: no nombra a nadie, es sub-total de verdad
+        }
         var emp=empleadoRet(s);
         var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||header;
-        if(dl){ (empByD[dl]=empByD[dl]||[]).push({emp:(emp?nc(emp):"(sin detalle)"), monto:p.monto}); }
-      }
-    });
+        if(dl){ (r[dl]=r[dl]||[]).push({emp:(emp?nc(emp):"(sin detalle)"), monto:p.monto}); }
+      });
+      return r;
+    }
+    var empByD=piezasDe(false), empByDAmplio=piezasDe(true);
     var e2=(m.fuente.indexOf("AP-PAY")!==-1)?normTxt(m.acr||m.desc.split(" - ")[0]):"";
     var empAP=(e2 && destinoRet(e2)===null)?nc(e2):"(sin detalle)";
     Object.keys(clsByD).forEach(function(d){
-      var piezas=empByD[d]||[]; var sum=piezas.reduce(function(s,p){return s+p.monto;},0);
-      if(piezas.length && Math.abs(sum-clsByD[d])<=0.02){
+      function cuadra(pz){ if(!pz || !pz.length) return false; var s=pz.reduce(function(a,b){return a+b.monto;},0); return Math.abs(s-clsByD[d])<=0.02; }
+      var piezas = cuadra(empByD[d]) ? empByD[d] : (cuadra(empByDAmplio[d]) ? empByDAmplio[d] : null);
+      if(piezas){
         piezas.forEach(function(p){ ded[d].push({fecha:m.fecha, mes:mesC, emp:p.emp, monto:p.monto, ref:m.ref||""}); });
       } else {
         ded[d].push({fecha:m.fecha, mes:mesC, emp:empAP, monto:clsByD[d], ref:m.ref||""});
@@ -2201,15 +2212,15 @@ function netearRetenciones(movs, saldoIniDet){
     evPush(k,{fecha:x.fecha||"",t:"R",monto:x.monto}); }); });
   Object.keys(pag).forEach(function(d){ pag[d].forEach(function(x){ var k=d===BANCO?subDePago(x):d;
     evPush(k,{fecha:x.fecha||"",t:"P",monto:x.monto,ref:x.acr}); }); });
-  var adelantos=[], sobrepagos=[];
+  // Solo interesa el SOBREPAGO NETO REAL: incluyendo el saldo inicial, la cuenta terminó pagada de más.
+  // (El reporte de "pagos adelantados" se quitó: pagar antes de registrar la retención no es un hallazgo
+  // accionable mientras la cuenta cuadre al final del período.)
+  var sobrepagos=[];
   Object.keys(subEv).forEach(function(k){
-    var arr=subEv[k].slice().sort(function(a,b){ if((a.fecha||"")!==(b.fecha||"")) return (a.fecha||"")<(b.fecha||"")?-1:1; return a.t>b.t?-1:1; }); // R antes que P el mismo día
-    var balP=0, sumR=0, sumP=0, adel=[];
-    arr.forEach(function(e){ if(e.t==="R"){ balP+=e.monto; sumR+=e.monto; } else { balP-=e.monto; sumP+=e.monto; if(balP<-0.01) adel.push({fecha:e.fecha, montoPago:e.monto, exceso:Math.round(-balP*100)/100, ref:e.ref}); } });
+    var sumR=0, sumP=0;
+    subEv[k].forEach(function(e){ if(e.t==="R") sumR+=e.monto; else sumP+=e.monto; });
     var op=openSub[k]||0; var finalReal=Math.round((op+sumR-sumP)*100)/100;
-    var emps=Object.keys(subEmp[k]||{}).join(", ");
-    if(finalReal<-0.01){ sobrepagos.push({acreedor:k, empleado:emps, monto:Math.round(-finalReal*100)/100, opening:op}); }
-    else if(adel.length){ adelantos.push({acreedor:k, empleado:emps, opening:op, eventos:adel}); }
+    if(finalReal<-0.01) sobrepagos.push({acreedor:k, empleado:Object.keys(subEmp[k]||{}).join(", "), monto:Math.round(-finalReal*100)/100, opening:op});
   });
   // ---- Retenciones SALTADAS: una retención vieja quedó sin pagar mientras se pagaron períodos POSTERIORES ----
   // El neteo por saldo corrido (FIFO) las esconde porque un adelanto anterior tapa el hueco. Se matchea por el
@@ -2226,7 +2237,7 @@ function netearRetenciones(movs, saldoIniDet){
     if(m.deb>0){ if(destinoRet(m.acr||m.desc)!==BANCO) return; var kp=bancoDe(m.acr);
       (pagB[kp]=pagB[kp]||[]).push({fecha:m.fecha||"", monto:m.deb, ref:m.ref, per:periodoPago(m)}); return; }
     if(m.cred<=0) return;
-    var hdr=destinoRet(m.desc); if(!hdr) m.subs.forEach(function(s){ if(partirLineaRet(s).monto===0 && destinoRet(s)) hdr=destinoRet(s); });
+    var hdr=headerDestinoRet(m);
     m.subs.forEach(function(s){ var p=partirLineaRet(s); if(p.monto<=0) return; if(destinoRet(p.texto)&&esConceptoLiderRet(p.texto)) return;
       var emp=empleadoRet(s); var dl=destinoRet(p.hint)||mapa[emp+"|"+p.monto.toFixed(2)]||destinoRet(p.texto)||hdr; if(dl!==BANCO) return;
       var kr=subDeEmp(nc(emp))||"Banco / Préstamo (sin banco)";
@@ -2253,7 +2264,7 @@ function netearRetenciones(movs, saldoIniDet){
       if(pagadosPers.some(function(pp){ return pp>per; })){ var P=pers[per]; saltadas.push({acreedor:k, empleado:P.lines.map(function(l){return l.emp;}).filter(Boolean).join(", "), fecha:P.fecha, periodo:per, monto:Math.round(P.pend*100)/100, ref:P.lines[0]?P.lines[0].ref:""}); }
     });
   });
-  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, adelantos:adelantos, sobrepagos:sobrepagos, saltadas:saltadas,
+  return { porDestino:porDestino, detalle:detalle, aging:aging, totalDesc:totalDesc, totalPago:totalPago, totalSaldoIni:totalSaldoIni, sinClasificar:sinClasificar, sobrepagos:sobrepagos, saltadas:saltadas,
     // Movimientos ya clasificados por destino — el libro mayor los reusa para que sus cifras coincidan
     // exactamente con el resumen (ded incluye los fallbacks del clasificador; empBanco mapea banco↔empleado).
     ded:ded, pag:pag, empBanco:empBanco, sinDetalle:sinDetalle, aplicaciones:aplicaciones };
@@ -2328,7 +2339,7 @@ function saldoIniDetalleMod2Html(){
   if(!det.length) filas='<tr><td colspan="4" class="sidet-vacio">Sin detalle todavía. Agregá filas o subí un Excel (columnas: Fecha, Concepto, Monto).</td></tr>';
   return '<div class="cierre-caja sidet-panel">' +
     '<div class="cierre-title">Paso 0 — Detalle del saldo inicial (deuda anterior)</div>' +
-    '<p class="cg-note">Saldo anterior a este período: <b>B/ '+objetivo.toFixed(2)+'</b> (saldo inicial '+saldoIni.toFixed(2)+'). Es la retención adeudada de antes del primer movimiento del archivo — ingresá de qué se compone (acreedor/empleado + monto), a mano o por Excel.</p>' +
+    '<p class="cg-note">Saldo anterior a este período: <b>B/ '+fmt(objetivo)+'</b> (saldo inicial '+fmt(saldoIni)+'). Es la retención adeudada de antes del primer movimiento del archivo — ingresá de qué se compone (acreedor/empleado + monto), a mano o por Excel.</p>' +
     '<table class="ret-tabla sidet-tabla"><thead><tr><th style="width:140px">Fecha</th><th>Acreedor / empleado / concepto</th><th style="width:120px">Monto</th><th style="width:34px"></th></tr></thead><tbody>'+filas+'</tbody></table>' +
     '<div class="sidet-bar">' +
       '<button id="sidet2Add" class="btn-export">＋ Agregar fila</button>' +
@@ -2336,9 +2347,9 @@ function saldoIniDetalleMod2Html(){
       (det.length? '<button id="sidet2Clear" class="btn-export">Limpiar</button>':'') +
     '</div>' +
     '<div class="cg-box" style="margin-top:12px;background:#fff">' +
-      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidet2Total">B/ '+total.toFixed(2)+'</b></div>' +
+      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidet2Total">B/ '+fmt(total)+'</b></div>' +
       '<div class="cg-row cg-dif"><span id="sidet2DifLbl">'+(ok?'✓ Cuadra con el saldo anterior':'Diferencia vs saldo anterior')+'</span>' +
-        '<b id="sidet2Dif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+dif.toFixed(2))+'</b></div>' +
+        '<b id="sidet2Dif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+fmt(dif))+'</b></div>' +
     '</div>' +
   '</div>';
 }
@@ -2347,8 +2358,8 @@ function actualizarTotalSaldoIniMod2(){
   var objetivo=Math.round(Math.abs(saldoIni)*100)/100;
   var total=sumaSaldoIniDetalleMod2();
   var dif=Math.round((total-objetivo)*100)/100; var ok=Math.abs(dif)<0.01;
-  var t=document.getElementById("sidet2Total"); if(t)t.textContent="B/ "+total.toFixed(2);
-  var d=document.getElementById("sidet2Dif"); if(d){ d.textContent=ok?"✓":"B/ "+dif.toFixed(2); d.style.color=ok?"var(--ok)":"#B54B4B"; }
+  var t=document.getElementById("sidet2Total"); if(t)t.textContent="B/ "+fmt(total);
+  var d=document.getElementById("sidet2Dif"); if(d){ d.textContent=ok?"✓":"B/ "+fmt(dif); d.style.color=ok?"var(--ok)":"#B54B4B"; }
   var l=document.getElementById("sidet2DifLbl"); if(l)l.textContent=ok?'✓ Cuadra con el saldo anterior':'Diferencia vs saldo anterior';
 }
 function bindSaldoIniDetalleMod2(){
@@ -2460,13 +2471,13 @@ function sinDetalleHtml(net){
   var h='<div class="sd-panel"><div class="sd-head">' +
     '<div class="sd-title">⛔ Falta el detalle por empleado en '+sd.length+' comprobante(s) — corregilos antes de usar el reporte</div>' +
     '<button class="sd-copy" id="sdCopy">📋 Copiar lista</button></div>' +
-    '<p class="sd-impacto"><b>B/ '+total.toFixed(2)+'</b> no se pueden imputar a una persona. Mientras no se corrijan: los pagos de esos acreedores se aplican al bulto, el pendiente por empleado sale incompleto y ese monto aparece como <b>«(sin detalle)»</b> en el resto del reporte.</p>';
+    '<p class="sd-impacto"><b>B/ '+fmt(total)+'</b> no se pueden imputar a una persona. Mientras no se corrijan: los pagos de esos acreedores se aplican al bulto, el pendiente por empleado sale incompleto y ese monto aparece como <b>«(sin detalle)»</b> en el resto del reporte.</p>';
   h+='<ol class="sd-lista">';
   sd.forEach(function(s){
-    h+='<li class="sd-item"><div class="sd-comp"><b>'+s.ref+'</b> · '+fechaCorta(s.fecha)+' · '+s.destino+' · <b>B/ '+s.monto.toFixed(2)+'</b></div>';
+    h+='<li class="sd-item"><div class="sd-comp"><b>'+s.ref+'</b> · '+fechaCorta(s.fecha)+' · '+s.destino+' · <b>B/ '+fmt(s.monto)+'</b></div>';
     if(s.sugerencia){
       h+='<div class="sd-sug"><span class="sd-sug-lbl">Desglose probable</span> — mismo monto que <b>'+s.sugerencia.ref+'</b> ('+fechaCorta(s.sugerencia.fecha)+'):<div class="sd-sug-lineas">';
-      s.sugerencia.lineas.forEach(function(l){ h+='<span class="sd-chip">'+l.emp+' <b>'+l.monto.toFixed(2)+'</b></span>'; });
+      s.sugerencia.lineas.forEach(function(l){ h+='<span class="sd-chip">'+l.emp+' <b>'+fmt(l.monto)+'</b></span>'; });
       h+='</div><div class="sd-aviso">Es una estimación por coincidencia de monto — cotejala con el comprobante físico antes de digitarla.</div></div>';
     } else {
       h+='<div class="sd-sin">✗ Ningún otro comprobante de este acreedor suma lo mismo, así que no se puede estimar el desglose. <b>Pedir el detalle real</b> a quien lo digitó.</div>';
@@ -2481,11 +2492,11 @@ function sinDetalleHtml(net){
 function sinDetalleTexto(net){
   var sd=net.sinDetalle||[]; var t="COMPROBANTES QUE NECESITAN DETALLE POR EMPLEADO\n";
   t+="Cuenta [2.3.1.4] Retención a empleados por pagar\n";
-  t+=sd.length+" comprobante(s) · B/ "+sd.reduce(function(a,b){return a+b.monto;},0).toFixed(2)+"\n\n";
+  t+=sd.length+" comprobante(s) · B/ "+fmt(sd.reduce(function(a,b){return a+b.monto;},0))+"\n\n";
   sd.forEach(function(s,i){
-    t+=(i+1)+") "+s.ref+" · "+fechaCorta(s.fecha)+" · "+s.destino+" · B/ "+s.monto.toFixed(2)+"\n";
+    t+=(i+1)+") "+s.ref+" · "+fechaCorta(s.fecha)+" · "+s.destino+" · B/ "+fmt(s.monto)+"\n";
     if(s.sugerencia){ t+="   Desglose probable (igual a "+s.sugerencia.ref+" del "+fechaCorta(s.sugerencia.fecha)+"):\n";
-      s.sugerencia.lineas.forEach(function(l){ t+="     - "+l.emp+": "+l.monto.toFixed(2)+"\n"; });
+      s.sugerencia.lineas.forEach(function(l){ t+="     - "+l.emp+": "+fmt(l.monto)+"\n"; });
       t+="   (estimado por monto — verificar contra el comprobante)\n";
     } else t+="   Sin desglose estimable: se necesita el detalle real.\n";
     t+="\n";
@@ -2504,64 +2515,20 @@ function bindSinDetalle(net){
 // Préstamo" por banco/empleado, así se ve cuándo un pago superó la retención (ej. Yennifer/St. Georges).
 function sobrepagosHtml(net){
   var sp=(net.sobrepagos||[]).slice().sort(function(a,b){return b.monto-a.monto;});
-  var ad=(net.adelantos||[]).slice().sort(function(a,b){return b.eventos.length-a.eventos.length;});
   var sk=(net.saltadas||[]).slice().sort(function(a,b){return (a.periodo||"")<(b.periodo||"")?-1:1;});
-  if(!sp.length && !ad.length && !sk.length) return "";
+  if(!sp.length && !sk.length) return "";
   var h="";
   if(sk.length){
     h+='<div class="sp-panel sp-alert"><div class="sp-title">✗ Retenciones saltadas — quedaron sin pagar mientras se pagaron quincenas POSTERIORES de la misma cuenta</div><table class="sp-tabla"><tbody>';
-    sk.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td>'+quincenaLabel(s.periodo)+'</td><td>'+(s.ref||'')+'</td><td class="sp-monto">B/ '+s.monto.toFixed(2)+'</td></tr>'; });
+    sk.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td>'+quincenaLabel(s.periodo)+'</td><td>'+(s.ref||'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+'</td></tr>'; });
     h+='</tbody></table></div>';
   }
   if(sp.length){
     h+='<div class="sp-panel sp-alert"><div class="sp-title">⚠ Sobrepagos detectados — se pagó MÁS de lo retenido (contando el saldo inicial del Paso 0)</div><table class="sp-tabla"><tbody>';
-    sp.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td class="sp-monto">B/ '+s.monto.toFixed(2)+' de más</td></tr>'; });
+    sp.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+' de más</td></tr>'; });
     h+='</tbody></table></div>';
   }
-  if(ad.length){
-    // Cada acreedor es un bloque desplegable; qué bloques quedan abiertos se recuerda entre sesiones.
-    var abiertos=adelAbiertos();
-    var nAbiertos=ad.filter(function(a){ return abiertos[adelKey(a)]!==false; }).length;
-    h+='<div class="sp-panel sp-info"><div class="sp-title">⏩ Pagos adelantados — se pagó antes de registrar la retención, pero la cuenta cuadra en el período (informativo)' +
-      '<button class="adel-todos" id="adelTodos" data-abrir="'+(nAbiertos<ad.length?"1":"0")+'">'+(nAbiertos<ad.length?"Desplegar todo":"Plegar todo")+'</button></div>';
-    ad.forEach(function(a){
-      var k=adelKey(a), ab=abiertos[k]!==false, total=a.eventos.reduce(function(s,e){ return s+e.exceso; },0);
-      h+='<div class="adel-bloque">' +
-        '<button class="adel-acr'+(ab?' abierto':'')+'" data-k="'+String(k).replace(/"/g,"&quot;")+'">' +
-        '<span class="adel-caret">'+(ab?'▾':'▸')+'</span>' +
-        '<b>'+a.acreedor+'</b>'+(a.empleado?' <span class="sp-emp">'+a.empleado+'</span>':'') +
-        ' — '+a.eventos.length+' pago(s) adelantado(s)'+(a.opening>0.01?' · saldo inicial B/ '+a.opening.toFixed(2):'') +
-        '<span class="adel-total">B/ '+total.toFixed(2)+'</span></button>';
-      // Las filas se emiten siempre y se ocultan por CSS: así la impresión incluye el detalle completo
-      // aunque el bloque esté plegado en pantalla.
-      h+='<table class="sp-tabla adel-eventos'+(ab?'':' adel-oculto')+'"><tbody>';
-      a.eventos.forEach(function(e){ h+='<tr><td>'+(e.fecha||'')+'</td><td>pago B/ '+e.montoPago.toFixed(2)+'</td><td class="sp-exc">adelantado B/ '+e.exceso.toFixed(2)+'</td></tr>'; });
-      h+='</tbody></table></div>';
-    });
-    h+='</div>';
-  }
   return h;
-}
-// Clave estable de un acreedor del reporte de adelantos (para recordar si su bloque queda desplegado).
-function adelKey(a){ return (a.acreedor||"")+"|"+(a.empleado||""); }
-// Mapa clave→abierto. Por defecto TODOS abiertos (solo se guarda lo que el usuario pliega o despliega).
-function adelAbiertos(){
-  if(!STATE.mod2.adelAbiertos) STATE.mod2.adelAbiertos=leerPrefs().adelAbiertos||{};
-  return STATE.mod2.adelAbiertos;
-}
-function fijarAdelAbierto(k, abierto){
-  var m=adelAbiertos(); m[k]=abierto; guardarPref("adelAbiertos", m); renderResultadosMod2();
-}
-function bindAdelantos(net){
-  document.querySelectorAll(".adel-acr").forEach(function(b){
-    b.onclick=function(){ var k=b.getAttribute("data-k"); fijarAdelAbierto(k, adelAbiertos()[k]===false); };
-  });
-  var todos=document.getElementById("adelTodos");
-  if(todos) todos.onclick=function(){
-    var abrir=todos.getAttribute("data-abrir")==="1", m=adelAbiertos();
-    (net.adelantos||[]).forEach(function(a){ m[adelKey(a)]=abrir; });
-    guardarPref("adelAbiertos", m); renderResultadosMod2();
-  };
 }
 // Panel del libro mayor: buscador + tabla cronológica del sujeto consultado.
 function libroMayorHtml(movs, net){
@@ -2590,15 +2557,15 @@ function libroMayorHtml(movs, net){
   L.filas.forEach(function(f){
     h+='<tr class="'+(f.monto>0?'lm-ret':'lm-pago')+'"><td>'+(f.fecha||"")+'</td><td>'+f.tipo+'</td>' +
       '<td>'+String(f.concepto||"").slice(0,38)+'</td><td>'+f.destino+'</td><td class="lm-ref">'+(f.ref||"")+'</td>' +
-      '<td class="lm-monto '+(f.monto>0?'pend-pos':'pend-neg')+'">'+(f.monto>0?"+":"")+f.monto.toFixed(2)+'</td>' +
-      '<td class="lm-saldo">'+f.saldo.toFixed(2)+'</td></tr>';
+      '<td class="lm-monto '+(f.monto>0?'pend-pos':'pend-neg')+'">'+(f.monto>0?"+":"")+fmt(f.monto)+'</td>' +
+      '<td class="lm-saldo">'+fmt(f.saldo)+'</td></tr>';
   });
   h+='</tbody></table></div>';
   var sufDest = L.destino? ' — '+L.destino : '';
-  h+='<div class="lm-tot"><div class="lm-tot-row"><span>Total retenido'+sufDest+'</span><b class="pend-pos">+'+L.totalRet.toFixed(2)+'</b></div>' +
-    '<div class="lm-tot-row"><span>Total pagado'+sufDest+'</span><b class="pend-neg">-'+L.totalPago.toFixed(2)+'</b></div>' +
+  h+='<div class="lm-tot"><div class="lm-tot-row"><span>Total retenido'+sufDest+'</span><b class="pend-pos">+'+fmt(L.totalRet)+'</b></div>' +
+    '<div class="lm-tot-row"><span>Total pagado'+sufDest+'</span><b class="pend-neg">-'+fmt(L.totalPago)+'</b></div>' +
     '<div class="lm-tot-row lm-tot-final"><span>Saldo '+(L.saldo>0.01?'pendiente por pagar':(L.saldo<-0.01?'a favor (pagado de más)':'— cuadra en cero'))+sufDest+'</span>' +
-    '<b class="'+(L.saldo>0.01?'pend-pos':(L.saldo<-0.01?'pend-neg':''))+'">B/ '+L.saldo.toFixed(2)+'</b></div></div>';
+    '<b class="'+(L.saldo>0.01?'pend-pos':(L.saldo<-0.01?'pend-neg':''))+'">B/ '+fmt(L.saldo)+'</b></div></div>';
   return h+'</div>';
 }
 function bindLibroMayor(movs){
@@ -2634,12 +2601,12 @@ function renderResultadosMod2(){
     '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
   html+=sinDetalleHtml(net); // va primero: condiciona la lectura de todo lo demás
   html+='<div class="summary-bar">' +
-    '<span class="chip">Descontado: B/ '+net.totalDesc.toFixed(2)+'</span>' +
-    (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+totalSaldoIni.toFixed(2)+'</span>' : '') +
-    '<span class="chip">Pagado: B/ '+net.totalPago.toFixed(2)+'</span>' +
-    '<span class="chip">Pendiente del período: B/ '+pendPeriodo.toFixed(2)+'</span>' +
-    (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior sin desglosar: B/ '+deudaVieja.toFixed(2)+'</span>' : '') +
-    '<span class="chip alert">Pendiente total: B/ '+pendTotal.toFixed(2)+'</span></div>';
+    '<span class="chip">Descontado: B/ '+fmt(net.totalDesc)+'</span>' +
+    (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+fmt(totalSaldoIni)+'</span>' : '') +
+    '<span class="chip">Pagado: B/ '+fmt(net.totalPago)+'</span>' +
+    '<span class="chip">Pendiente del período: B/ '+fmt(pendPeriodo)+'</span>' +
+    (deudaVieja>0.01 ? '<span class="chip warn">+ saldo anterior sin desglosar: B/ '+fmt(deudaVieja)+'</span>' : '') +
+    '<span class="chip alert">Pendiente total: B/ '+fmt(pendTotal)+'</span></div>';
   html+=sobrepagosHtml(net);
   html+=libroMayorHtml(R.parsed.movs, net);
   html+='<div class="step-block"><div class="step-body">';
@@ -2648,9 +2615,9 @@ function renderResultadosMod2(){
   function mesViejo(d){ var ag=net.aging[d]||{}; var ks=Object.keys(ag).filter(function(k){return k!=="?";}).sort(); return ks.length? ks[0] : "9999"; }
   var destinos=Object.keys(pd).sort(function(a,b){ var ma=mesViejo(a), mb=mesViejo(b); if(ma!==mb) return ma<mb?-1:1; return a<b?-1:1; });
   destinos.forEach(function(d){ var x=pd[d]; var si=x.saldoIni||0; var p=x.desc+si-x.pago;
-    html+='<tr class="ret-dest"><td>'+d+'</td><td></td><td>B/ '+x.desc.toFixed(2)+(si>0.01?' <span class="ret-siLabel">+ ini '+si.toFixed(2)+'</span>':'')+'</td><td>B/ '+x.pago.toFixed(2)+'</td>' +
-      '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+p.toFixed(2)+'</b></td></tr>';
-    if(si>0.01) html+='<tr class="ret-aging"><td colspan="5">↳ incluye saldo inicial (deuda anterior) B/ '+si.toFixed(2)+' — los pagos lo cubren primero (FIFO); lo que quede aparece abajo como pendiente «Saldo inicial».</td></tr>';
+    html+='<tr class="ret-dest"><td>'+d+'</td><td></td><td>B/ '+fmt(x.desc)+(si>0.01?' <span class="ret-siLabel">+ ini '+fmt(si)+'</span>':'')+'</td><td>B/ '+fmt(x.pago)+'</td>' +
+      '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+fmt(p)+'</b></td></tr>';
+    if(si>0.01) html+='<tr class="ret-aging"><td colspan="5">↳ incluye saldo inicial (deuda anterior) B/ '+fmt(si)+' — los pagos lo cubren primero (FIFO); lo que quede aparece abajo como pendiente «Saldo inicial».</td></tr>';
     // Aging: en qué mes se generó lo pendiente (marca lo viejo).
     var ag=net.aging[d]||{}; var keys=Object.keys(ag).sort();
     if(keys.length){
@@ -2658,7 +2625,7 @@ function renderResultadosMod2(){
       // de pago (M+1) ya quedó atrás respecto al mes más reciente. Así el mes en curso y el anterior
       // (dentro de su ventana normal de pago) NO se marcan como atrasados.
       var partes=keys.map(function(k){ var viejo=mesActual && k!=="?" && mesSiguiente(k)<mesActual;
-        return '<span class="'+(viejo?'ret-viejo':'ret-reciente')+'">'+mesNombre(k)+': B/ '+ag[k].toFixed(2)+(viejo?' ⚠ viejo':'')+'</span>'; });
+        return '<span class="'+(viejo?'ret-viejo':'ret-reciente')+'">'+mesNombre(k)+': B/ '+fmt(ag[k])+(viejo?' ⚠ viejo':'')+'</span>'; });
       html+='<tr class="ret-aging"><td colspan="5">Pendiente generado en → '+partes.join(' &nbsp;·&nbsp; ')+'</td></tr>';
     }
     // Detalle a nivel de MOVIMIENTO: solo descuentos NO pagados (pendientes) y pagos SIN descuento, con fecha.
@@ -2669,9 +2636,9 @@ function renderResultadosMod2(){
     filas.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     filas.forEach(function(f){
       html+='<tr class="ret-emp'+(f.pago!=null?' ret-pagosd':'')+'"><td>'+f.nombre+'</td><td>'+(f.fecha||"")+'</td>' +
-        '<td>'+(f.desc!=null?"B/ "+f.desc.toFixed(2):"—")+'</td>' +
-        '<td>'+(f.pago!=null?"B/ "+f.pago.toFixed(2):"—")+'</td>' +
-        '<td class="'+(f.pend>0.01?'pend-pos':(f.pend<-0.01?'pend-neg':''))+'">B/ '+f.pend.toFixed(2)+'</td></tr>';
+        '<td>'+(f.desc!=null?"B/ "+fmt(f.desc):"—")+'</td>' +
+        '<td>'+(f.pago!=null?"B/ "+fmt(f.pago):"—")+'</td>' +
+        '<td class="'+(f.pend>0.01?'pend-pos':(f.pend<-0.01?'pend-neg':''))+'">B/ '+fmt(f.pend)+'</td></tr>';
     });
     // Destinos que se pagan EN LOTE (un pago cubre a varios empleados): si hay confusión (pagos sin
     // descuento), el sistema no puede atribuirlo por quincena/empleado — se pide el desglose al contador.
@@ -2681,14 +2648,13 @@ function renderResultadosMod2(){
   });
   html+='</tbody></table>';
   if(deudaVieja>0.01){
-    html+='<div class="ret-saldoini">⚠ <b>Saldo anterior sin desglosar: B/ '+deudaVieja.toFixed(2)+'</b> (saldo inicial del archivo '+saldoIni.toFixed(2)+'; ya desglosado en el Paso 0: B/ '+totalSaldoIni.toFixed(2)+'). Esta parte todavía no tiene detalle en el Paso 0, así que no se pudo emparejar con pagos — completá el Paso 0 para que se netee como los demás.</div>';
+    html+='<div class="ret-saldoini">⚠ <b>Saldo anterior sin desglosar: B/ '+fmt(deudaVieja)+'</b> (saldo inicial del archivo '+fmt(saldoIni)+'; ya desglosado en el Paso 0: B/ '+fmt(totalSaldoIni)+'). Esta parte todavía no tiene detalle en el Paso 0, así que no se pudo emparejar con pagos — completá el Paso 0 para que se netee como los demás.</div>';
   }
   html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. Como la retención de un mes se paga el mes SIGUIENTE, lo pendiente del mes en curso y del mes anterior (dentro de su ventana normal de pago) NO se marca como atrasado; solo lleva ⚠ viejo lo que ya debió pagarse (su mes de pago quedó atrás). Los nombres se normalizan (typos/variantes).</p>' +
     '</div></div>';
   area.innerHTML=html;
   document.getElementById("exportBtn2").onclick=exportarRetenciones;
   bindLibroMayor(R.parsed.movs);
-  bindAdelantos(net);
   bindSinDetalle(net);
 }
 function exportarRetenciones(){
@@ -2711,11 +2677,10 @@ function exportarRetenciones(){
   var ws=XLSX.utils.aoa_to_sheet(rows); ws['!cols']=[{wch:22},{wch:26},{wch:12},{wch:12},{wch:12},{wch:12}];
   var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Retenciones pendientes");
   // Hoja 2: saltadas, sobrepagos y pagos adelantados (diagnóstico por acreedor)
-  if((net.saltadas&&net.saltadas.length)||(net.sobrepagos&&net.sobrepagos.length)||(net.adelantos&&net.adelantos.length)){
+  if((net.saltadas&&net.saltadas.length)||(net.sobrepagos&&net.sobrepagos.length)){
     var sr=[["Tipo","Acreedor","Empleado","Fecha / Período","Pago","Monto"]];
     (net.saltadas||[]).forEach(function(s){ sr.push(["RETENCION SALTADA",s.acreedor,s.empleado||"",quincenaLabel(s.periodo)+(s.ref?" ("+s.ref+")":""),"",s.monto.toFixed(2)]); });
     (net.sobrepagos||[]).forEach(function(s){ sr.push(["SOBREPAGO NETO",s.acreedor,s.empleado||"","","",s.monto.toFixed(2)]); });
-    (net.adelantos||[]).forEach(function(a){ a.eventos.forEach(function(e){ sr.push(["Pago adelantado",a.acreedor,a.empleado||"",e.fecha||"",e.montoPago.toFixed(2),e.exceso.toFixed(2)]); }); });
     var ws2=XLSX.utils.aoa_to_sheet(sr); ws2['!cols']=[{wch:18},{wch:24},{wch:22},{wch:30},{wch:12},{wch:14}];
     XLSX.utils.book_append_sheet(wb,ws2,"Hallazgos de pago");
   }
@@ -2919,7 +2884,7 @@ function renderModulo1(){
 }
 
 function saldoCtxHtml(s, pasoKey){
-  function bal(v){ return (v<0?"-":"")+"B/ "+Math.abs(v).toFixed(2); }
+  function bal(v){ return (v<0?"-":"")+"B/ "+fmt(Math.abs(v)); }
   var partes = [];
   if(s.inicial!==null) partes.push('saldo inicial'+(s.fechaInicial?" ("+s.fechaInicial+")":"")+': <b>'+bal(s.inicial)+'</b>');
   if(s.movimiento!==null) partes.push('movimiento del mes: <b>'+bal(s.movimiento)+'</b>');
@@ -2951,7 +2916,7 @@ function renderResultados(){
   function findingHtml(p, item, idx){
     var ckKey = p.key+"_"+idx;
     var checked = STATE.checks[ckKey] ? "checked" : "";
-    var montoTxt = (item.monto<0?"-":"")+"B/ "+Math.abs(item.monto).toFixed(2);
+    var montoTxt = (item.monto<0?"-":"")+"B/ "+fmt(Math.abs(item.monto));
     return '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
       '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
       '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
@@ -2960,7 +2925,7 @@ function renderResultados(){
   // Fila de subtotal (alineada con la columna de montos, con espaciador de la casilla).
   function filaTotal(label, monto){
     return '<div class="finding transito-total" style="border-top:2px solid var(--line)"><span style="width:18px;flex-shrink:0"></span>' +
-      '<div class="ftxt"><b>'+label+'</b></div><div class="famt"><b>B/ '+monto.toFixed(2)+'</b></div></div>';
+      '<div class="ftxt"><b>'+label+'</b></div><div class="famt"><b>B/ '+fmt(monto)+'</b></div></div>';
   }
   // Una partida "en tránsito" es ENTRANTE si es una compensación del mes anterior (aparece el primer día);
   // el resto SALE al próximo mes (fin de mes o cheque pendiente por cambiar).
@@ -2996,13 +2961,13 @@ function renderResultados(){
   if(!cajaLista && tt.count > 0){
     var bancosTxt = Object.keys(tt.porBanco).sort().map(function(b){
       var x = tt.porBanco[b];
-      var detalle = x.otros>0.005 ? " (cheques B/ "+x.cheques.toFixed(2)+" + otros B/ "+x.otros.toFixed(2)+")" : "";
-      return b + ": B/ " + x.total.toFixed(2) + detalle;
+      var detalle = x.otros>0.005 ? " (cheques B/ "+fmt(x.cheques)+" + otros B/ "+fmt(x.otros)+")" : "";
+      return b + ": B/ " + fmt(x.total) + detalle;
     }).join("<br>");
     html += '<div class="cierre-panel"><div class="cierre-txt">' +
       '<div class="cierre-title">📋 Partidas en tránsito</div>' +
-      '<div class="cierre-sub"><strong>Total en tránsito para el próximo mes: B/ '+tt.total.toFixed(2)+'</strong> ('+tt.count+' partida(s))' +
-      '<br>Cheques: B/ '+tt.cheques.toFixed(2)+' · Otros depósitos (tarjeta/fin de mes): B/ '+tt.otros.toFixed(2) +
+      '<div class="cierre-sub"><strong>Total en tránsito para el próximo mes: B/ '+fmt(tt.total)+'</strong> ('+tt.count+' partida(s))' +
+      '<br>Cheques: B/ '+fmt(tt.cheques)+' · Otros depósitos (tarjeta/fin de mes): B/ '+fmt(tt.otros) +
       (bancosTxt ? '<br>'+bancosTxt : '') +
       '<br>Aún quedan diferencias por resolver; el resumen ya está listo (sale del Paso 0 y del Paso 2).</div>' +
       '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
@@ -3049,8 +3014,8 @@ function renderResultados(){
         var totSalen = salen.reduce(function(s,i){ return s + i.monto; }, 0);
         var totEntraron = entraron.reduce(function(s,i){ return s + i.monto; }, 0);
         var head = entraron.length
-          ? 'sale al próximo mes B/ '+totSalen.toFixed(2)+' · entró del mes anterior B/ '+totEntraron.toFixed(2)
-          : 'Total B/ '+totSalen.toFixed(2);
+          ? 'sale al próximo mes B/ '+fmt(totSalen)+' · entró del mes anterior B/ '+fmt(totEntraron)
+          : 'Total B/ '+fmt(totSalen);
         html += '<div class="sinconf-block transito"><div class="sinconf-head">En tránsito ('+enTransito.length+') · '+head +
           '<span class="sinconf-sub">Partidas que aún no compensan (salen al próximo mes) o que compensaron este mes viniendo del anterior. No son diferencias.</span></div>';
         // Grupo 1: sale al próximo mes (fin de mes + cheques pendientes).
@@ -3191,22 +3156,22 @@ function cierreCajaHtml(){
   var dif = Math.round((finalEsp - sistema)*100)/100;
   var ok = Math.abs(dif) < 0.01;
   var filasMetodo = Object.keys(tm.porMetodo).sort().map(function(m){
-    return '<div class="cg-row"><span>'+m+'</span><b>B/ '+tm.porMetodo[m].toFixed(2)+'</b></div>';
+    return '<div class="cg-row"><span>'+m+'</span><b>B/ '+fmt(tm.porMetodo[m])+'</b></div>';
   }).join("");
   var h = '<div class="cierre-caja">' +
     '<div class="cierre-title">🎉 Caja General cuadrada — cierre del período</div>' +
     '<div class="cg-cols">' +
       '<div class="cg-box"><div class="cg-h">En tránsito para el próximo mes · por método de pago</div>' +
         filasMetodo +
-        '<div class="cg-row cg-tot"><span>Movimiento en tránsito</span><b>B/ '+tm.total.toFixed(2)+'</b></div>' +
+        '<div class="cg-row cg-tot"><span>Movimiento en tránsito</span><b>B/ '+fmt(tm.total)+'</b></div>' +
         '<div class="cg-note">'+tm.count+' partida(s). Este es el dinero que la empresa registró y el banco reflejará el mes siguiente.</div>' +
       '</div>' +
       '<div class="cg-box"><div class="cg-h">Balance de Caja General</div>' +
-        '<div class="cg-row"><span>Saldo inicial</span><input id="cajaInicial" class="cg-inp" type="number" step="0.01" value="'+inicial.toFixed(2)+'"></div>' +
-        '<div class="cg-row"><span>+ Movimiento en tránsito</span><input id="cajaMov" class="cg-inp" type="number" step="0.01" value="'+movimiento.toFixed(2)+'"></div>' +
-        '<div class="cg-row cg-tot"><span>= Saldo final esperado</span><b id="cajaFinalEsp">B/ '+finalEsp.toFixed(2)+'</b></div>' +
-        '<div class="cg-row"><span>Saldo final del sistema</span><input id="cajaSistema" class="cg-inp" type="number" step="0.01" value="'+sistema.toFixed(2)+'"></div>' +
-        '<div class="cg-row cg-dif"><span>Diferencia</span><b id="cajaDif" style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+dif.toFixed(2))+'</b></div>' +
+        '<div class="cg-row"><span>Saldo inicial</span><input id="cajaInicial" class="cg-inp" type="number" step="0.01" value="'+fmt(inicial)+'"></div>' +
+        '<div class="cg-row"><span>+ Movimiento en tránsito</span><input id="cajaMov" class="cg-inp" type="number" step="0.01" value="'+fmt(movimiento)+'"></div>' +
+        '<div class="cg-row cg-tot"><span>= Saldo final esperado</span><b id="cajaFinalEsp">B/ '+fmt(finalEsp)+'</b></div>' +
+        '<div class="cg-row"><span>Saldo final del sistema</span><input id="cajaSistema" class="cg-inp" type="number" step="0.01" value="'+fmt(sistema)+'"></div>' +
+        '<div class="cg-row cg-dif"><span>Diferencia</span><b id="cajaDif" style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>' +
       '</div>' +
     '</div>' +
     '<button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button>' +
@@ -3227,9 +3192,9 @@ function bindCajaInputs(){
     var fe = Math.round((ini + mov)*100)/100;
     var dif = Math.round((fe - sis)*100)/100;
     var ok = Math.abs(dif) < 0.01;
-    document.getElementById("cajaFinalEsp").textContent = "B/ " + fe.toFixed(2);
+    document.getElementById("cajaFinalEsp").textContent = "B/ " + fmt(fe);
     var d = document.getElementById("cajaDif");
-    d.textContent = ok ? "✓ Coincide" : "B/ " + dif.toFixed(2);
+    d.textContent = ok ? "✓ Coincide" : "B/ " + fmt(dif);
     d.style.color = ok ? "var(--ok)" : "#B54B4B";
   }
   ci.addEventListener("input", recalc);
@@ -3258,7 +3223,7 @@ function saldoIniDetalleHtml(){
   if(!det.length) filas = '<tr><td colspan="4" class="sidet-vacio">Sin detalle todavía. Agregá filas o subí un Excel (columnas: Fecha, Concepto, Monto).</td></tr>';
   return '<div class="cierre-caja sidet-panel">' +
     '<div class="cierre-title">Paso 0 — Detalle del saldo inicial de Caja General</div>' +
-    '<p class="cg-note">Saldo inicial del sistema: <b>B/ '+s.inicial.toFixed(2)+'</b>'+(s.fechaInicial?' ('+s.fechaInicial+')':'')+'. Es el dinero en tránsito arrastrado del mes anterior — ingresá de qué se compone, a mano o por Excel.</p>' +
+    '<p class="cg-note">Saldo inicial del sistema: <b>B/ '+fmt(s.inicial)+'</b>'+(s.fechaInicial?' ('+s.fechaInicial+')':'')+'. Es el dinero en tránsito arrastrado del mes anterior — ingresá de qué se compone, a mano o por Excel.</p>' +
     '<table class="ret-tabla sidet-tabla"><thead><tr><th style="width:140px">Fecha</th><th>Concepto</th><th style="width:120px">Monto</th><th style="width:34px"></th></tr></thead><tbody>'+filas+'</tbody></table>' +
     '<div class="sidet-bar">' +
       '<button id="sidetAdd" class="btn-export">＋ Agregar fila</button>' +
@@ -3266,9 +3231,9 @@ function saldoIniDetalleHtml(){
       (det.length? '<button id="sidetClear" class="btn-export">Limpiar</button>':'') +
     '</div>' +
     '<div class="cg-box" style="margin-top:12px;background:#fff">' +
-      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidetTotal">B/ '+total.toFixed(2)+'</b></div>' +
+      '<div class="cg-row cg-tot"><span>Total del detalle</span><b id="sidetTotal">B/ '+fmt(total)+'</b></div>' +
       '<div class="cg-row cg-dif"><span id="sidetDifLbl">'+(ok?'✓ Cuadra con el saldo inicial':'Diferencia vs saldo inicial')+'</span>' +
-        '<b id="sidetDif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+dif.toFixed(2))+'</b></div>' +
+        '<b id="sidetDif" style="color:'+(ok?'var(--ok)':'#B54B4B')+'">'+(ok?'✓':'B/ '+fmt(dif))+'</b></div>' +
     '</div>' +
   '</div>';
 }
@@ -3277,8 +3242,8 @@ function actualizarTotalSaldoIni(){
   var total = sumaSaldoIniDetalle();
   var dif = Math.round((total - s.inicial)*100)/100;
   var ok = Math.abs(dif) < 0.01;
-  var t=document.getElementById("sidetTotal"); if(t) t.textContent="B/ "+total.toFixed(2);
-  var d=document.getElementById("sidetDif"); if(d){ d.textContent=ok?"✓":"B/ "+dif.toFixed(2); d.style.color=ok?"var(--ok)":"#B54B4B"; }
+  var t=document.getElementById("sidetTotal"); if(t) t.textContent="B/ "+fmt(total);
+  var d=document.getElementById("sidetDif"); if(d){ d.textContent=ok?"✓":"B/ "+fmt(dif); d.style.color=ok?"var(--ok)":"#B54B4B"; }
   var l=document.getElementById("sidetDifLbl"); if(l) l.textContent=ok?"✓ Cuadra con el saldo inicial":"Diferencia vs saldo inicial";
 }
 function bindSaldoIniDetalle(){
@@ -3417,7 +3382,7 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
       hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
         concepto:ch.concepto, comprobante:ch.comprobante, motivo:"aún pendiente de compensar",
-        texto:etiqueta+" de B/ "+ch.monto.toFixed(2)+" ("+ch.fecha+", "+banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
+        texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fecha+", "+banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
         fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+banco });
     });
   });
