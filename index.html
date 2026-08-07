@@ -74,6 +74,9 @@
     .ret-tabla{width:100% !important;table-layout:fixed}
     .ret-tabla th, .ret-tabla td{white-space:normal !important;word-break:break-word;overflow-wrap:anywhere}
     .cg-cols{grid-template-columns:1fr 1fr !important}
+    /* Los botones de acción no se imprimen; el aviso de cifras incompletas SÍ debe quedar en el papel */
+    .bloq-btn, .bloq-relink, .sd-copy{display:none !important}
+    .sd-panel, .bloq-panel, .bloq-aviso, .sd-item{break-inside:avoid}
   }
 
   /* Menu de modulos */
@@ -274,6 +277,17 @@
   .sd-aviso{margin-top:6px;font-size:11.5px;color:#8A6A2F;font-style:italic}
   .sd-sin{margin-top:6px;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.75);color:#8E2F2F}
   .sd-pie{margin:12px 0 0;font-size:12px;color:#7A3B3B}
+  /* Bloqueo de resultados mientras falten detalles */
+  .bloq-panel{margin:16px 0;padding:22px 24px;border-radius:14px;background:#FBF7F9;border:1px dashed #D8BCC8;text-align:center}
+  .bloq-txt{color:var(--heading);font-size:13.5px;line-height:1.6;max-width:640px;margin:0 auto}
+  .bloq-btn{margin-top:14px;padding:8px 18px;border:1px solid #D8BCC8;border-radius:999px;background:#fff;
+    font:inherit;font-size:12.5px;font-weight:700;color:var(--slate);cursor:pointer}
+  .bloq-btn:hover{background:#F6EDF1;color:var(--heading)}
+  .bloq-aviso{margin:14px 0;padding:10px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;
+    font-size:12.5px;color:#7A5320}
+  .bloq-relink{margin-left:8px;padding:2px 10px;border:1px solid #E4C79B;border-radius:999px;background:#fff;
+    font:inherit;font-size:11.5px;font-weight:700;color:#7A5320;cursor:pointer}
+  .bloq-relink:hover{background:#FDF6E9}
   .sp-panel{margin:14px 0;padding:12px 16px;border-radius:12px;font-size:13px}
   .sp-alert{background:#FBEAEA;border:1px solid #E6B7B7}
   .sp-info{background:#FBF4E7;border:1px solid #EBD8B4}
@@ -350,7 +364,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"" },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"", verIgual:false },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -2295,7 +2309,7 @@ function renderModulo2(){
 }
 // Sube el navegador de retenciones: guarda el archivo, lee el saldo inicial (para el Paso 0) y re-renderiza.
 function subirRetenciones(file){
-  STATE.files.retenciones=file; STATE.mod2.saldoIni=null; renderModulo2();
+  STATE.files.retenciones=file; STATE.mod2.saldoIni=null; STATE.mod2.verIgual=false; renderModulo2();
   readWorkbook(file, function(rows){ try{ STATE.mod2.saldoIni=parseRetenciones(rows).saldoInicial; }catch(e){} renderModulo2(); });
 }
 function ejecutarModulo2(){
@@ -2305,6 +2319,7 @@ function ejecutarModulo2(){
       var parsed=parseRetenciones(rows);
       var net=netearRetenciones(parsed.movs, STATE.mod2.saldoIniDetalle);
       STATE.mod2.result={ parsed:parsed, net:net };
+      STATE.mod2.verIgual=false; // archivo nuevo → el bloqueo vuelve a aplicar
       renderModulo2();
     }catch(err){ if(note) note.textContent="Error: "+err.message; }
   });
@@ -2597,9 +2612,27 @@ function renderResultadosMod2(){
   // lo de meses anteriores es un saldo VIEJO por revisar).
   var meses=[]; Object.keys(net.aging).forEach(function(d){ Object.keys(net.aging[d]).forEach(function(k){ if(k!=="?") meses.push(k); }); });
   var mesActual = meses.length? meses.sort().slice(-1)[0] : null;
+  // BLOQUEO: mientras haya comprobantes sin detalle por empleado, no se muestran los resultados. Cualquier
+  // cifra por persona saldría incompleta y los pagos no se pueden imputar, así que mostrarlas induciría a
+  // error de interpretación. Queda una salida explícita ("Ver de todos modos") para poder inspeccionar sin
+  // dar el reporte por bueno; se reinicia al volver a analizar, para que nunca quede desbloqueado por inercia.
+  var bloqueado = (net.sinDetalle||[]).length>0 && !STATE.mod2.verIgual;
   var html='<div class="results-head"><h2>Retenciones pendientes por pagar</h2>' +
-    '<button class="btn-export" id="exportBtn2">Descargar Excel</button></div>';
+    (bloqueado?'':'<button class="btn-export" id="exportBtn2">Descargar Excel</button>')+'</div>';
   html+=sinDetalleHtml(net); // va primero: condiciona la lectura de todo lo demás
+  if(bloqueado){
+    html+='<div class="bloq-panel">' +
+      '<div class="bloq-txt"><b>Los resultados están bloqueados.</b> Con esos comprobantes sin desglosar, el pendiente por persona sale incompleto y los pagos no se pueden imputar individualmente. Corregilos en el sistema, volvé a exportar el navegador y subilo de nuevo.</div>' +
+      '<button class="bloq-btn" id="verIgualBtn">Ver de todos modos (cifras incompletas)</button>' +
+    '</div>';
+    area.innerHTML=html;
+    bindSinDetalle(net);
+    var vb=document.getElementById("verIgualBtn");
+    if(vb) vb.onclick=function(){ STATE.mod2.verIgual=true; renderResultadosMod2(); };
+    return;
+  }
+  if(STATE.mod2.verIgual && (net.sinDetalle||[]).length)
+    html+='<div class="bloq-aviso">⚠ Estás viendo el reporte con '+net.sinDetalle.length+' comprobante(s) sin detalle: las cifras por persona están incompletas. <button class="bloq-relink" id="volverBloq">Volver a bloquear</button></div>';
   html+='<div class="summary-bar">' +
     '<span class="chip">Descontado: B/ '+fmt(net.totalDesc)+'</span>' +
     (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+fmt(totalSaldoIni)+'</span>' : '') +
@@ -2653,7 +2686,8 @@ function renderResultadosMod2(){
   html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. Como la retención de un mes se paga el mes SIGUIENTE, lo pendiente del mes en curso y del mes anterior (dentro de su ventana normal de pago) NO se marca como atrasado; solo lleva ⚠ viejo lo que ya debió pagarse (su mes de pago quedó atrás). Los nombres se normalizan (typos/variantes).</p>' +
     '</div></div>';
   area.innerHTML=html;
-  document.getElementById("exportBtn2").onclick=exportarRetenciones;
+  var eb=document.getElementById("exportBtn2"); if(eb) eb.onclick=exportarRetenciones;
+  var vlb=document.getElementById("volverBloq"); if(vlb) vlb.onclick=function(){ STATE.mod2.verIgual=false; renderResultadosMod2(); };
   bindLibroMayor(R.parsed.movs);
   bindSinDetalle(net);
 }
