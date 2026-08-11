@@ -7,7 +7,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Mulish:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- SRI: si el CDN llegara a servir un archivo distinto al verificado, el navegador lo rechaza en lugar de
+     ejecutarlo sobre los archivos contables. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+        integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <style>
   :root{
     --ink:#4A3B41;
@@ -259,6 +263,33 @@
   .ret-aging .ret-viejo{color:#B5731E;font-weight:800}
   .ret-saldoini{margin-top:14px;padding:12px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:13px;color:#7A5320;line-height:1.5}
   .ret-siLabel{font-size:11px;font-weight:700;color:#B5731E;background:#FBEFD9;padding:1px 6px;border-radius:6px;margin-left:6px;white-space:nowrap}
+  /* Cuadre contra los totales que declara el archivo */
+  .cu-panel{margin:16px 0;padding:14px 18px;border-radius:12px;font-size:12.5px}
+  .cu-ok{background:#F1F7F3;border:1px solid #CBE0D3}
+  .cu-mal{background:#FBEAEA;border:2px solid #D98A8A}
+  .cu-title{font-weight:800;font-size:14px;margin-bottom:10px}
+  .cu-ok .cu-title{color:#2F5B45}
+  .cu-mal .cu-title{color:#8E2F2F}
+  .cu-tabla{width:100%;border-collapse:collapse}
+  .cu-tabla th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--slate);padding:4px 8px;border-bottom:1px solid rgba(0,0,0,.08)}
+  .cu-tabla th:not(:first-child){text-align:right}
+  .cu-tabla td{padding:5px 8px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
+  .cu-num{text-align:right;white-space:nowrap;font-weight:700}
+  .cu-dif{color:#B54B4B}
+  .cu-fila-mal td{background:rgba(217,138,138,.14)}
+  .cu-det{font-size:11px;color:var(--slate);font-weight:400;margin-top:2px}
+  .cu-dup{margin-top:12px;padding:10px 14px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;color:#7A5320}
+  .cu-dup ul{margin:6px 0 0;padding-left:20px}
+  .cu-nota{margin:10px 0 0;color:#7A3B3B;line-height:1.5}
+  /* Pie de reporte (evidencia para respaldar el papel de trabajo) */
+  .pie-rep{margin:22px 0 0;padding:14px 18px;border-radius:12px;background:#FBF7F9;border:1px solid #EEE1E7;font-size:12px}
+  .pie-fila{display:flex;justify-content:space-between;gap:16px;padding:3px 0;border-bottom:1px dotted #E9DDE3}
+  .pie-fila span{color:var(--slate)}
+  .pie-fila b{color:var(--heading);text-align:right;word-break:break-word}
+  .pie-firmas{display:flex;gap:32px;margin-top:18px}
+  .pie-firmas div{flex:1}
+  .pie-firmas span{display:block;font-size:11px;color:var(--slate);margin-bottom:24px}
+  .pie-firmas i{display:block;border-top:1px solid #C9B3BD}
   /* Alerta condicionante: comprobantes sin detalle por empleado */
   .sd-panel{margin:16px 0;padding:16px 20px;border-radius:14px;background:#FDECEC;border:2px solid #D98A8A;font-size:13px}
   .sd-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between}
@@ -364,7 +395,7 @@ var STATE = {
     estBanistmo:null, estStg:null, estBancoGeneral:null, retVisa:null,
     retenciones:null
   },
-  mod2:{ result:null, saldoIni:null, saldoIniDetalle:[], libroQ:"", libroDest:"", verIgual:false },
+  mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
   parsed:{},
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
@@ -381,6 +412,13 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
+var APP_VERSION="2026.08.04";
+// Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
+// Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
+function esc(s){
+  if(s===null||s===undefined) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
 // Formato de las cifras que se MUESTRAN: separador de miles + 2 decimales (1,000.00). Los cálculos y las
 // claves internas siguen usando el número crudo.
 function fmt(n){
@@ -1947,8 +1985,65 @@ function parseRetenciones(rows){
   // se elimina TODA la transacción (la fila anulada Y su contrapartida original), no solo la marcada.
   var refsAnuladas={};
   movs.forEach(function(m){ if(/ABORTED/i.test(m.desc+" "+m.subs.join(" ")) && m.ref) refsAnuladas[m.ref]=true; });
-  movs = movs.filter(function(m){ return !/ABORTED/i.test(m.desc+" "+m.subs.join(" ")) && !(m.ref && refsAnuladas[m.ref]); });
-  return { saldoInicial:saldoInicial, cuenta:cuenta, movs:movs };
+  var esAnulado=function(m){ return /ABORTED/i.test(m.desc+" "+m.subs.join(" ")) || (m.ref && refsAnuladas[m.ref]); };
+  var anuladas={n:0, deb:0, cred:0, refs:{}};
+  movs.forEach(function(m){ if(esAnulado(m)){ anuladas.n++; anuladas.deb+=m.deb; anuladas.cred+=m.cred; if(m.ref) anuladas.refs[m.ref]=1; } });
+  anuladas.refs=Object.keys(anuladas.refs);
+  movs = movs.filter(function(m){ return !esAnulado(m); });
+  // Totales que el propio navegador declara al pie ("Saldo Total Mostrado", "Balance Final"). Sirven para
+  // verificar que la lectura no perdió filas: es el único control externo disponible sobre el parseo.
+  var decl={debitos:null, creditos:null, balanceFinal:null, fechaFinal:null, periodo:{desde:null,hasta:null}};
+  for(var i=rows.length-1;i>=0 && i>rows.length-12;i--){ var row=rows[i]; if(!row) continue;
+    var txt=String(row.filter(function(x){return x!==null;}).join(" "));
+    if(decl.balanceFinal===null && /BALANCE FINAL/i.test(txt)){
+      var mf=txt.match(/(\d{4}-\d{2}-\d{2})/); if(mf) decl.fechaFinal=mf[1];
+      for(var k=row.length-1;k>=0;k--){ var s=String(row[k]||""); if(/B\//.test(s)){ decl.balanceFinal=money(s)*(/-\s*B\//.test(s)?-1:1); break; } }
+    }
+    if(decl.debitos===null && /SALDO TOTAL MOSTRADO/i.test(txt)){
+      var nums=row.filter(function(x){ return x!==null && /B\//.test(String(x)); }).map(function(x){ return money(x); });
+      if(nums.length>=2){ decl.debitos=nums[0]; decl.creditos=nums[1]; }
+    }
+  }
+  var fechas=movs.map(function(m){ return m.fecha; }).filter(Boolean).sort();
+  decl.periodo.desde=fechas[0]||null; decl.periodo.hasta=fechas[fechas.length-1]||null;
+  return { saldoInicial:saldoInicial, cuenta:cuenta, movs:movs, anuladas:anuladas, declarado:decl };
+}
+// CUADRE contra lo que declara el propio archivo. Tres controles:
+//  A) integridad de la lectura: saldo inicial + créditos leídos − débitos leídos = balance final declarado.
+//  B) brutos: créditos/débitos leídos + los de las transacciones anuladas = los totales declarados al pie.
+//  C) duplicados: el mismo comprobante (ref+fecha+monto) leído dos veces.
+// Sin esto, un parser que pierde una fila produce un reporte que se ve perfectamente normal.
+function cuadreRetenciones(parsed, net){
+  var d=parsed.declarado||{}, an=parsed.anuladas||{n:0,deb:0,cred:0};
+  var r={ ok:true, controles:[], duplicados:[] };
+  function add(nombre, calc, decl, detalle){
+    var dif=Math.round(((calc||0)-(decl||0))*100)/100, ok=Math.abs(dif)<=0.02;
+    if(!ok) r.ok=false;
+    r.controles.push({nombre:nombre, calculado:calc, declarado:decl, dif:dif, ok:ok, aplica:decl!==null&&decl!==undefined, detalle:detalle||""});
+  }
+  if(d.balanceFinal!==null && d.balanceFinal!==undefined){
+    // El balance es acreedor (negativo). Se compara en valor absoluto contra el pendiente total.
+    var pend=Math.round((Math.abs(parsed.saldoInicial||0)+net.totalDesc-net.totalPago)*100)/100;
+    add("Saldo pendiente vs. Balance Final del archivo", pend, Math.abs(d.balanceFinal),
+        "saldo inicial "+fmt(Math.abs(parsed.saldoInicial||0))+" + descontado "+fmt(net.totalDesc)+" − pagado "+fmt(net.totalPago));
+  }
+  if(d.creditos!==null && d.creditos!==undefined)
+    add("Créditos leídos + anulados vs. total declarado", Math.round((net.totalDesc+an.cred)*100)/100, d.creditos,
+        an.cred>0.001? ("incluye "+fmt(an.cred)+" de "+an.n+" fila(s) anulada(s) que se excluyen del análisis"):"");
+  if(d.debitos!==null && d.debitos!==undefined)
+    add("Débitos leídos + anulados vs. total declarado", Math.round((net.totalPago+an.deb)*100)/100, d.debitos,
+        an.deb>0.001? ("incluye "+fmt(an.deb)+" de "+an.n+" fila(s) anulada(s) que se excluyen del análisis"):"");
+  // Duplicados: mismo comprobante, fecha y monto más de una vez.
+  var vistos={};
+  (parsed.movs||[]).forEach(function(m){
+    if(!m.ref) return;
+    var k=m.ref+"|"+(m.fecha||"")+"|"+m.deb.toFixed(2)+"|"+m.cred.toFixed(2);
+    vistos[k]=(vistos[k]||0)+1;
+  });
+  Object.keys(vistos).forEach(function(k){ if(vistos[k]>1){ var p=k.split("|");
+    r.duplicados.push({ref:p[0], fecha:p[1], monto:Math.max(parseFloat(p[2]),parseFloat(p[3])), veces:vistos[k]}); } });
+  if(r.duplicados.length) r.ok=false;
+  return r;
 }
 // Clasifica un crédito (descuento) en uno o varios destinos. Los sub-totales de PURO concepto se suman
 // (crédito multi-concepto); si no cuadran o no hay, el crédito entero va al destino que aparezca en el texto.
@@ -2317,7 +2412,7 @@ function ejecutarModulo2(){
   readWorkbook(STATE.files.retenciones, function(rows){
     try{
       var parsed=parseRetenciones(rows);
-      var net=netearRetenciones(parsed.movs, STATE.mod2.saldoIniDetalle);
+      var net=netearRetenciones(parsed.movs, saldoIniDetMod2());
       STATE.mod2.result={ parsed:parsed, net:net };
       STATE.mod2.verIgual=false; // archivo nuevo → el bloqueo vuelve a aplicar
       renderModulo2();
@@ -2333,14 +2428,19 @@ function mod2SaldoInicial(){
   if(STATE.mod2.result && STATE.mod2.result.parsed && STATE.mod2.result.parsed.saldoInicial!=null) return STATE.mod2.result.parsed.saldoInicial;
   return STATE.mod2.saldoIni!=null ? STATE.mod2.saldoIni : null;
 }
+// El Paso 0 se teclea a mano y puede llevar varios minutos: se guarda para que una recarga no lo borre.
+function saldoIniDetMod2(){
+  if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=leerPrefs().saldoIniDetalleMod2||[];
+  return STATE.mod2.saldoIniDetalle;
+}
+function guardarSaldoIniDetMod2(){ guardarPref("saldoIniDetalleMod2", STATE.mod2.saldoIniDetalle||[]); }
 function sumaSaldoIniDetalleMod2(){
-  return Math.round((STATE.mod2.saldoIniDetalle||[]).reduce(function(a,r){ var v=parseFloat(r.monto); return a+(isNaN(v)?0:v); },0)*100)/100;
+  return Math.round(saldoIniDetMod2().reduce(function(a,r){ var v=parseFloat(r.monto); return a+(isNaN(v)?0:v); },0)*100)/100;
 }
 function saldoIniDetalleMod2Html(){
   var saldoIni=mod2SaldoInicial(); if(saldoIni==null) return "";
   var objetivo=Math.round(Math.abs(saldoIni)*100)/100;
-  if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
-  var det=STATE.mod2.saldoIniDetalle;
+  var det=saldoIniDetMod2();
   var total=sumaSaldoIniDetalleMod2();
   var dif=Math.round((total-objetivo)*100)/100;
   var ok=Math.abs(dif)<0.01;
@@ -2378,15 +2478,16 @@ function actualizarTotalSaldoIniMod2(){
   var l=document.getElementById("sidet2DifLbl"); if(l)l.textContent=ok?'✓ Cuadra con el saldo anterior':'Diferencia vs saldo anterior';
 }
 function bindSaldoIniDetalleMod2(){
-  if(!STATE.mod2.saldoIniDetalle) STATE.mod2.saldoIniDetalle=[];
+  saldoIniDetMod2();
   var add=document.getElementById("sidet2Add"); if(!add) return;
-  add.onclick=function(){ STATE.mod2.saldoIniDetalle.push({fecha:"",concepto:"",monto:""}); renderModulo2(); };
-  var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; renderModulo2(); };
-  document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); renderModulo2(); }; });
+  add.onclick=function(){ saldoIniDetMod2().push({fecha:"",concepto:"",monto:""}); guardarSaldoIniDetMod2(); renderModulo2(); };
+  var clr=document.getElementById("sidet2Clear"); if(clr) clr.onclick=function(){ STATE.mod2.saldoIniDetalle=[]; guardarSaldoIniDetMod2(); renderModulo2(); };
+  document.querySelectorAll(".sidet-del2").forEach(function(b){ b.onclick=function(){ STATE.mod2.saldoIniDetalle.splice(parseInt(b.getAttribute("data-i"),10),1); guardarSaldoIniDetMod2(); renderModulo2(); }; });
   document.querySelectorAll("input.sidet2").forEach(function(inp){
     inp.addEventListener("input",function(){
       var i=parseInt(inp.getAttribute("data-i"),10), f=inp.getAttribute("data-f");
       if(STATE.mod2.saldoIniDetalle[i]) STATE.mod2.saldoIniDetalle[i][f]=inp.value;
+      guardarSaldoIniDetMod2();
       actualizarTotalSaldoIniMod2();
     });
     // Al salir del campo, si ya hay análisis, re-netea los resultados con el saldo inicial actualizado
@@ -2396,7 +2497,7 @@ function bindSaldoIniDetalleMod2(){
   var file=document.getElementById("sidet2File"); if(file) file.addEventListener("change",function(e){
     if(!e.target.files[0]) return;
     readWorkbook(e.target.files[0], function(rows){
-      try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
+      try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); guardarSaldoIniDetMod2(); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
       renderModulo2();
     });
   });
@@ -2472,6 +2573,47 @@ function sujetosRet(movs){
   nombres.forEach(function(n){ emp[canon[normTxt(n)]||normTxt(n)]=1; });
   return { empleados:Object.keys(emp).sort(), acreedores:Object.keys(acr).sort() };
 }
+// PIE DE REPORTE (evidencia): un impreso sin fecha, sin archivo fuente y sin versión no se puede rastrear
+// tres meses después, y no sirve para respaldar un asiento. Se imprime junto con el reporte.
+function pieReporteHtml(parsed, titulo){
+  var f=STATE.files.retenciones, d=(parsed&&parsed.declarado)||{};
+  var ahora=new Date();
+  var fh=ahora.getFullYear()+"-"+String(ahora.getMonth()+1).padStart(2,"0")+"-"+String(ahora.getDate()).padStart(2,"0") +
+         " "+String(ahora.getHours()).padStart(2,"0")+":"+String(ahora.getMinutes()).padStart(2,"0");
+  var per=(d.periodo&&d.periodo.desde)? (d.periodo.desde+" al "+d.periodo.hasta) : "—";
+  return '<div class="pie-rep">' +
+    '<div class="pie-fila"><span>Reporte</span><b>'+esc(titulo)+'</b></div>' +
+    '<div class="pie-fila"><span>Cuenta</span><b>'+esc(parsed&&parsed.cuenta||"—")+'</b></div>' +
+    '<div class="pie-fila"><span>Archivo analizado</span><b>'+esc(f&&f.name||"—")+'</b></div>' +
+    '<div class="pie-fila"><span>Movimientos leídos</span><b>'+((parsed&&parsed.movs&&parsed.movs.length)||0)+
+      ((parsed&&parsed.anuladas&&parsed.anuladas.n)? ' (+'+parsed.anuladas.n+' anulados, excluidos)':'')+'</b></div>' +
+    '<div class="pie-fila"><span>Período de los movimientos</span><b>'+per+'</b></div>' +
+    '<div class="pie-fila"><span>Generado</span><b>'+fh+'</b></div>' +
+    '<div class="pie-fila"><span>Versión de la herramienta</span><b>'+APP_VERSION+'</b></div>' +
+    '<div class="pie-firmas"><div><span>Preparado por</span><i></i></div><div><span>Revisado por</span><i></i></div></div>' +
+  '</div>';
+}
+// Panel de CUADRE: verifica la lectura contra los totales que declara el propio archivo. Si falla, algo se
+// perdió al leer y ninguna cifra del reporte es confiable, así que bloquea igual que los comprobantes sin detalle.
+function cuadreHtml(c){
+  if(!c || !c.controles.length && !c.duplicados.length) return "";
+  var h='<div class="cu-panel '+(c.ok?'cu-ok':'cu-mal')+'">' +
+    '<div class="cu-title">'+(c.ok?'✓ Cuadre verificado contra el archivo':'⛔ El cuadre NO coincide con el archivo')+'</div>';
+  h+='<table class="cu-tabla"><thead><tr><th>Control</th><th>Calculado</th><th>Declara el archivo</th><th>Dif.</th></tr></thead><tbody>';
+  c.controles.forEach(function(x){
+    h+='<tr class="'+(x.ok?'':'cu-fila-mal')+'"><td>'+(x.ok?'✓':'✗')+' '+x.nombre+(x.detalle?'<div class="cu-det">'+x.detalle+'</div>':'')+'</td>' +
+      '<td class="cu-num">'+fmt(x.calculado)+'</td><td class="cu-num">'+fmt(x.declarado)+'</td>' +
+      '<td class="cu-num '+(x.ok?'':'cu-dif')+'">'+fmt(x.dif)+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  if(c.duplicados.length){
+    h+='<div class="cu-dup"><b>⚠ '+c.duplicados.length+' comprobante(s) aparecen repetidos</b> — el mismo número, fecha y monto más de una vez. Revisá si el archivo se exportó con filas duplicadas:<ul>';
+    c.duplicados.forEach(function(d){ h+='<li>'+esc(d.ref)+' · '+esc(d.fecha||'')+' · B/ '+fmt(d.monto)+' — <b>×'+d.veces+'</b></li>'; });
+    h+='</ul></div>';
+  }
+  if(!c.ok) h+='<p class="cu-nota">Una diferencia acá significa que la lectura del archivo perdió (o duplicó) movimientos. <b>Ninguna cifra del reporte es confiable hasta resolverlo.</b> Verificá que el Excel esté completo y que no se hayan pegado rangos de más.</p>';
+  return h+'</div>';
+}
 // Fecha ISO → "26-feb" (para leer las listas de comprobantes sin tanto ruido).
 function fechaCorta(iso){ if(!iso) return "?"; var p=String(iso).split("-"); var m=["","ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
   return p[2]+"-"+(m[parseInt(p[1],10)]||p[1]); }
@@ -2489,10 +2631,10 @@ function sinDetalleHtml(net){
     '<p class="sd-impacto"><b>B/ '+fmt(total)+'</b> no se pueden imputar a una persona. Mientras no se corrijan: los pagos de esos acreedores se aplican al bulto, el pendiente por empleado sale incompleto y ese monto aparece como <b>«(sin detalle)»</b> en el resto del reporte.</p>';
   h+='<ol class="sd-lista">';
   sd.forEach(function(s){
-    h+='<li class="sd-item"><div class="sd-comp"><b>'+s.ref+'</b> · '+fechaCorta(s.fecha)+' · '+s.destino+' · <b>B/ '+fmt(s.monto)+'</b></div>';
+    h+='<li class="sd-item"><div class="sd-comp"><b>'+esc(s.ref)+'</b> · '+fechaCorta(s.fecha)+' · '+esc(s.destino)+' · <b>B/ '+fmt(s.monto)+'</b></div>';
     if(s.sugerencia){
-      h+='<div class="sd-sug"><span class="sd-sug-lbl">Desglose probable</span> — mismo monto que <b>'+s.sugerencia.ref+'</b> ('+fechaCorta(s.sugerencia.fecha)+'):<div class="sd-sug-lineas">';
-      s.sugerencia.lineas.forEach(function(l){ h+='<span class="sd-chip">'+l.emp+' <b>'+fmt(l.monto)+'</b></span>'; });
+      h+='<div class="sd-sug"><span class="sd-sug-lbl">Desglose probable</span> — mismo monto que <b>'+esc(s.sugerencia.ref)+'</b> ('+fechaCorta(s.sugerencia.fecha)+'):<div class="sd-sug-lineas">';
+      s.sugerencia.lineas.forEach(function(l){ h+='<span class="sd-chip">'+esc(l.emp)+' <b>'+fmt(l.monto)+'</b></span>'; });
       h+='</div><div class="sd-aviso">Es una estimación por coincidencia de monto — cotejala con el comprobante físico antes de digitarla.</div></div>';
     } else {
       h+='<div class="sd-sin">✗ Ningún otro comprobante de este acreedor suma lo mismo, así que no se puede estimar el desglose. <b>Pedir el detalle real</b> a quien lo digitó.</div>';
@@ -2535,12 +2677,12 @@ function sobrepagosHtml(net){
   var h="";
   if(sk.length){
     h+='<div class="sp-panel sp-alert"><div class="sp-title">✗ Retenciones saltadas — quedaron sin pagar mientras se pagaron quincenas POSTERIORES de la misma cuenta</div><table class="sp-tabla"><tbody>';
-    sk.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td>'+quincenaLabel(s.periodo)+'</td><td>'+(s.ref||'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+'</td></tr>'; });
+    sk.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+esc(s.acreedor)+'</b>'+(s.empleado?' <span class="sp-emp">'+esc(s.empleado)+'</span>':'')+'</td><td>'+quincenaLabel(s.periodo)+'</td><td>'+esc(s.ref||'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+'</td></tr>'; });
     h+='</tbody></table></div>';
   }
   if(sp.length){
     h+='<div class="sp-panel sp-alert"><div class="sp-title">⚠ Sobrepagos detectados — se pagó MÁS de lo retenido (contando el saldo inicial del Paso 0)</div><table class="sp-tabla"><tbody>';
-    sp.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+s.acreedor+'</b>'+(s.empleado?' <span class="sp-emp">'+s.empleado+'</span>':'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+' de más</td></tr>'; });
+    sp.forEach(function(s){ h+='<tr><td class="sp-acr"><b>'+esc(s.acreedor)+'</b>'+(s.empleado?' <span class="sp-emp">'+esc(s.empleado)+'</span>':'')+'</td><td class="sp-monto">B/ '+fmt(s.monto)+' de más</td></tr>'; });
     h+='</tbody></table></div>';
   }
   return h;
@@ -2567,11 +2709,11 @@ function libroMayorHtml(movs, net){
       L.destinos.map(function(d){ return '<option value="'+String(d).replace(/"/g,"&quot;")+'"'+(L.destino===d?' selected':'')+'>'+d+'</option>'; }).join("") +
       '</select>' + (L.destino?'<span class="lm-chip-dest">filtrado: '+L.destino+'</span>':'') + '</div>';
   }
-  h+='<div class="lm-sujetos">Coincidencias: '+L.sujetos.join(' · ')+'</div>';
+  h+='<div class="lm-sujetos">Coincidencias: '+esc(L.sujetos.join(' · '))+'</div>';
   h+='<div class="lm-scroll"><table class="ret-tabla lm-tabla"><thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Destino</th><th>Comprobante</th><th>Monto</th><th>Saldo</th></tr></thead><tbody>';
   L.filas.forEach(function(f){
     h+='<tr class="'+(f.monto>0?'lm-ret':'lm-pago')+'"><td>'+(f.fecha||"")+'</td><td>'+f.tipo+'</td>' +
-      '<td>'+String(f.concepto||"").slice(0,38)+'</td><td>'+f.destino+'</td><td class="lm-ref">'+(f.ref||"")+'</td>' +
+      '<td>'+esc(String(f.concepto||"").slice(0,38))+'</td><td>'+esc(f.destino)+'</td><td class="lm-ref">'+esc(f.ref||"")+'</td>' +
       '<td class="lm-monto '+(f.monto>0?'pend-pos':'pend-neg')+'">'+(f.monto>0?"+":"")+fmt(f.monto)+'</td>' +
       '<td class="lm-saldo">'+fmt(f.saldo)+'</td></tr>';
   });
@@ -2600,7 +2742,7 @@ function renderResultadosMod2(){
   var R=STATE.mod2.result;
   // Se recalcula el neteo en cada render con el detalle del Paso 0 vigente, para que al editar/subir el
   // saldo inicial las obligaciones de apertura se emparejen con los pagos sin volver a pulsar "Analizar".
-  var net=netearRetenciones(R.parsed.movs, STATE.mod2.saldoIniDetalle); R.net=net;
+  var net=netearRetenciones(R.parsed.movs, saldoIniDetMod2()); R.net=net;
   var pd=net.porDestino;
   var pendPeriodo=net.totalDesc-net.totalPago;
   var saldoIni=R.parsed.saldoInicial;
@@ -2616,14 +2758,21 @@ function renderResultadosMod2(){
   // cifra por persona saldría incompleta y los pagos no se pueden imputar, así que mostrarlas induciría a
   // error de interpretación. Queda una salida explícita ("Ver de todos modos") para poder inspeccionar sin
   // dar el reporte por bueno; se reinicia al volver a analizar, para que nunca quede desbloqueado por inercia.
-  var bloqueado = (net.sinDetalle||[]).length>0 && !STATE.mod2.verIgual;
+  // El cuadre contra los totales del archivo se verifica ANTES que nada: si la lectura perdió movimientos,
+  // ninguna otra cifra sirve. Bloquea igual que los comprobantes sin detalle.
+  var cuadre=cuadreRetenciones(R.parsed, net);
+  var bloqueado = (!cuadre.ok || (net.sinDetalle||[]).length>0) && !STATE.mod2.verIgual;
   var html='<div class="results-head"><h2>Retenciones pendientes por pagar</h2>' +
     (bloqueado?'':'<button class="btn-export" id="exportBtn2">Descargar Excel</button>')+'</div>';
-  html+=sinDetalleHtml(net); // va primero: condiciona la lectura de todo lo demás
+  html+=cuadreHtml(cuadre);
+  html+=sinDetalleHtml(net); // condiciona la lectura de todo lo demás
   if(bloqueado){
+    var motivos=[];
+    if(!cuadre.ok) motivos.push("la lectura del archivo no cuadra con los totales que él mismo declara");
+    if((net.sinDetalle||[]).length) motivos.push("hay comprobantes sin desglose por empleado");
     html+='<div class="bloq-panel">' +
-      '<div class="bloq-txt"><b>Los resultados están bloqueados.</b> Con esos comprobantes sin desglosar, el pendiente por persona sale incompleto y los pagos no se pueden imputar individualmente. Corregilos en el sistema, volvé a exportar el navegador y subilo de nuevo.</div>' +
-      '<button class="bloq-btn" id="verIgualBtn">Ver de todos modos (cifras incompletas)</button>' +
+      '<div class="bloq-txt"><b>Los resultados están bloqueados</b> porque '+motivos.join(" y ")+'. Corregí lo señalado arriba, volvé a exportar el navegador y subilo de nuevo.</div>' +
+      '<button class="bloq-btn" id="verIgualBtn">Ver de todos modos (cifras no confiables)</button>' +
     '</div>';
     area.innerHTML=html;
     bindSinDetalle(net);
@@ -2631,8 +2780,12 @@ function renderResultadosMod2(){
     if(vb) vb.onclick=function(){ STATE.mod2.verIgual=true; renderResultadosMod2(); };
     return;
   }
-  if(STATE.mod2.verIgual && (net.sinDetalle||[]).length)
-    html+='<div class="bloq-aviso">⚠ Estás viendo el reporte con '+net.sinDetalle.length+' comprobante(s) sin detalle: las cifras por persona están incompletas. <button class="bloq-relink" id="volverBloq">Volver a bloquear</button></div>';
+  if(STATE.mod2.verIgual && (!cuadre.ok || (net.sinDetalle||[]).length)){
+    var av=[];
+    if(!cuadre.ok) av.push("<b>la lectura no cuadra con el archivo</b>");
+    if((net.sinDetalle||[]).length) av.push(net.sinDetalle.length+" comprobante(s) sin detalle");
+    html+='<div class="bloq-aviso">⚠ Estás viendo el reporte con '+av.join(" y ")+': las cifras no son confiables. <button class="bloq-relink" id="volverBloq">Volver a bloquear</button></div>';
+  }
   html+='<div class="summary-bar">' +
     '<span class="chip">Descontado: B/ '+fmt(net.totalDesc)+'</span>' +
     (totalSaldoIni>0.01 ? '<span class="chip">Saldo inicial: B/ '+fmt(totalSaldoIni)+'</span>' : '') +
@@ -2648,7 +2801,7 @@ function renderResultadosMod2(){
   function mesViejo(d){ var ag=net.aging[d]||{}; var ks=Object.keys(ag).filter(function(k){return k!=="?";}).sort(); return ks.length? ks[0] : "9999"; }
   var destinos=Object.keys(pd).sort(function(a,b){ var ma=mesViejo(a), mb=mesViejo(b); if(ma!==mb) return ma<mb?-1:1; return a<b?-1:1; });
   destinos.forEach(function(d){ var x=pd[d]; var si=x.saldoIni||0; var p=x.desc+si-x.pago;
-    html+='<tr class="ret-dest"><td>'+d+'</td><td></td><td>B/ '+fmt(x.desc)+(si>0.01?' <span class="ret-siLabel">+ ini '+fmt(si)+'</span>':'')+'</td><td>B/ '+fmt(x.pago)+'</td>' +
+    html+='<tr class="ret-dest"><td>'+esc(d)+'</td><td></td><td>B/ '+fmt(x.desc)+(si>0.01?' <span class="ret-siLabel">+ ini '+fmt(si)+'</span>':'')+'</td><td>B/ '+fmt(x.pago)+'</td>' +
       '<td class="'+(p>0.01?'pend-pos':(p<-0.01?'pend-neg':''))+'"><b>B/ '+fmt(p)+'</b></td></tr>';
     if(si>0.01) html+='<tr class="ret-aging"><td colspan="5">↳ incluye saldo inicial (deuda anterior) B/ '+fmt(si)+' — los pagos lo cubren primero (FIFO); lo que quede aparece abajo como pendiente «Saldo inicial».</td></tr>';
     // Aging: en qué mes se generó lo pendiente (marca lo viejo).
@@ -2668,7 +2821,7 @@ function renderResultadosMod2(){
     det.pagosSinDesc.forEach(function(r){ filas.push({fecha:r.fecha, nombre:"⚠ pago sin descuento — "+String(r.acr||"").slice(0,42), desc:null, pago:r.monto, pend:-r.monto}); });
     filas.sort(function(a,b){ return (a.fecha||"")<(b.fecha||"")?-1:1; });
     filas.forEach(function(f){
-      html+='<tr class="ret-emp'+(f.pago!=null?' ret-pagosd':'')+'"><td>'+f.nombre+'</td><td>'+(f.fecha||"")+'</td>' +
+      html+='<tr class="ret-emp'+(f.pago!=null?' ret-pagosd':'')+'"><td>'+esc(f.nombre)+'</td><td>'+esc(f.fecha||"")+'</td>' +
         '<td>'+(f.desc!=null?"B/ "+fmt(f.desc):"—")+'</td>' +
         '<td>'+(f.pago!=null?"B/ "+fmt(f.pago):"—")+'</td>' +
         '<td class="'+(f.pend>0.01?'pend-pos':(f.pend<-0.01?'pend-neg':''))+'">B/ '+fmt(f.pend)+'</td></tr>';
@@ -2685,6 +2838,7 @@ function renderResultadosMod2(){
   }
   html+='<p class="ret-nota">El detalle muestra SOLO lo pendiente: cada descuento que aún no se pagó (con su fecha y empleado) y los pagos que se hicieron sin descuento (⚠). Los descuentos ya pagados se dejan por fuera. Como la retención de un mes se paga el mes SIGUIENTE, lo pendiente del mes en curso y del mes anterior (dentro de su ventana normal de pago) NO se marca como atrasado; solo lleva ⚠ viejo lo que ya debió pagarse (su mes de pago quedó atrás). Los nombres se normalizan (typos/variantes).</p>' +
     '</div></div>';
+  html+=pieReporteHtml(R.parsed, "Retenciones a empleados por pagar");
   area.innerHTML=html;
   var eb=document.getElementById("exportBtn2"); if(eb) eb.onclick=exportarRetenciones;
   var vlb=document.getElementById("volverBloq"); if(vlb) vlb.onclick=function(){ STATE.mod2.verIgual=false; renderResultadosMod2(); };
