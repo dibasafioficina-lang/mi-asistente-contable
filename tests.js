@@ -274,6 +274,30 @@ test("si falta una partida en el banco, sí se reporta y se explica el desglose"
     throw new Error("el hallazgo debe explicar el desglose del informe");
 });
 
+// Hallazgo: algunos meses el diario registra la VISA de TODO el mes en un asiento del último día
+// ("DEL 1 AL 31 DE ENERO") mientras el banco la acreditó en remisiones diarias. El monto del diario es el
+// bruto del período; el banco pagó el neto repartido. Sin esto aparecía como "en tránsito" B/ 5,823.79.
+test("depósito acumulado del mes se coteja contra las remisiones diarias (neto)", () => {
+  const diario = [{ fecha: "2026-01-31", debito: 0, credito: 5823.79,
+    descripcion: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026.", referencia: "ME-9", fila: 1 }];
+  // El banco lo pagó en 3 remisiones que suman el neto (bruto 5823.79 − retenciones 280.62).
+  const estado = [
+    { fecha: "2026-01-10", debito: 0, credito: 2000.00, descripcion: "Remisión V/Mc", fila: 2 },
+    { fecha: "2026-01-20", debito: 0, credito: 2000.00, descripcion: "Remisión V/Mc", fila: 3 },
+    { fecha: "2026-01-30", debito: 0, credito: 1543.17, descripcion: "Remisión V/Mc", fila: 4 }
+  ];
+  const ret = { "2026-01-10": 100.00, "2026-01-20": 100.00, "2026-01-30": 80.62 };
+  const h = paso2(diario, [], estado, null, ret, null, 3, 0.01, null);
+  eq(h.filter(x => Math.abs(x.monto - 5823.79) < 0.01).length, 0, "no debe quedar en tránsito");
+});
+
+test("rangoDeposito reconoce el rango del mes", () => {
+  const r = rangoDeposito("DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026.");
+  if (!r) throw new Error("no reconoció el rango");
+  eq(r.ym, "2026-01"); eq(r.diaIni, 1); eq(r.diaFin, 31);
+  eq(rangoDeposito("DEPOSITO POR TARJETA VISA STG DEL 09/6/2026"), null, "un solo día no es rango");
+});
+
 // Bug introducido al formatear las cifras: un <input type="number"> con value="2,517.82" se ve VACÍO.
 test("numInput: valores de input sin separador de miles", () => {
   eq(numInput(2517.82), "2517.82");

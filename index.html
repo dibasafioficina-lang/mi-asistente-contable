@@ -1335,6 +1335,25 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(!combo && banco==="STG" && retVisaPorDia && retVisaPorDia[dep.fecha]!=null){
         combo = buscarCombinacion(pool, dep.fecha, Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100, ventanaDias, tolerancia);
       }
+      // 2b) DEPÓSITO ACUMULADO DEL PERÍODO: algunos meses el diario registra la VISA de todo el mes en un
+      // solo asiento del último día ("DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026") mientras el
+      // banco la fue acreditando en remisiones diarias. El monto del diario es el BRUTO del período, así que
+      // se le restan las retenciones de esos días y se busca el conjunto de créditos que sumen el neto.
+      // Sin esto, el acumulado del mes queda como "en tránsito" aunque ya haya compensado completo.
+      if(!combo && retVisaPorDia && normTxt(dep.descripcion).indexOf("VISA")!==-1){
+        var rg = rangoDeposito(dep.descripcion);
+        if(rg){
+          var retPeriodo = 0;
+          Object.keys(retVisaPorDia).forEach(function(f){
+            if(f.slice(0,7)!==rg.ym) return;
+            var dd = parseInt(f.slice(8,10),10);
+            if(dd>=rg.diaIni && dd<=rg.diaFin) retPeriodo += retVisaPorDia[f];
+          });
+          var netoPeriodo = Math.round((objetivo - retPeriodo)*100)/100;
+          // Ventana sin límite práctico y varias partidas: el asiento es del último día pero cubre todo el mes.
+          combo = buscarSubsetSuma(pool, dep.fecha, netoPeriodo, 366, tolerancia, 60, "atras");
+        }
+      }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
       // Se consulta el INFORME DE CAJA —la referencia del desglose— y se busca cada partida en el estado.
       var desglose = null, partesHalladas = null;
