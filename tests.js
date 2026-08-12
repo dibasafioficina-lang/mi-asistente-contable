@@ -442,6 +442,65 @@ test("no consolida efectivo con depósitos de tarjeta del mismo día", () => {
   cerca(c.faltanEnBanco[0].monto, 153.25, "monto de la tarjeta");
 });
 
+/* ---- Partidas en tránsito del mes anterior (Paso 0) que compensan este mes ----
+   La VISA del 31-dic quedó registrada en el diario de diciembre (ME-00000001826) y el banco la acreditó
+   el 02-ene. La línea del estado NO tiene asiento de enero porque el asiento es de diciembre: si el Paso 3
+   no la aparta, sale como "no aparece registrado en el diario contable" — una diferencia falsa. */
+const P0_VISA = [
+  { fecha: "2025-12-31", banco: "Banistmo", monto: 1341.20, concepto: "visa en transito",  comprobante: "ME-00000001826", sentido: "credito" },
+  { fecha: "2025-12-31", banco: "Banistmo", monto: 1285.05, concepto: "clave en transito", comprobante: "ME-00000001826", sentido: "credito" }
+];
+const EST_VISA = () => [
+  { fecha: "2026-01-02", debito: 0, credito: 1341.20, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", fila: 5 },
+  { fecha: "2026-01-02", debito: 0, credito: 1285.05, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", fila: 9 }
+];
+
+test("la VISA en tránsito del mes anterior compensa contra la Remisión V/Mc", () => {
+  const r = consumirTransitoPrevio(P0_VISA, { Banistmo: EST_VISA() }, 0.01);
+  eq(r.pendientes.length, 0, "ambas deben compensar");
+  eq(r.compensadas.length, 2);
+  eq(r.fechasRaras.length, 0, "fechas correctas: sin aviso");
+});
+
+test("el Paso 3 no reporta como diferencia lo que compensó del mes anterior", () => {
+  const h = paso3([], [], EST_VISA(), [], null, null, 3, 0.01, null, P0_VISA);
+  eq(h.filter(x => (x.clase || "diff") === "diff").length, 0, "el 1,341.20 y el 1,285.05 ya tienen asiento en diciembre");
+});
+
+test("sin el Paso 0, esas mismas líneas SÍ son diferencia", () => {
+  const h = paso3([], [], EST_VISA(), [], null, null, 3, 0.01, null, null);
+  eq(h.filter(x => (x.clase || "diff") === "diff").length, 2, "sin el resumen en tránsito no hay con qué cotejarlas");
+});
+
+// El resumen del Paso 0 traía "31/12/2026" por "31/12/2025": el matching es hacia adelante, así que una
+// fecha futura hace que la partida nunca compense. Se concilia igual y se levanta un aviso (no una diferencia).
+test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
+  const malFechado = P0_VISA.map(p => ({ ...p, fecha: "2026-12-31" }));
+  const r = consumirTransitoPrevio(malFechado, { Banistmo: EST_VISA() }, 0.01);
+  eq(r.pendientes.length, 0, "debe conciliar pese al año mal tecleado");
+  eq(r.fechasRaras.length, 2, "y avisar de las dos");
+  const h = paso0(malFechado, EST_VISA(), [], null, 3, 0.01);
+  eq(h.filter(x => x.clase === "aviso").length, 2);
+  eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
+});
+
+test("una partida del Paso 0 no puede consumir dos líneas del estado", () => {
+  // 315.00 aparece dos veces en el estado y solo una vez en tránsito: solo una línea queda consumida.
+  const est = [
+    { fecha: "2026-01-05", debito: 0, credito: 315.00, descripcion: "DEPOSITO", fila: 36 },
+    { fecha: "2026-01-06", debito: 0, credito: 315.00, descripcion: "DEPOSITO", fila: 40 }
+  ];
+  consumirTransitoPrevio([{ fecha: "2025-12-31", banco: "Banistmo", monto: 315.00, concepto: "cheque en transito", comprobante: "", sentido: "credito" }],
+    { Banistmo: est }, 0.01);
+  eq(est.filter(x => x._transitoUsado).length, 1, "solo una línea del estado se marca como usada");
+});
+
+test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {
+  const h = paso0(P0_VISA, EST_VISA(), [], null, 3, 0.01);
+  eq(h.filter(x => esEnTransito(x) && /mes anterior/i.test(x.motivo || "")).length, 2, "se deja la traza");
+  eq(h.filter(x => /aún NO compensó/.test(x.texto)).length, 0, "ninguna sigue pendiente");
+});
+
 /* =========================================================================
    6. E2E con el archivo real (se saltan si el archivo no está)
    ========================================================================= */

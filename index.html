@@ -427,7 +427,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.04";
+var APP_VERSION="2026.08.12";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1238,9 +1238,10 @@ function marcarNeutros(diario){
 function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
   marcarNeutros(diarioDeb);
   function limpio(arr, campo){
-    // Se excluyen: _chqUsado (ya emparejado por la pasada de cheques/Paso 0) y _neutro (traspaso interno
-    // de neto cero, no llega al estado de cuenta).
-    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
+    // Se excluyen: _chqUsado (ya emparejado por la pasada de cheques/Paso 0), _transitoUsado (línea del
+    // estado que compensó una partida en tránsito del mes anterior: su asiento es del mes pasado, no de
+    // este) y _neutro (traspaso interno de neto cero, no llega al estado de cuenta).
+    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
       .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, fila:x.fila, usado:false}; });
   }
   var poolDiario = limpio(diarioDeb, "debito");
@@ -1327,16 +1328,21 @@ function desgloseDelInforme(reporte, fecha, banco, monto, tolerancia){
   if(idxs && idxs.length >= 2) return idxs.map(function(i){ return partes[i]; });
   return null;
 }
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte){
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
   var usarDetalleCheques = !!(chequesDetalle && chequesDetalle.length);
 
-  // Créditos del banco por banco, con flag .usado (excluye ABORTED).
+  // Las líneas del estado que compensan partidas en tránsito del mes anterior (Paso 0) se apartan antes de
+  // conciliar: su asiento es del mes pasado. Si no, un depósito de este mes podría engancharse con ellas
+  // por coincidencia de importe y dejar huérfano el movimiento que sí le correspondía.
+  if(transitoPrevio && transitoPrevio.length) consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
+
+  // Créditos del banco por banco, con flag .usado (excluye ABORTED y lo consumido por el Paso 0).
   var bancoCred = {};
   Object.keys(estados).forEach(function(b){
-    bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
+    bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && !x._transitoUsado && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
       .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
   });
 
@@ -1532,7 +1538,7 @@ function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia)
 function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, tolerancia, banco, hallazgos){
   var VENTANA = 366;
   var ckDiario = (diario||[]).filter(function(x){ return x.debito>0 && esChequeDesc(x.descripcion) && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; });
-  var depos = (estado||[]).filter(function(x){ return x.credito>0 && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; });
+  var depos = (estado||[]).filter(function(x){ return x.credito>0 && !x._transitoUsado && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; });
   if(!ckDiario.length && !(prevCheques && prevCheques.length)) return;
   var chq = [];
   ckDiario.forEach(function(x){
@@ -1574,6 +1580,16 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     {nombre:"STG", diario:diarioStg, estado:estStg, retVisa:retVisaPorDia}
   ];
   if(diarioBancoGeneral && estBancoGeneral) cfgs.push({nombre:"Banco General", diario:diarioBancoGeneral, estado:estBancoGeneral});
+  // PRIMERO: consumir las partidas en tránsito del mes anterior (Paso 0). Sus líneas del estado ya tienen
+  // asiento —el del mes pasado— así que no deben salir como "no aparece registrado en el diario contable".
+  // Lo que queda pendiente se le pasa a la pasada de cheques, que empareja de forma más permisiva.
+  var pendientesPrev = transitoPrevio || [];
+  if(transitoPrevio && transitoPrevio.length){
+    var estadosPrev = {};
+    cfgs.forEach(function(c){ estadosPrev[c.nombre] = c.estado; });
+    var resPrev = consumirTransitoPrevio(transitoPrevio, estadosPrev, tolerancia);
+    pendientesPrev = resPrev.pendientes.map(function(p){ return {fecha:p.fechaOrig, banco:p.banco, monto:p.monto, concepto:p.concepto, comprobante:p.comprobante, sentido:p.sentido}; });
+  }
   // Bordes de mes: el último día lo pendiente queda en tránsito al mes siguiente; el primer día lo del
   // estado de cuenta suele ser una compensación que venía en tránsito del mes anterior.
   var todasFechas = [];
@@ -1582,7 +1598,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
   cfgs.forEach(function(cfg){
     // Pasada de cheques (diario CK + cheques del Paso 0 del mes anterior) vs depósitos del estado.
     // Así los cheques de meses anteriores ya compensados no salen como diferencia.
-    var prevChq = (transitoPrevio||[]).filter(function(t){ return t.banco===cfg.nombre; });
+    var prevChq = pendientesPrev.filter(function(t){ return t.banco===cfg.nombre; });
     conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos);
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
@@ -1700,7 +1716,8 @@ var PASO_OPCIONALES = {
   // cuáles partidas del mes anterior ya compensaron; si no, todas quedan en tránsito.
   paso0: ["estBanistmo","estStg","estBancoGeneral"],
   // retVisa: para el neto VISA. reporte: para el desglose individual de cheques (2ª pestaña).
-  paso2: ["estBancoGeneral","retVisa","reporte"],
+  // transitoPrevio: para apartar las líneas del estado que compensan partidas del mes anterior.
+  paso2: ["estBancoGeneral","retVisa","reporte","transitoPrevio"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
   // transitoPrevio: cheques del Paso 0, para no marcar como diferencia lo que compensa cheques anteriores.
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja","transitoPrevio"]
@@ -1745,7 +1762,8 @@ function computePasoResult(pasoKey, raws, opts){
     // Desglose individual de cheques (2ª pestaña del reporte): si está, los cheques se cuadran uno a uno.
     var chequesDet = raws.reporte ? parseChequesDetalle(raws.reporte) : null;
     var reporteCajas = raws.reporte ? parseReporteConsolidado(raws.reporte) : null;
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas);
+    var trPrev2 = raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null;
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -1923,7 +1941,10 @@ function periodosHtml(diag){
 function esSinConfirmar(item){ return item && item.clase==="sin_confirmar"; }
 function esEnTransito(item){ return item && item.clase==="en_transito"; }
 function esEfectivo(item){ return item && item.clase==="efectivo"; } // depósito en efectivo (Brinks), no es diferencia
-function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || esEfectivo(item); }
+// "aviso": problema de CALIDAD DEL DATO (ej. una fecha imposible en el resumen del Paso 0). No es una
+// diferencia de plata —el cotejo se resolvió igual— pero hay que corregir el archivo de origen.
+function esAviso(item){ return item && item.clase==="aviso"; }
+function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || esEfectivo(item) || esAviso(item); }
 function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esNoRojo(i);}).length : 0; }
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
@@ -3441,8 +3462,9 @@ function renderResultados(){
     var sinConf = esArray ? items.filter(esSinConfirmar) : [];
     var enTransito = esArray ? items.filter(esEnTransito) : [];
     var efectivo = esArray ? items.filter(esEfectivo) : [];
+    var avisos = esArray ? items.filter(esAviso) : [];
     var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : bloqueado ? "bloqueado"
-      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : ''));
+      : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : '') + (avisos.length? ' · '+avisos.length+' aviso(s)' : ''));
     var idxPaso = PASO_ORDEN.indexOf(p.key);
     html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
@@ -3490,6 +3512,12 @@ function renderResultados(){
         items.forEach(function(item, idx){ if(esSinConfirmar(item)) html += findingHtml(p, item, idx); });
         html += '</div>';
       }
+      if(avisos.length){
+        html += '<div class="sinconf-block"><div class="sinconf-head">Corregir el archivo de origen ('+avisos.length+')' +
+          '<span class="sinconf-sub">El cotejo se resolvió igual, pero el dato viene mal escrito y hay que arreglarlo en el archivo para que el próximo cierre no falle.</span></div>';
+        items.forEach(function(item, idx){ if(esAviso(item)) html += findingHtml(p, item, idx); });
+        html += '</div>';
+      }
       if(efectivo.length){
         html += '<div class="sinconf-block efectivo"><div class="sinconf-head">Depósitos en efectivo — Brinks ('+efectivo.length+')' +
           '<span class="sinconf-sub">Movimientos "Ach De Brinks Panama" del estado de cuenta: son el efectivo del reporte de cajeras, no una diferencia.</span></div>';
@@ -3535,7 +3563,7 @@ function exportarChecklist(){
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : "Diferencia";
+      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : esAviso(item) ? "Corregir archivo de origen" : "Diferencia";
       rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
@@ -3556,8 +3584,11 @@ function exportarChecklist(){
 // además incluye compensaciones de ENTRADA del mes anterior (primer día), que no se arrastran.
 function recolectarEnTransito(){
   var out = [];
+  // Del Paso 0 solo se arrastra lo que sigue PENDIENTE: las partidas que ya compensaron se listan en el
+  // reporte como tránsito entrante (para dejar la traza), pero están cerradas y no van al próximo mes.
+  var entrante = function(it){ return /mes anterior/i.test(it.motivo||""); };
   var p0 = STATE.results && STATE.results.paso0;
-  if(Array.isArray(p0)) p0.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
+  if(Array.isArray(p0)) p0.forEach(function(it){ if(esEnTransito(it) && !entrante(it)) out.push(it); });
   var p2 = STATE.results && STATE.results.paso2;
   if(Array.isArray(p2)) p2.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
   return out;
@@ -3786,62 +3817,126 @@ function parseTransitoPrevio(rows){
 
 // Línea del estado que es una "Remisión Clave" (compensación de tarjeta CLAVE).
 function esRemisionClave(desc){ var n = normTxt(desc); return n.indexOf("REMISION")!==-1 && n.indexOf("CLAVE")!==-1; }
-// Paso 0: valida que las partidas en tránsito de meses anteriores compensaron en los bancos de este mes.
+// Línea del estado que es una "Remisión V/Mc" (compensación de tarjeta VISA/MasterCard).
+function esRemisionVisa(desc){ var n = normTxt(desc); return n.indexOf("REMISION")!==-1 && (n.indexOf("V/MC")!==-1 || n.indexOf("VISA")!==-1); }
+// Primera fecha de un arreglo de movimientos (inicio real del período del estado de cuenta).
+function primeraFecha(arr){
+  var f = (arr||[]).map(function(x){ return x.fecha; }).filter(Boolean).sort();
+  return f.length ? f[0] : null;
+}
+
+// Consume las partidas en tránsito del mes anterior (Paso 0) contra los estados de cuenta de ESTE mes.
+// Es la pasada que hace de puente entre meses: una partida ya registrada en el diario del mes anterior
+// (ej. la VISA del 31-dic en el ME-00000001826) compensa en el banco a principios de este mes, así que su
+// línea del estado NO es una diferencia — no hay asiento de este mes que la respalde porque el asiento es
+// del mes pasado. Marca `_transitoUsado` en la fila del estado para que los Pasos 2 y 3 no la reporten.
 // Una partida puede tardar semanas o meses, así que NO se limita por días: se empareja hacia adelante
-// (la compensación nunca es anterior a la partida) con combinaciones. Según su TIPO compensa distinto:
-//  - Cheque por depositar / depósito en tránsito → CRÉDITO del estado (depósito).
+// (la compensación nunca es anterior a la partida). Según su TIPO compensa distinto:
+//  - Cheque por depositar → CRÉDITO "depósito" del estado.
+//  - Depósito en tránsito → cualquier CRÉDITO del estado.
 //  - Cheque EMITIDO (pago, "débito en circulación") → DÉBITO del estado (cargo).
-//  - Clave en tránsito → crédito "Remisión Clave" del estado.
-// Lo que no compensó sigue en tránsito y se arrastra al resumen del mes siguiente.
-function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
-  var estados = { "Banistmo": estBanistmo, "STG": estStg };
-  if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+//  - Clave en tránsito → crédito "Remisión Clave"; VISA en tránsito → crédito "Remisión V/Mc".
+// Devuelve {compensadas, pendientes, fechasRaras} — el llamador decide cómo reportarlas.
+function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
   var VENTANA = 366; // sin límite práctico (puede clarear meses después)
-  var hallazgos = [];
+  var compensadas = [], pendientes = [], fechasRaras = [];
   Object.keys(estados).forEach(function(banco){
-    var items = transitoPrevio.filter(function(t){ return t.banco===banco; });
+    var items = (transitoPrevio||[]).filter(function(t){ return t.banco===banco; });
     if(!items.length) return;
     var estado = estados[banco] || [];
     var noAborted = function(x){ return normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; };
-    // Pools del estado según cómo compensa cada tipo (con .usado para no reusar la misma línea).
-    var poolDeb   = estado.filter(function(x){ return x.debito>0 && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.debito, usado:false}; });   // cheques emitidos (pagos) → débito
-    var poolCred  = estado.filter(function(x){ return x.credito>0 && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; });   // depósito en tránsito → cualquier crédito
-    var poolDep   = estado.filter(function(x){ return x.credito>0 && esDepositoEstado(x.descripcion) && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; }); // cheques por depositar → depósito
-    var poolClave = estado.filter(function(x){ return x.credito>0 && esRemisionClave(x.descripcion) && noAborted(x); }).map(function(x){ return {fecha:x.fecha, monto:x.credito, usado:false}; }); // clave → remisión clave
+    // Un solo objeto por fila del estado, COMPARTIDO entre los pools: así `usado` es global y una misma
+    // línea no puede consumirse dos veces (antes cada pool tenía su copia y podían pisarse entre sí).
+    var credObjs = estado.filter(function(x){ return x.credito>0 && !x._transitoUsado && noAborted(x); })
+      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, src:x, usado:false}; });
+    var poolDeb = estado.filter(function(x){ return x.debito>0 && !x._transitoUsado && noAborted(x); })
+      .map(function(x){ return {fecha:x.fecha, monto:x.debito, desc:x.descripcion, src:x, usado:false}; });
+    var poolCred  = credObjs;                                                                        // cualquier crédito
+    var poolDep   = credObjs.filter(function(o){ return esDepositoEstado(o.desc); });                 // depósitos
+    var poolClave = credObjs.filter(function(o){ return esRemisionClave(o.desc); });                  // remisión CLAVE
+    var poolVisa  = credObjs.filter(function(o){ return esRemisionVisa(o.desc); });                   // remisión V/MC
     // Clasifica cada partida y le asigna su pool de compensación (según concepto y sentido).
     function poolDe(item){
       if(item.sentido==="debito") return poolDeb;                          // cheque emitido (pago) → débito del estado
       var c = normTxt(item.concepto);
       if(c.indexOf("CLAVE")!==-1) return poolClave;                        // clave en tránsito → remisión clave
+      if(c.indexOf("VISA")!==-1 || c.indexOf("V/MC")!==-1) return poolVisa;// visa en tránsito → remisión V/Mc
       if(c.indexOf("DEPOSITO")!==-1) return poolCred;                      // depósito en tránsito → cualquier crédito
       return poolDep;                                                      // cheque por depositar → depósito
     }
-    var chs = items.map(function(t){ return {fecha:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante, sentido:t.sentido, usado:false, pool:poolDe(t)}; });
+    // Una partida "del mes anterior" no puede tener fecha DENTRO (ni después) del período del estado: si la
+    // tiene, es un error de tecleo en el Paso 0 (pasó con "31/12/2026" por "31/12/2025"). El matching es
+    // hacia adelante, así que una fecha futura hace que nunca compense y salga como diferencia falsa. Se
+    // empareja con la fecha corregida al inicio del período y se levanta un aviso nombrando la partida.
+    var iniEstado = primeraFecha(estado);
+    var chs = items.map(function(t){
+      var fechaEf = t.fecha;
+      if(iniEstado && t.fecha >= iniEstado){
+        fechaEf = iniEstado;
+        fechasRaras.push({banco:banco, item:t, iniEstado:iniEstado});
+      }
+      return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
+              sentido:t.sentido, banco:banco, usado:false, pool:poolDe(t)};
+    });
     // Paso A: cada partida contra su pool, hacia adelante (una compensación por partida).
     chs.forEach(function(ch){
       if(ch.usado) return;
       var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
-      if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; }); ch.usado=true; }
+      if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
     // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco
     // a veces junta varias en una), hacia atrás.
-    [poolDeb, poolCred, poolDep, poolClave].forEach(function(pool){
+    [poolDeb, poolCred, poolDep, poolClave, poolVisa].forEach(function(pool){
       pool.forEach(function(d){
         if(d.usado) return;
         var candidatos = chs.filter(function(c){ return !c.usado && c.pool===pool; });
         var combo = buscarSubsetSuma(candidatos, d.fecha, d.monto, VENTANA, tolerancia, 12, "atras");
-        if(combo){ combo.forEach(function(i){ candidatos[i].usado=true; }); d.usado=true; }
+        if(combo){ combo.forEach(function(i){ candidatos[i].usado=true; candidatos[i].compensoEn=d; }); d.usado=true; }
       });
     });
-    // Partidas que no compensaron → siguen en tránsito (rotuladas con su concepto real).
-    chs.forEach(function(ch){
-      if(ch.usado) return;
-      var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
-      hallazgos.push({ fecha:ch.fecha, banco:banco, monto:ch.monto, clase:"en_transito",
-        concepto:ch.concepto, comprobante:ch.comprobante, motivo:"aún pendiente de compensar",
-        texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fecha+", "+banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
-        fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+banco });
-    });
+    // Marca la fila real del estado: los Pasos 2 y 3 la saltan (su asiento es del mes anterior).
+    poolDeb.concat(credObjs).forEach(function(o){ if(o.usado && o.src) o.src._transitoUsado = true; });
+    chs.forEach(function(ch){ (ch.usado ? compensadas : pendientes).push(ch); });
+  });
+  return {compensadas:compensadas, pendientes:pendientes, fechasRaras:fechasRaras};
+}
+
+// Paso 0: valida que las partidas en tránsito de meses anteriores compensaron en los bancos de este mes.
+// Lo que compensó se reporta como tránsito ENTRANTE (no es diferencia: su asiento es del mes anterior);
+// lo que no compensó sigue en tránsito y se arrastra al resumen del mes siguiente.
+function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
+  var estados = { "Banistmo": estBanistmo, "STG": estStg };
+  if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+  var hallazgos = [];
+  var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
+  // Fechas imposibles en el resumen del Paso 0 (error de tecleo): se concilian igual, pero hay que avisar.
+  res.fechasRaras.forEach(function(f){
+    hallazgos.push({ fecha:f.item.fecha, banco:f.banco, monto:f.item.monto, clase:"aviso",
+      concepto:f.item.concepto, comprobante:f.item.comprobante, motivo:"fecha fuera del período",
+      texto:"El resumen en tránsito trae la partida \""+(f.item.concepto||"").trim()+"\" de B/ "+fmt(f.item.monto)+
+            " con fecha "+f.item.fecha+", que NO es anterior al período que se está conciliando (empieza el "+f.iniEstado+
+            "). Una partida en tránsito del mes anterior siempre es de una fecha previa — revisá el año en el archivo del Paso 0."+
+            (f.item.comprobante?" · Comprobante "+f.item.comprobante:"")+" Se concilió tomando "+f.iniEstado+" como fecha.",
+      fuente:"Paso 0 — resumen en tránsito del mes anterior" });
+  });
+  // Compensadas: entraron del mes anterior y ya cerraron en el banco. Se listan para que quede la traza
+  // (el motivo lleva "mes anterior" para que caigan en el grupo de tránsito ENTRANTE del reporte).
+  res.compensadas.forEach(function(ch){
+    var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
+    var fCierre = ch.compensoEn ? ch.compensoEn.fecha : null;
+    hallazgos.push({ fecha:(fCierre||ch.fechaOrig), banco:ch.banco, monto:ch.monto, clase:"en_transito",
+      concepto:ch.concepto, comprobante:ch.comprobante, motivo:"compensó — venía del mes anterior",
+      texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") venía en tránsito del mes anterior y COMPENSÓ en el banco"+
+            (fCierre?" el "+fCierre:"")+" — su asiento es del mes pasado, no es una diferencia."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
+      fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });
+  });
+  // Partidas que no compensaron → siguen en tránsito (rotuladas con su concepto real).
+  res.pendientes.forEach(function(ch){
+    var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
+    hallazgos.push({ fecha:ch.fechaOrig, banco:ch.banco, monto:ch.monto, clase:"en_transito",
+      concepto:ch.concepto, comprobante:ch.comprobante, motivo:"aún pendiente de compensar",
+      texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
+      fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });
   });
   return hallazgos;
 }
