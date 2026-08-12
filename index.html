@@ -1382,9 +1382,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         desglose = desgloseDelInforme(reporte, dep.fecha, banco, objetivo, tolerancia);
         if(desglose){
           var idxs = [], todas = true;
+          // Las remisiones de tarjeta clarean con rezago (el 08-ene compensó el 12-ene), así que las
+          // partidas se buscan con una ventana más amplia que la del match directo.
+          var ventDesglose = Math.max(ventanaDias, 10);
           desglose.forEach(function(p){
             if(!todas) return;
-            var c = buscarCombinacion(pool, dep.fecha, p.monto, ventanaDias, tolerancia);
+            var c = buscarCombinacion(pool, dep.fecha, p.monto, ventDesglose, tolerancia);
             if(c){ c.forEach(function(i){ pool[i].usado = true; idxs.push(i); }); }
             else todas = false;
           });
@@ -1809,8 +1812,10 @@ function mesesDe(arr){
   (arr||[]).forEach(function(x){ if(x.fecha) { var k=String(x.fecha).slice(0,7); m[k]=(m[k]||0)+1; } });
   return m;
 }
-// Mes dominante de un archivo: aquel con más registros.
-function mesDominante(arr){
+// Mes dominante de un conjunto de REGISTROS (objetos con .fecha): aquel con más movimientos.
+// Ojo: existe otra mesDominante() que opera sobre un array de FECHAS (strings) y la usan ultimoDiaMes /
+// primerDiaMes. Son cosas distintas y no deben compartir nombre.
+function mesDominanteDeRegistros(arr){
   var m = mesesDe(arr), mejor = null, max = 0;
   Object.keys(m).forEach(function(k){ if(m[k] > max){ max = m[k]; mejor = k; } });
   return mejor;
@@ -1849,7 +1854,7 @@ function validarPeriodos(fuentes){
   if(conDatos.length < 1) return null;
   conDatos.forEach(function(f){
     f.periodo = periodoDe(f.datos);
-    f.mes = mesDominante(f.datos);
+    f.mes = mesDominanteDeRegistros(f.datos);
     f.meses = mesesDe(f.datos);
   });
   // Mes de trabajo: el más votado entre los archivos; a igualdad de votos, el que tenga más registros.

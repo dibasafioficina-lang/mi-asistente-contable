@@ -380,10 +380,36 @@ test("no alerta cuando todos los archivos son del mismo mes", () => {
   eq(v.alertas.length, 0, "no debe alertar");
 });
 
-test("mesDominante y mesEnNombre", () => {
-  eq(mesDominante(movsDe("2026-01", 10).concat(movsDe("2026-02", 3))), "2026-01");
+test("mesDominanteDeRegistros y mesEnNombre", () => {
+  eq(mesDominanteDeRegistros(movsDe("2026-01", 10).concat(movsDe("2026-02", 3))), "2026-01");
   eq(mesEnNombre("BANISTMO ENERO 2026.xlsx"), "01");
   eq(mesEnNombre("estado de cta stg petty.xlsx"), null);
+});
+
+// Regresión: mesDominante(fechas) opera sobre strings y la usan ultimoDiaMes/primerDiaMes. Al agregar la
+// validación de períodos se definió otra mesDominante(registros) que la pisaba, y ultimoDiaMes empezó a
+// devolver null → los depósitos del último día dejaron de marcarse "en tránsito" y salían como diferencia.
+test("ultimoDiaMes / primerDiaMes siguen funcionando (no los pisa otra función)", () => {
+  const fechas = ["2026-01-02", "2026-01-15", "2026-01-31"];
+  eq(ultimoDiaMes(fechas), "2026-01-31");
+  eq(primerDiaMes(fechas), "2026-01-01");
+  eq(mesDominante(fechas), "2026-01", "opera sobre strings de fecha");
+});
+
+// Hallazgo: el depósito del 08-ene compensó en el banco el 12-ene (4 días), fuera de la ventana de 3.
+test("el desglose del informe tolera el rezago del banco", () => {
+  const diario = [{ fecha: "2026-01-08", debito: 0, credito: 471.52,
+    descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 08/01/2026", referencia: "ME-00000001832", fila: 1 }];
+  const reporte = [
+    { fecha: "2026-01-08", cajera: "ANA", banco: "Banistmo", metodo: "VISA",  monto: 241.58, fila: 2 },
+    { fecha: "2026-01-08", cajera: "ANA", banco: "Banistmo", metodo: "CLAVE", monto: 229.94, fila: 2 }
+  ];
+  const estado = [
+    { fecha: "2026-01-12", debito: 0, credito: 241.58, descripcion: "CR REMISION - V/MC", fila: 3 },
+    { fecha: "2026-01-12", debito: 0, credito: 229.94, descripcion: "CR REMISION - CLAVE", fila: 4 }
+  ];
+  const h = paso2(diario, estado, [], null, null, null, 3, 0.01, reporte);
+  eq(h.filter(x => Math.abs(x.monto - 471.52) < 0.01).length, 0, "debe conciliar pese al rezago");
 });
 
 test("periodoDe y seSolapan", () => {
