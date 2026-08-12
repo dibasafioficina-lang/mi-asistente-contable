@@ -274,7 +274,9 @@
   .per-tabla td{padding:5px 8px;border-bottom:1px solid rgba(0,0,0,.06);vertical-align:top}
   .per-mal td{background:rgba(217,138,138,.14)}
   .per-arch{font-size:11px;opacity:.75;margin-top:2px;word-break:break-all}
-  .per-rango{text-align:right;white-space:nowrap;font-weight:700}
+  .per-rango{text-align:right;white-space:nowrap;font-weight:700;font-size:11.5px}
+  .per-det{font-size:11.5px;margin-top:3px;opacity:.9}
+  .per-trampa{font-size:11px;margin-top:3px;font-weight:700}
   .per-nota{margin:10px 0 0;line-height:1.55}
   /* Cuadre contra los totales que declara el archivo */
   .cu-panel{margin:16px 0;padding:14px 18px;border-radius:12px;font-size:12.5px}
@@ -1788,62 +1790,127 @@ function ensureResults(){
 }
 
 /* ---- Validación del PERÍODO de cada archivo ----
-   Un estado de cuenta exportado con el rango equivocado produce un reporte lleno de hallazgos falsos que
-   parecen reales: todos los movimientos del mes salen como "no compensados" simplemente porque no hay nada
-   contra qué compararlos. Pasó con "BANISTMO ENERO 2026.xlsx", cuyo título dice ENERO pero cuyas filas son
-   del 17 al 24 de julio. El nombre y el encabezado del archivo no sirven como control — solo las fechas.
-   Se compara el período de cada archivo contra el del diario de Caja General (la referencia del mes). */
+   Un archivo exportado con el rango equivocado produce un reporte lleno de hallazgos falsos que parecen
+   reales: todos los movimientos salen como "no compensados" simplemente porque no hay nada contra qué
+   compararlos. Pasó con "BANISTMO ENERO 2026.xlsx", que se llama enero, cuyo encabezado dice "ESTADO DE
+   CUENTA PETTY ENERO", y cuyas 14 filas son del 17 al 24 de julio.
+   REGLA: el nombre del archivo y su encabezado NO son control de nada. El período se determina únicamente
+   por las FECHAS DE LOS REGISTROS, y el mes de trabajo se decide por mayoría entre los archivos — no por
+   uno tomado como referencia, porque el equivocado podría ser justamente ese. */
 function periodoDe(arr){
   if(!arr || !arr.length) return null;
   var f = arr.map(function(x){ return x.fecha; }).filter(Boolean).sort();
   return f.length ? {desde:f[0], hasta:f[f.length-1]} : null;
 }
 function seSolapan(a, b){ return !!(a && b) && a.desde <= b.hasta && b.desde <= a.hasta; }
-// Lee los archivos cargados y compara sus períodos contra el diario de Caja General.
+// Meses (YYYY-MM) presentes en un conjunto de movimientos, con cuántos registros tiene cada uno.
+function mesesDe(arr){
+  var m = {};
+  (arr||[]).forEach(function(x){ if(x.fecha) { var k=String(x.fecha).slice(0,7); m[k]=(m[k]||0)+1; } });
+  return m;
+}
+// Mes dominante de un archivo: aquel con más registros.
+function mesDominante(arr){
+  var m = mesesDe(arr), mejor = null, max = 0;
+  Object.keys(m).forEach(function(k){ if(m[k] > max){ max = m[k]; mejor = k; } });
+  return mejor;
+}
+// Mes que menciona el NOMBRE del archivo (solo para avisar de nombres engañosos: nunca decide el período).
+var MESES_NOMBRE = {ENERO:"01",FEBRERO:"02",MARZO:"03",ABRIL:"04",MAYO:"05",JUNIO:"06",JULIO:"07",
+  AGOSTO:"08",SEPTIEMBRE:"09",SETIEMBRE:"09",OCTUBRE:"10",NOVIEMBRE:"11",DICIEMBRE:"12"};
+function mesEnNombre(nombre){
+  var n = normTxt(nombre||""), mes = null;
+  Object.keys(MESES_NOMBRE).forEach(function(k){ if(!mes && n.indexOf(k)!==-1) mes = MESES_NOMBRE[k]; });
+  return mes;
+}
+// Lee TODOS los archivos cargados y determina el período de cada uno por las fechas de sus registros.
 function diagnosticarPeriodos(raws){
   function parse(fn){ try{ return fn(); }catch(e){ return null; } }
-  var diario = raws.diarioCaja ? parse(function(){ return parseDiario(raws.diarioCaja,"Caja General"); }) : null;
-  if(!diario || !diario.length) return null;
   var fuentes = [];
-  function add(key, nombre, fn){ if(!raws[key]) return; var d=parse(fn); if(d && d.length) fuentes.push({nombre:nombre, archivo:(STATE.files[key]&&STATE.files[key].name)||"", datos:d}); }
+  function add(key, nombre, fn){
+    if(!raws[key]) return;
+    var d = parse(fn);
+    if(d && d.length) fuentes.push({clave:key, nombre:nombre, archivo:(STATE.files[key]&&STATE.files[key].name)||"", datos:d});
+  }
+  add("diarioCaja","Diario Caja General", function(){ return parseDiario(raws.diarioCaja,"Caja General"); });
+  add("reporte","Informe de caja", function(){ return parseReporteConsolidado(raws.reporte); });
   add("estBanistmo","Estado de cuenta Banistmo", function(){ return parseEstadoCuenta(raws.estBanistmo,"banistmo"); });
   add("estStg","Estado de cuenta STG", function(){ return parseEstadoCuenta(raws.estStg,"stg"); });
   add("estBancoGeneral","Estado de cuenta Banco General", function(){ return parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral"); });
-  add("reporte","Informe de caja", function(){ return parseReporteConsolidado(raws.reporte); });
   add("diarioBanistmo","Diario Banistmo", function(){ return parseDiario(raws.diarioBanistmo,"Banistmo"); });
   add("diarioStg","Diario STG", function(){ return parseDiario(raws.diarioStg,null); });
-  return validarPeriodos(diario, fuentes);
+  add("diarioBancoGeneral","Diario Banco General", function(){ return parseDiario(raws.diarioBancoGeneral,null); });
+  return validarPeriodos(fuentes);
 }
-// Panel de aviso: archivos cuyo período no coincide con el del mes que se está conciliando.
+// Compara los períodos de los archivos ENTRE SÍ. El mes de trabajo se decide por mayoría de archivos, no
+// tomando uno como referencia: si el equivocado fuera justamente ese, la comparación no serviría de nada.
+function validarPeriodos(fuentes){
+  var conDatos = (fuentes||[]).filter(function(f){ return periodoDe(f.datos); });
+  if(conDatos.length < 1) return null;
+  conDatos.forEach(function(f){
+    f.periodo = periodoDe(f.datos);
+    f.mes = mesDominante(f.datos);
+    f.meses = mesesDe(f.datos);
+  });
+  // Mes de trabajo: el más votado entre los archivos; a igualdad de votos, el que tenga más registros.
+  var votos = {}, registros = {};
+  conDatos.forEach(function(f){
+    if(!f.mes) return;
+    votos[f.mes] = (votos[f.mes]||0) + 1;
+    registros[f.mes] = (registros[f.mes]||0) + (f.meses[f.mes]||0);
+  });
+  var mesTrabajo = null;
+  Object.keys(votos).forEach(function(k){
+    if(!mesTrabajo) { mesTrabajo = k; return; }
+    if(votos[k] > votos[mesTrabajo] || (votos[k]===votos[mesTrabajo] && registros[k] > registros[mesTrabajo])) mesTrabajo = k;
+  });
+  var alertas = [];
+  conDatos.forEach(function(f){
+    var enMes = f.meses[mesTrabajo] || 0;
+    var otros = Object.keys(f.meses).filter(function(k){ return k!==mesTrabajo; });
+    // El nombre del archivo dice un mes distinto al de su contenido. No decide nada —el período sale de
+    // los registros— pero explica por qué el archivo parecía correcto: es la trampa que hay que señalar.
+    var mn = mesEnNombre(f.archivo);
+    var nombreEnganoso = !!(mn && f.mes && mn !== f.mes.slice(5,7));
+    var clase = enMes === 0 ? "ajeno" : (otros.length ? "mezclado" : null);
+    if(!clase && !nombreEnganoso) return;
+    // Una sola alerta por archivo, con todas sus razones.
+    alertas.push({clase: clase || "nombre", nombre:f.nombre, archivo:f.archivo, periodo:f.periodo,
+      mes:f.mes, meses:f.meses, otros:otros, nombreEnganoso:nombreEnganoso, mesNombre:mn});
+  });
+  return {mesTrabajo:mesTrabajo, archivos:conDatos.length, alertas:alertas};
+}
+// Panel de aviso: archivos cuyos registros no son del mismo período que los demás.
+function mesLargo(ym){
+  if(!ym) return "";
+  var n=["","enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+  var p=String(ym).split("-"); return (n[parseInt(p[1],10)]||p[1])+" "+p[0];
+}
 function periodosHtml(diag){
   if(!diag || !diag.alertas || !diag.alertas.length) return "";
   var ajenos = diag.alertas.filter(function(a){ return a.clase==="ajeno"; });
-  var h = '<div class="per-panel'+(ajenos.length?' per-grave':'')+'">' +
-    '<div class="per-title">'+(ajenos.length ? '⛔ Hay archivos de OTRO período' : '⚠ Hay archivos con un período distinto')+'</div>' +
-    '<p class="per-txt">El mes que se está conciliando, según el diario de Caja General, va del <b>'+diag.referencia.desde+'</b> al <b>'+diag.referencia.hasta+'</b>.</p>' +
+  var grave = ajenos.length > 0;
+  var h = '<div class="per-panel'+(grave?' per-grave':'')+'">' +
+    '<div class="per-title">'+(grave ? '⛔ Hay archivos con registros de OTRO período' : '⚠ Archivos con registros de más de un período')+'</div>' +
+    '<p class="per-txt">Según las fechas de los registros, el mes de trabajo es <b>'+mesLargo(diag.mesTrabajo)+
+    '</b> (es el que coincide en la mayoría de los '+diag.archivos+' archivos cargados). Estos no encajan:</p>' +
     '<table class="per-tabla"><tbody>';
   diag.alertas.forEach(function(a){
-    h += '<tr class="'+(a.clase==="ajeno"?'per-mal':'')+'"><td>'+(a.clase==="ajeno"?'✗':'⚠')+' <b>'+esc(a.nombre)+'</b>' +
-      (a.archivo? '<div class="per-arch">'+esc(a.archivo)+'</div>':'') + '</td>' +
-      '<td class="per-rango">'+a.periodo.desde+' → '+a.periodo.hasta+'</td></tr>';
+    var icono = a.clase==="ajeno" ? "✗" : (a.clase==="nombre" ? "🏷" : "⚠");
+    var detalle;
+    if(a.clase==="ajeno") detalle = "<b>no tiene ningún registro de "+mesLargo(diag.mesTrabajo)+"</b>";
+    else if(a.clase==="nombre") detalle = "sus registros son de "+mesLargo(a.mes);
+    else detalle = "mezcla registros de "+Object.keys(a.meses).sort().map(mesLargo).join(" y ");
+    if(a.nombreEnganoso) detalle += '<div class="per-trampa">🏷 ojo: el nombre del archivo dice otro mes</div>';
+    h += '<tr class="'+(a.clase==="ajeno"?'per-mal':'')+'"><td>'+icono+' <b>'+esc(a.nombre)+'</b>' +
+      (a.archivo? '<div class="per-arch">'+esc(a.archivo)+'</div>':'') +
+      '<div class="per-det">'+detalle+'</div></td>' +
+      '<td class="per-rango">'+a.periodo.desde+'<br>→ '+a.periodo.hasta+'</td></tr>';
   });
   h += '</tbody></table>';
-  if(ajenos.length) h += '<p class="per-nota"><b>Ese archivo no tiene ningún movimiento del mes que estás conciliando</b>, así que todo lo de ese banco va a salir como no compensado. No son diferencias reales: hay que volver a exportarlo con el rango correcto. Ojo: el nombre y el encabezado del archivo pueden decir un mes y contener otro — lo único confiable son las fechas de los movimientos.</p>';
+  if(grave) h += '<p class="per-nota"><b>Un archivo sin registros del mes de trabajo hace que todo lo suyo salga como no compensado</b>, y esas no son diferencias reales: hay que volver a exportarlo con el rango correcto.</p>';
+  h += '<p class="per-nota">El período se determina <b>solo por las fechas de los registros</b>. El nombre del archivo y su encabezado no se toman en cuenta: pueden decir un mes y contener otro.</p>';
   return h + '</div>';
-}
-// Devuelve la lista de archivos cuyo período no coincide con el de referencia.
-function validarPeriodos(referencia, fuentes){
-  var ref = periodoDe(referencia);
-  if(!ref) return [];
-  var alertas = [];
-  fuentes.forEach(function(f){
-    var p = periodoDe(f.datos);
-    if(!p) return;
-    if(!seSolapan(ref, p)) alertas.push({nombre:f.nombre, archivo:f.archivo, periodo:p, clase:"ajeno"});
-    else if(p.desde.slice(0,7) !== ref.desde.slice(0,7) || p.hasta.slice(0,7) !== ref.hasta.slice(0,7))
-      alertas.push({nombre:f.nombre, archivo:f.archivo, periodo:p, clase:"parcial"});
-  });
-  return {referencia:ref, alertas:alertas};
 }
 
 // Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar" (plata presente pero

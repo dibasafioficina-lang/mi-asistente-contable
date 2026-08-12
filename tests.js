@@ -312,24 +312,78 @@ test("rangoDeposito reconoce el rango del mes", () => {
 
 // Hallazgo: "BANISTMO ENERO 2026.xlsx" se llama enero, su encabezado dice "ESTADO DE CUENTA PETTY ENERO",
 // pero sus 14 filas son del 17 al 24 de julio. Produjo 28 hallazgos falsos por B/ 15,137.79.
+function movsDe(ym, n) {
+  const a = [];
+  for (let i = 1; i <= n; i++) a.push({ fecha: ym + "-" + String(i).padStart(2, "0"), debito: 0, credito: 10, descripcion: "X", fila: i });
+  return a;
+}
+
 test("detecta un archivo de otro período", () => {
-  const diario = [
-    { fecha: "2026-01-02", debito: 0, credito: 100, descripcion: "X", fila: 1 },
-    { fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "X", fila: 2 }
-  ];
-  const estadoOtroMes = [{ fecha: "2026-07-17", debito: 0, credito: 336.59, descripcion: "DEPOSITO", fila: 1 }];
-  const v = validarPeriodos(diario, [{ nombre: "Estado Banistmo", archivo: "BANISTMO ENERO 2026.xlsx", datos: estadoOtroMes }]);
+  const v = validarPeriodos([
+    { nombre: "Diario Caja General", archivo: "caja.xlsx", datos: movsDe("2026-01", 20) },
+    { nombre: "Informe de caja", archivo: "informe.xlsx", datos: movsDe("2026-01", 15) },
+    { nombre: "Estado Banistmo", archivo: "BANISTMO ENERO 2026.xlsx", datos: movsDe("2026-07", 14) }
+  ]);
+  eq(v.mesTrabajo, "2026-01");
   eq(v.alertas.length, 1, "debe alertar");
-  eq(v.alertas[0].clase, "ajeno", "el período no se solapa");
+  eq(v.alertas[0].clase, "ajeno", "sin registros del mes de trabajo");
 });
 
-test("no alerta cuando los períodos coinciden", () => {
-  const diario = [{ fecha: "2026-01-02", debito: 0, credito: 100, descripcion: "X", fila: 1 },
-                  { fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "X", fila: 2 }];
-  const estado = [{ fecha: "2026-01-05", debito: 0, credito: 50, descripcion: "DEPOSITO", fila: 1 },
-                  { fecha: "2026-01-28", debito: 0, credito: 50, descripcion: "DEPOSITO", fila: 2 }];
-  const v = validarPeriodos(diario, [{ nombre: "Estado STG", archivo: "stg.xlsx", datos: estado }]);
+// El mes se decide por mayoría, no tomando un archivo como referencia: el equivocado podría ser ese.
+test("el mes de trabajo se decide por mayoría, aunque el diario sea el equivocado", () => {
+  const v = validarPeriodos([
+    { nombre: "Diario Caja General", archivo: "caja.xlsx", datos: movsDe("2026-07", 5) },
+    { nombre: "Estado STG", archivo: "stg.xlsx", datos: movsDe("2026-01", 20) },
+    { nombre: "Informe de caja", archivo: "informe.xlsx", datos: movsDe("2026-01", 15) },
+    { nombre: "Estado Banistmo", archivo: "bani.xlsx", datos: movsDe("2026-01", 10) }
+  ]);
+  eq(v.mesTrabajo, "2026-01", "manda la mayoría");
+  eq(v.alertas.length, 1);
+  eq(v.alertas[0].nombre, "Diario Caja General", "el señalado es el que se desvía");
+});
+
+test("avisa cuando el nombre del archivo dice un mes y los registros dicen otro", () => {
+  const v = validarPeriodos([
+    { nombre: "Diario", archivo: "d.xlsx", datos: movsDe("2026-01", 10) },
+    { nombre: "Estado STG", archivo: "STG JULIO 2026.xlsx", datos: movsDe("2026-01", 10) }
+  ]);
+  eq(v.alertas.length, 1);
+  eq(v.alertas[0].clase, "nombre", "el período está bien, el nombre engaña");
+  eq(v.alertas[0].nombreEnganoso, true);
+});
+
+test("una sola alerta por archivo aunque tenga varias razones", () => {
+  const v = validarPeriodos([
+    { nombre: "Diario", archivo: "d.xlsx", datos: movsDe("2026-01", 20) },
+    { nombre: "Informe", archivo: "i.xlsx", datos: movsDe("2026-01", 15) },
+    { nombre: "Estado Banistmo", archivo: "BANISTMO ENERO 2026.xlsx", datos: movsDe("2026-07", 14) }
+  ]);
+  eq(v.alertas.length, 1, "no debe duplicarse");
+  eq(v.alertas[0].clase, "ajeno");
+  eq(v.alertas[0].nombreEnganoso, true, "y además señala el nombre engañoso");
+});
+
+test("detecta un archivo que mezcla dos meses", () => {
+  const v = validarPeriodos([
+    { nombre: "Diario", archivo: "d.xlsx", datos: movsDe("2026-01", 20) },
+    { nombre: "Estado STG", archivo: "stg.xlsx", datos: movsDe("2026-01", 10).concat(movsDe("2026-02", 3)) }
+  ]);
+  eq(v.alertas.length, 1);
+  eq(v.alertas[0].clase, "mezclado");
+});
+
+test("no alerta cuando todos los archivos son del mismo mes", () => {
+  const v = validarPeriodos([
+    { nombre: "A", archivo: "a.xlsx", datos: movsDe("2026-01", 10) },
+    { nombre: "B", archivo: "b.xlsx", datos: movsDe("2026-01", 8) }
+  ]);
   eq(v.alertas.length, 0, "no debe alertar");
+});
+
+test("mesDominante y mesEnNombre", () => {
+  eq(mesDominante(movsDe("2026-01", 10).concat(movsDe("2026-02", 3))), "2026-01");
+  eq(mesEnNombre("BANISTMO ENERO 2026.xlsx"), "01");
+  eq(mesEnNombre("estado de cta stg petty.xlsx"), null);
 });
 
 test("periodoDe y seSolapan", () => {
