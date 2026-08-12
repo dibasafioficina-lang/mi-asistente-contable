@@ -176,6 +176,60 @@ test("archivo sin movimientos no rompe", () => {
 });
 
 /* =========================================================================
+   5b. MÓDULO 1 — efectivo del día consolidado por el banco
+   ========================================================================= */
+grupo("Módulo 1 — conciliación banco vs diario");
+
+test("esDepositoEfectivo distingue efectivo de tarjeta/ACH", () => {
+  eq(esDepositoEfectivo("DEPOSITO BRINKS DEL 09/6/2026"), true);
+  eq(esDepositoEfectivo("DEPOSITO DEL 09/6/2026"), true);
+  eq(esDepositoEfectivo("DEPOSITO POR TARJETA CLAVE STG DEL 09/6/2026"), false);
+  eq(esDepositoEfectivo("DEPOSITO POR TARJETA VISA STG DEL 09/06/2026"), false);
+  eq(esDepositoEfectivo("DEPOSITO ACH"), false);
+  eq(esDepositoEfectivo("AJUSTE DE RETENCION MAYO 0.20"), false);
+});
+
+// Hallazgo: el banco acreditó 398.35 el 12-jun por el Brinks (395.00) + la ventanilla (3.35) del 09-jun,
+// que el diario registra separados. El emparejamiento por monto los cruzaba y dejaba el 3.35 huérfano.
+test("Brinks + ventanilla del mismo día se emparejan con un solo crédito consolidado", () => {
+  const diario = [
+    { fecha: "2026-06-09", debito: 395.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 09/6/2026", fila: 1 },
+    { fecha: "2026-06-09", debito: 3.35,   credito: 0, descripcion: "DEPOSITO DEL 09/6/2026",        fila: 2 }
+  ];
+  const estado = [{ fecha: "2026-06-12", debito: 0, credito: 398.35, descripcion: "Descripción", fila: 138 }];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "partidas del diario sin emparejar");
+  eq(c.faltanEnDiario.length, 0, "créditos del estado sin emparejar");
+});
+
+test("si el banco los acredita por separado, también cuadra", () => {
+  const diario = [
+    { fecha: "2026-06-08", debito: 400.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 08/6/2026", fila: 1 },
+    { fecha: "2026-06-08", debito: 1.30,   credito: 0, descripcion: "DEPOSITO DEL 08/6/2026",        fila: 2 }
+  ];
+  const estado = [
+    { fecha: "2026-06-10", debito: 0, credito: 400.00, descripcion: "Ach De Brink S Panama S.A.", fila: 10 },
+    { fecha: "2026-06-10", debito: 0, credito: 1.30,   descripcion: "Descripción",                fila: 11 }
+  ];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "partidas del diario sin emparejar");
+  eq(c.faltanEnDiario.length, 0, "créditos del estado sin emparejar");
+});
+
+test("no consolida efectivo con depósitos de tarjeta del mismo día", () => {
+  const diario = [
+    { fecha: "2026-06-09", debito: 395.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 09/6/2026", fila: 1 },
+    { fecha: "2026-06-09", debito: 3.35,   credito: 0, descripcion: "DEPOSITO DEL 09/6/2026",        fila: 2 },
+    { fecha: "2026-06-09", debito: 153.25, credito: 0, descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 09/6/2026", fila: 3 }
+  ];
+  // Solo hay crédito por el efectivo: la tarjeta debe quedar como pendiente, no arrastrada en la suma.
+  const estado = [{ fecha: "2026-06-12", debito: 0, credito: 398.35, descripcion: "Descripción", fila: 138 }];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "queda solo la tarjeta");
+  cerca(c.faltanEnBanco[0].monto, 153.25, "monto de la tarjeta");
+});
+
+/* =========================================================================
    6. E2E con el archivo real (se saltan si el archivo no está)
    ========================================================================= */
 grupo("Extremo a extremo (archivo real)");

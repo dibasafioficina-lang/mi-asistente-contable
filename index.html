@@ -1081,6 +1081,41 @@ function primerDiaMes(fechas){
 // Detecta Brinks en cualquiera de sus variantes: "Brinks Panama" (junto) o "Brink S Panama" (con espacio,
 // como aparece en el estado de cuenta de STG). Por eso se busca "BRINK" y no "BRINKS".
 function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
+// Depósito de EFECTIVO del diario: el camión de valores (Brinks) o el que se lleva a ventanilla
+// ("DEPOSITO DEL 09/6/2026"). Se distingue de los depósitos por tarjeta (VISA/CLAVE/Yappy), de los ACH y
+// de los cheques, porque solo el efectivo se comporta como se describe en consolidarEfectivoDelDia.
+function esDepositoEfectivo(desc){
+  var n = normTxt(desc);
+  if(n.indexOf("DEPOSITO")===-1 && !esBrinks(desc)) return false;
+  if(/TARJETA|VISA|CLAVE|YAPPY|MASTER|\bACH\b|CHEQUE|\bCK\b|TRANSFEREN/.test(n)) return false;
+  return true;
+}
+// El efectivo de un mismo día se registra en el diario en partidas separadas (Brinks y ventanilla, tal como
+// las reporta el informe de caja) pero el banco a veces las acredita CONSOLIDADAS en un solo crédito
+// (ej. 09-jun: 395.00 Brinks + 3.35 ventanilla → un único crédito de 398.35 el 12-jun). Otras veces las
+// acredita por separado. Se prueba la suma del día ANTES del emparejamiento genérico por monto: si no se
+// hace primero, cada partida se empareja por su cuenta contra cualquier crédito que coincida en importe y
+// deja huérfana a la otra. Devuelve la cantidad de grupos consolidados.
+function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, tolerancia){
+  var porFecha = {};
+  poolDiario.forEach(function(d, i){
+    if(d.usado || !esDepositoEfectivo(d.descripcion)) return;
+    (porFecha[d.fecha] = porFecha[d.fecha] || []).push(i);
+  });
+  var n = 0;
+  Object.keys(porFecha).sort().forEach(function(f){
+    var grupo = porFecha[f].filter(function(i){ return !poolDiario[i].usado; });
+    if(grupo.length < 2) return; // con una sola partida no hay nada que consolidar
+    var suma = Math.round(grupo.reduce(function(a,i){ return a + poolDiario[i].monto; },0)*100)/100;
+    // El efectivo clarea con rezago (el banco acredita días después), por eso la ventana se amplía.
+    var combo = buscarCombinacion(poolEstado, f, suma, Math.max(ventanaDias, 10), tolerancia);
+    if(!combo) return;
+    combo.forEach(function(i){ poolEstado[i].usado = true; });
+    grupo.forEach(function(i){ poolDiario[i].usado = true; });
+    n++;
+  });
+  return n;
+}
 
 // Busca en 'pool' (créditos del banco, con flag .usado) una combinación de 1, 2 o 3 movimientos
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
@@ -1191,6 +1226,9 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
   var VENTANA_BRINKS = Math.max(ventanaDias, 10); // el Brinks clarea con rezago (varios días)
+  // 0) efectivo del día consolidado por el banco (Brinks + ventanilla en un solo crédito). Va PRIMERO:
+  // el emparejamiento genérico por monto separaría las partidas y dejaría una huérfana.
+  consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, tolerancia);
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
     var combo = buscarCombinacion(poolEstado, d.fecha, d.monto, ventanaDias, tolerancia);
