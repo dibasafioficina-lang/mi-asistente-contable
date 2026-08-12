@@ -310,6 +310,36 @@ test("rangoDeposito reconoce el rango del mes", () => {
   eq(rangoDeposito("DEPOSITO POR TARJETA VISA STG DEL 09/6/2026"), null, "un solo día no es rango");
 });
 
+// Hallazgo: "BANISTMO ENERO 2026.xlsx" se llama enero, su encabezado dice "ESTADO DE CUENTA PETTY ENERO",
+// pero sus 14 filas son del 17 al 24 de julio. Produjo 28 hallazgos falsos por B/ 15,137.79.
+test("detecta un archivo de otro período", () => {
+  const diario = [
+    { fecha: "2026-01-02", debito: 0, credito: 100, descripcion: "X", fila: 1 },
+    { fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "X", fila: 2 }
+  ];
+  const estadoOtroMes = [{ fecha: "2026-07-17", debito: 0, credito: 336.59, descripcion: "DEPOSITO", fila: 1 }];
+  const v = validarPeriodos(diario, [{ nombre: "Estado Banistmo", archivo: "BANISTMO ENERO 2026.xlsx", datos: estadoOtroMes }]);
+  eq(v.alertas.length, 1, "debe alertar");
+  eq(v.alertas[0].clase, "ajeno", "el período no se solapa");
+});
+
+test("no alerta cuando los períodos coinciden", () => {
+  const diario = [{ fecha: "2026-01-02", debito: 0, credito: 100, descripcion: "X", fila: 1 },
+                  { fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "X", fila: 2 }];
+  const estado = [{ fecha: "2026-01-05", debito: 0, credito: 50, descripcion: "DEPOSITO", fila: 1 },
+                  { fecha: "2026-01-28", debito: 0, credito: 50, descripcion: "DEPOSITO", fila: 2 }];
+  const v = validarPeriodos(diario, [{ nombre: "Estado STG", archivo: "stg.xlsx", datos: estado }]);
+  eq(v.alertas.length, 0, "no debe alertar");
+});
+
+test("periodoDe y seSolapan", () => {
+  const p = periodoDe([{ fecha: "2026-01-31" }, { fecha: "2026-01-02" }, { fecha: null }]);
+  eq(p.desde, "2026-01-02"); eq(p.hasta, "2026-01-31");
+  eq(seSolapan({ desde: "2026-01-01", hasta: "2026-01-31" }, { desde: "2026-01-15", hasta: "2026-02-15" }), true);
+  eq(seSolapan({ desde: "2026-01-01", hasta: "2026-01-31" }, { desde: "2026-07-01", hasta: "2026-07-31" }), false);
+  eq(periodoDe([]), null);
+});
+
 // Bug introducido al formatear las cifras: un <input type="number"> con value="2,517.82" se ve VACÍO.
 test("numInput: valores de input sin separador de miles", () => {
   eq(numInput(2517.82), "2517.82");

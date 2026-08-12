@@ -80,7 +80,7 @@
     .cg-cols{grid-template-columns:1fr 1fr !important}
     /* Los botones de acción no se imprimen; el aviso de cifras incompletas SÍ debe quedar en el papel */
     .bloq-btn, .bloq-relink, .sd-copy{display:none !important}
-    .sd-panel, .bloq-panel, .bloq-aviso, .sd-item{break-inside:avoid}
+    .sd-panel, .bloq-panel, .bloq-aviso, .sd-item, .per-panel{break-inside:avoid}
   }
 
   /* Menu de modulos */
@@ -264,6 +264,18 @@
   .ret-aging .ret-viejo{color:#B5731E;font-weight:800}
   .ret-saldoini{margin-top:14px;padding:12px 16px;border-radius:10px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:13px;color:#7A5320;line-height:1.5}
   .ret-siLabel{font-size:11px;font-weight:700;color:#B5731E;background:#FBEFD9;padding:1px 6px;border-radius:6px;margin-left:6px;white-space:nowrap}
+  /* Aviso de archivos de otro periodo */
+  .per-panel{margin:16px 0;padding:14px 18px;border-radius:12px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:12.5px;color:#7A5320}
+  .per-grave{background:#FBEAEA;border:2px solid #D98A8A;color:#7A3B3B}
+  .per-title{font-weight:800;font-size:14px;margin-bottom:8px;color:#8E5A1E}
+  .per-grave .per-title{color:#8E2F2F}
+  .per-txt{margin:0 0 10px}
+  .per-tabla{width:100%;border-collapse:collapse}
+  .per-tabla td{padding:5px 8px;border-bottom:1px solid rgba(0,0,0,.06);vertical-align:top}
+  .per-mal td{background:rgba(217,138,138,.14)}
+  .per-arch{font-size:11px;opacity:.75;margin-top:2px;word-break:break-all}
+  .per-rango{text-align:right;white-space:nowrap;font-weight:700}
+  .per-nota{margin:10px 0 0;line-height:1.55}
   /* Cuadre contra los totales que declara el archivo */
   .cu-panel{margin:16px 0;padding:14px 18px;border-radius:12px;font-size:12.5px}
   .cu-ok{background:#F1F7F3;border:1px solid #CBE0D3}
@@ -1775,6 +1787,65 @@ function ensureResults(){
   if(!STATE.results) STATE.results = {paso0:undefined, paso1:undefined, paso2:undefined, paso3:undefined};
 }
 
+/* ---- Validación del PERÍODO de cada archivo ----
+   Un estado de cuenta exportado con el rango equivocado produce un reporte lleno de hallazgos falsos que
+   parecen reales: todos los movimientos del mes salen como "no compensados" simplemente porque no hay nada
+   contra qué compararlos. Pasó con "BANISTMO ENERO 2026.xlsx", cuyo título dice ENERO pero cuyas filas son
+   del 17 al 24 de julio. El nombre y el encabezado del archivo no sirven como control — solo las fechas.
+   Se compara el período de cada archivo contra el del diario de Caja General (la referencia del mes). */
+function periodoDe(arr){
+  if(!arr || !arr.length) return null;
+  var f = arr.map(function(x){ return x.fecha; }).filter(Boolean).sort();
+  return f.length ? {desde:f[0], hasta:f[f.length-1]} : null;
+}
+function seSolapan(a, b){ return !!(a && b) && a.desde <= b.hasta && b.desde <= a.hasta; }
+// Lee los archivos cargados y compara sus períodos contra el diario de Caja General.
+function diagnosticarPeriodos(raws){
+  function parse(fn){ try{ return fn(); }catch(e){ return null; } }
+  var diario = raws.diarioCaja ? parse(function(){ return parseDiario(raws.diarioCaja,"Caja General"); }) : null;
+  if(!diario || !diario.length) return null;
+  var fuentes = [];
+  function add(key, nombre, fn){ if(!raws[key]) return; var d=parse(fn); if(d && d.length) fuentes.push({nombre:nombre, archivo:(STATE.files[key]&&STATE.files[key].name)||"", datos:d}); }
+  add("estBanistmo","Estado de cuenta Banistmo", function(){ return parseEstadoCuenta(raws.estBanistmo,"banistmo"); });
+  add("estStg","Estado de cuenta STG", function(){ return parseEstadoCuenta(raws.estStg,"stg"); });
+  add("estBancoGeneral","Estado de cuenta Banco General", function(){ return parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral"); });
+  add("reporte","Informe de caja", function(){ return parseReporteConsolidado(raws.reporte); });
+  add("diarioBanistmo","Diario Banistmo", function(){ return parseDiario(raws.diarioBanistmo,"Banistmo"); });
+  add("diarioStg","Diario STG", function(){ return parseDiario(raws.diarioStg,null); });
+  return validarPeriodos(diario, fuentes);
+}
+// Panel de aviso: archivos cuyo período no coincide con el del mes que se está conciliando.
+function periodosHtml(diag){
+  if(!diag || !diag.alertas || !diag.alertas.length) return "";
+  var ajenos = diag.alertas.filter(function(a){ return a.clase==="ajeno"; });
+  var h = '<div class="per-panel'+(ajenos.length?' per-grave':'')+'">' +
+    '<div class="per-title">'+(ajenos.length ? '⛔ Hay archivos de OTRO período' : '⚠ Hay archivos con un período distinto')+'</div>' +
+    '<p class="per-txt">El mes que se está conciliando, según el diario de Caja General, va del <b>'+diag.referencia.desde+'</b> al <b>'+diag.referencia.hasta+'</b>.</p>' +
+    '<table class="per-tabla"><tbody>';
+  diag.alertas.forEach(function(a){
+    h += '<tr class="'+(a.clase==="ajeno"?'per-mal':'')+'"><td>'+(a.clase==="ajeno"?'✗':'⚠')+' <b>'+esc(a.nombre)+'</b>' +
+      (a.archivo? '<div class="per-arch">'+esc(a.archivo)+'</div>':'') + '</td>' +
+      '<td class="per-rango">'+a.periodo.desde+' → '+a.periodo.hasta+'</td></tr>';
+  });
+  h += '</tbody></table>';
+  if(ajenos.length) h += '<p class="per-nota"><b>Ese archivo no tiene ningún movimiento del mes que estás conciliando</b>, así que todo lo de ese banco va a salir como no compensado. No son diferencias reales: hay que volver a exportarlo con el rango correcto. Ojo: el nombre y el encabezado del archivo pueden decir un mes y contener otro — lo único confiable son las fechas de los movimientos.</p>';
+  return h + '</div>';
+}
+// Devuelve la lista de archivos cuyo período no coincide con el de referencia.
+function validarPeriodos(referencia, fuentes){
+  var ref = periodoDe(referencia);
+  if(!ref) return [];
+  var alertas = [];
+  fuentes.forEach(function(f){
+    var p = periodoDe(f.datos);
+    if(!p) return;
+    if(!seSolapan(ref, p)) alertas.push({nombre:f.nombre, archivo:f.archivo, periodo:p, clase:"ajeno"});
+    else if(p.desde.slice(0,7) !== ref.desde.slice(0,7) || p.hasta.slice(0,7) !== ref.hasta.slice(0,7))
+      alertas.push({nombre:f.nombre, archivo:f.archivo, periodo:p, clase:"parcial"});
+  });
+  return {referencia:ref, alertas:alertas};
+}
+
 // Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar" (plata presente pero
 // sin etiqueta de banco) o "en_transito" (cheque pendiente por cambiar). Esas dos NO bloquean el paso.
 function esSinConfirmar(item){ return item && item.clase==="sin_confirmar"; }
@@ -1882,6 +1953,9 @@ function ejecutarConciliacion(){
     try{
       var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
       ensureResults();
+      // Antes de conciliar nada: verificar que los archivos sean del mismo período. Un estado de cuenta
+      // exportado con el rango equivocado genera decenas de hallazgos falsos que parecen reales.
+      STATE.periodos = diagnosticarPeriodos(raws);
       // Paso 0 OBLIGATORIO: se corre primero. Si falta o no cuadra, se bloquean las conciliaciones.
       STATE.results.paso0 = computePasoResult("paso0", raws, opts);
       if(!pasoCuadrado("paso0")){
@@ -3242,6 +3316,7 @@ function renderResultados(){
 
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
+  html += periodosHtml(STATE.periodos); // primero: si un archivo es de otro mes, nada de lo demás es confiable
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
 
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
