@@ -1115,6 +1115,12 @@ function esDepositoEfectivo(desc){
 // hace primero, cada partida se empareja por su cuenta contra cualquier crédito que coincida en importe y
 // deja huérfana a la otra. Devuelve la cantidad de grupos consolidados.
 function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, tolerancia){
+  // El efectivo NUNCA compensa en una remisión de tarjeta: el banco lo acredita como depósito o ACH de
+  // Brinks. Si no se excluyen, la suma del día se engancha con una remisión que coincida en importe por
+  // casualidad — pasó en enero: el efectivo se comió la Remisión V/Mc de 350.91 del 23-ene y dejó
+  // huérfano al asiento que acumula toda la VISA del mes. Comparten objetos, así que marcar `usado` en
+  // este subconjunto marca también el pool original.
+  var candidatos = poolEstado.filter(function(e){ return !esRemisionVisa(e.descripcion) && !esRemisionClave(e.descripcion); });
   var porFecha = {};
   poolDiario.forEach(function(d, i){
     if(d.usado || !esDepositoEfectivo(d.descripcion)) return;
@@ -1126,9 +1132,9 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
     if(grupo.length < 2) return; // con una sola partida no hay nada que consolidar
     var suma = Math.round(grupo.reduce(function(a,i){ return a + poolDiario[i].monto; },0)*100)/100;
     // El efectivo clarea con rezago (el banco acredita días después), por eso la ventana se amplía.
-    var combo = buscarCombinacion(poolEstado, f, suma, Math.max(ventanaDias, 10), tolerancia);
+    var combo = buscarCombinacion(candidatos, f, suma, Math.max(ventanaDias, 10), tolerancia);
     if(!combo) return;
-    combo.forEach(function(i){ poolEstado[i].usado = true; });
+    combo.forEach(function(i){ candidatos[i].usado = true; });
     grupo.forEach(function(i){ poolDiario[i].usado = true; });
     n++;
   });
@@ -1141,6 +1147,62 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
 // (ej. 429.74 aparece como 314.55 + 115.19). Devuelve los índices usados o null.
 // Importe con el que se concilia una linea: el neto cuando se conoce (VISA), si no el propio monto.
 function montoConc(x){ return x.montoConc!=null ? x.montoConc : x.monto; }
+// Depósito de TARJETA en el diario (VISA, CLAVE, o genérico "por tarjeta").
+function esDepositoTarjeta(desc){
+  var n = normTxt(desc);
+  return n.indexOf("TARJETA")!==-1 || n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1 || n.indexOf("CLAVE")!==-1;
+}
+// Una "Remisión V/Mc"/"Remisión Clave" del estado SOLO puede compensar un depósito de tarjeta: el
+// efectivo, los cheques y los ACH entran al banco por otra vía. No se exige que el método coincida —el
+// comprobante suele decir "VISA" y traer también CLAVE, y lo que vale es que la tarjeta cuadre— pero sí
+// que sea tarjeta. Sin esta regla el efectivo del 23-ene (300.91+50.00) se comía la remisión de 350.91.
+function compatibleConRemision(descEstado, descDiario){
+  if(!esRemisionVisa(descEstado) && !esRemisionClave(descEstado)) return true;
+  return esDepositoTarjeta(descDiario);
+}
+// Líneas del estado que compensan el MÉTODO de un depósito (VISA → Remisión V/Mc, CLAVE → Remisión
+// Clave). Devuelve null si el depósito no dice el método. Comparte los objetos del pool, así que marcar
+// `usado` en el subconjunto marca también el pool original.
+function poolDelMetodo(poolEstado, desc){
+  var n = normTxt(desc);
+  if(n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1) return poolEstado.filter(function(e){ return esRemisionVisa(e.descripcion); });
+  if(n.indexOf("CLAVE")!==-1) return poolEstado.filter(function(e){ return esRemisionClave(e.descripcion); });
+  return null;
+}
+// Retención VISA acumulada de un rango de días del mes (para los asientos que cubren todo el período).
+function retencionDelRango(retVisaPorDia, rg){
+  var total = 0;
+  Object.keys(retVisaPorDia||{}).forEach(function(f){
+    if(f.slice(0,7)!==rg.ym) return;
+    var dd = parseInt(f.slice(8,10),10);
+    if(dd>=rg.diaIni && dd<=rg.diaFin) total += retVisaPorDia[f];
+  });
+  return Math.round(total*100)/100;
+}
+// DEPÓSITO ACUMULADO DEL PERÍODO: algunos meses el diario registra la tarjeta de TODO el mes en un solo
+// asiento del último día ("DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026") mientras el banco la
+// fue acreditando en remisiones diarias. Se busca el conjunto de remisiones DEL MISMO MÉTODO que sumen el
+// asiento. El diario puede traer el NETO (Caja General a veces trae el BRUTO), así que se prueban los dos.
+// Va antes del emparejamiento genérico: si no, cada remisión suelta se engancharía por coincidencia de
+// importe con cualquier otro depósito y el acumulado quedaría huérfano.
+function conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolerancia){
+  poolDiario.forEach(function(d){
+    if(d.usado) return;
+    var rg = rangoDeposito(d.descripcion);
+    if(!rg) return;
+    var cands = poolDelMetodo(poolEstado, d.descripcion);
+    if(!cands || !cands.length) return;
+    var objetivos = [d.monto];                                   // el diario ya trae el neto
+    if(retVisaPorDia){
+      var ret = retencionDelRango(retVisaPorDia, rg);
+      if(ret>0) objetivos.push(Math.round((d.monto-ret)*100)/100); // el diario trae el bruto del período
+    }
+    for(var i=0;i<objetivos.length;i++){
+      var combo = buscarSubsetSuma(cands, d.fecha, objetivos[i], 366, tolerancia, 60, "atras");
+      if(combo){ combo.forEach(function(k){ cands[k].usado=true; }); d.usado=true; return; }
+    }
+  });
+}
 function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
@@ -1252,6 +1314,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   if(retVisaPorDia){
     poolDiario.forEach(function(d){
       if(normTxt(d.descripcion).indexOf("VISA")===-1) return;
+      if(rangoDeposito(d.descripcion)) return; // acumulado del período: su retención es la del RANGO, no la de un día
       var r = retVisaPorDia[d.fecha];
       if(r==null) return;
       d.montoConc = Math.round((d.monto - r)*100)/100;
@@ -1262,6 +1325,9 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   // 0) efectivo del día consolidado por el banco (Brinks + ventanilla en un solo crédito). Va PRIMERO:
   // el emparejamiento genérico por monto separaría las partidas y dejaría una huérfana.
   consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, tolerancia);
+  // 0b) asiento que acumula toda la tarjeta del mes contra sus remisiones diarias. También va primero:
+  // consume de una vez las remisiones que si no se emparejarían sueltas con cualquier otro depósito.
+  conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolerancia);
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
     // VISA: el banco SIEMPRE compensa el NETO (bruto − retención del día); el diario registra el bruto y la
@@ -1272,24 +1338,28 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // El objetivo es el importe conciliable: el neto para la VISA con retención conocida, el monto en el
     // resto. Si la remisión no aparece por su neto es un pendiente real, no algo a emparejar por otra vía.
     var objetivo = montoConc(d);
-    var combo = buscarCombinacion(poolEstado, d.fecha, objetivo, ventanaDias, tolerancia);
+    // Solo los créditos que este depósito PUEDE compensar (las remisiones de tarjeta quedan reservadas
+    // para depósitos de tarjeta). Comparte los objetos, así que marcar `usado` marca el pool original.
+    var cand = poolEstado.filter(function(e){ return compatibleConRemision(e.descripcion, d.descripcion); });
+    var combo = buscarCombinacion(cand, d.fecha, objetivo, ventanaDias, tolerancia);
     // Brinks: depósito Brinks del diario → crédito Brinks del estado, con ventana amplia (rezago).
     if(!combo && esBrinks(d.descripcion)){
-      combo = buscarBrinks(poolEstado, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
+      combo = buscarBrinks(cand, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
     }
     // Depósito combinado: el diario registra un depósito global (ej. ACH de varios certificados por
     // 1313.10) que el estado refleja partido en MÁS de 3 líneas y con unos días de rezago. Se prueba una
     // combinación de hasta 5 créditos con ventana algo más amplia.
     if(!combo){
-      combo = buscarSubsetSuma(poolEstado, d.fecha, objetivo, Math.max(ventanaDias, 8), tolerancia, 5);
+      combo = buscarSubsetSuma(cand, d.fecha, objetivo, Math.max(ventanaDias, 8), tolerancia, 5);
     }
-    if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
+    if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); d.usado=true; }
   });
   // 2) cada crédito del estado no usado contra una combinación de débitos del diario no usados
   poolEstado.forEach(function(e){
     if(e.usado) return;
-    var combo = buscarCombinacion(poolDiario, e.fecha, e.monto, ventanaDias, tolerancia);
-    if(combo){ combo.forEach(function(i){ poolDiario[i].usado=true; }); e.usado=true; }
+    var cand = poolDiario.filter(function(d){ return compatibleConRemision(e.descripcion, d.descripcion); });
+    var combo = buscarCombinacion(cand, e.fecha, e.monto, ventanaDias, tolerancia);
+    if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); e.usado=true; }
   });
   return {
     faltanEnBanco: poolDiario.filter(function(d){ return !d.usado; }),   // en el diario, no en el estado
@@ -1666,6 +1736,8 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
   var usadas = new Array(remisiones.length).fill(false);
   var hallazgos = [];
   retVisa.forEach(function(d){
+    // Día sin ventas VISA (el informe trae la fila en cero): no hay nada que compensar en el banco.
+    if(Math.abs(d.neto) <= tolerancia) return;
     var mejor=-1, mejorDist=Infinity;
     remisiones.forEach(function(r, idx){
       if(usadas[idx]) return;
@@ -3878,10 +3950,13 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
               sentido:t.sentido, banco:banco, usado:false, pool:poolDe(t)};
     });
-    // Paso A: cada partida contra su pool, hacia adelante (una compensación por partida).
+    // Paso A: cada partida contra su pool, hacia adelante. Hasta 3 líneas: el banco a veces parte un
+    // depósito en varios créditos (el depósito en tránsito de 92.97 del 29-dic entró el 02-ene como
+    // 60.41 + 32.56); con una sola línea permitida quedaba "pendiente" y sus dos créditos salían como
+    // diferencia en el Paso 3.
     chs.forEach(function(ch){
       if(ch.usado) return;
-      var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
+      var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 3, "adelante");
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
     // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco

@@ -495,6 +495,70 @@ test("una partida del Paso 0 no puede consumir dos líneas del estado", () => {
   eq(est.filter(x => x._transitoUsado).length, 1, "solo una línea del estado se marca como usada");
 });
 
+/* ---- El asiento que acumula toda la tarjeta del mes ----
+   El diario STG registra la VISA de enero completo en un solo asiento del 31 (5,543.17) mientras el banco
+   la fue acreditando en 15 remisiones diarias. Sin esta pasada, las 15 salían como diferencia. */
+const REMISIONES = [
+  ["2026-01-06", 925.59], ["2026-01-10", 70.76], ["2026-01-12", 6.09], ["2026-01-14", 367.11],
+  ["2026-01-16", 484.63], ["2026-01-17", 544.64], ["2026-01-19", 155.35], ["2026-01-20", 148.05],
+  ["2026-01-21", 381.31], ["2026-01-22", 571.44], ["2026-01-23", 350.91], ["2026-01-26", 279.46],
+  ["2026-01-28", 81.85],  ["2026-01-29", 445.22], ["2026-01-31", 730.76]
+];
+const estRemisiones = () => REMISIONES.map(([f, m], i) => (
+  { fecha: f, debito: 0, credito: m, descripcion: "Remisión V/Mc 016005605 Liq. No. " + (3744856 + i), fila: 10 + i }));
+const ACUM_NETO = 5543.17;
+
+test("el asiento que acumula la VISA del mes cuadra contra sus remisiones diarias", () => {
+  const diario = [{ fecha: "2026-01-31", debito: ACUM_NETO, credito: 0,
+    descripcion: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026.", referencia: "ME-00000001854", fila: 90 }];
+  const c = conciliarBancoEstado(diario, estRemisiones(), 3, 0.01, { "2026-01-31": 35.84 });
+  eq(c.faltanEnBanco.length, 0, "el acumulado queda cuadrado");
+  eq(c.faltanEnDiario.length, 0, "y consume las 15 remisiones");
+});
+
+test("el acumulado también cuadra si el diario trae el BRUTO del período", () => {
+  // Caja General registra el bruto (5,823.79 = 5,543.17 + 280.62 de retenciones del mes).
+  const retDia = {};
+  REMISIONES.forEach(([f], i) => { retDia[f] = [47.5, 3.64, 0.32, 18.62, 24.88, 27.79, 7.96, 6.76, 19.57, 29.32, 17.3, 14.32, 4.1, 22.7, 35.84][i]; });
+  const diario = [{ fecha: "2026-01-31", debito: 5823.79, credito: 0,
+    descripcion: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026.", referencia: "ME-00000001854", fila: 90 }];
+  const c = conciliarBancoEstado(diario, estRemisiones(), 3, 0.01, retDia);
+  eq(c.faltanEnBanco.length, 0, "resta las retenciones del RANGO, no las de un día");
+});
+
+// El efectivo del día se enganchaba con cualquier crédito que coincidiera en importe — incluida una
+// remisión de tarjeta. Se comió la Remisión V/Mc de 350.91 y dejó huérfano el acumulado del mes.
+test("el efectivo del día no puede consumir una remisión de tarjeta", () => {
+  const diario = [
+    { fecha: "2026-01-23", debito: 300.91, credito: 0, descripcion: "DEPOSITO BRINKS DEL 23/01/2026", fila: 1 },
+    { fecha: "2026-01-23", debito: 50.00,  credito: 0, descripcion: "DEPOSITO DEL 23/01/2026",        fila: 2 }
+  ];
+  // El único crédito que suma 350.91 es una remisión VISA: el efectivo NO debe tomarla.
+  const estado = [{ fecha: "2026-01-23", debito: 0, credito: 350.91, descripcion: "Remisión V/Mc 016005605", fila: 20 }];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, null);
+  eq(c.faltanEnBanco.length, 2, "el efectivo queda pendiente, no se cuadra contra la remisión");
+  eq(c.faltanEnDiario.length, 1, "y la remisión sigue libre para su propio asiento");
+});
+
+// Un día sin ventas VISA (fila en cero en el informe) no tiene nada que compensar en el banco.
+test("un día VISA en cero no genera hallazgo", () => {
+  eq(paso4([{ fecha: "2026-01-30", bruto: 0, retenciones: 0, neto: 0 }], [], 3, 0.01).length, 0);
+  eq(paso4([{ fecha: "2026-01-30", bruto: 100, retenciones: -5, neto: 95 }], [], 3, 0.01).length, 1);
+});
+
+// El banco parte un depósito en tránsito en varios créditos: 92.97 del 29-dic entró como 60.41 + 32.56.
+test("una partida del Paso 0 puede compensar en varias líneas del estado", () => {
+  const est = [
+    { fecha: "2026-01-02", debito: 0, credito: 60.41, descripcion: "Descripción", fila: 3 },
+    { fecha: "2026-01-02", debito: 0, credito: 32.56, descripcion: "Descripción", fila: 5 }
+  ];
+  const r = consumirTransitoPrevio(
+    [{ fecha: "2025-12-29", banco: "STG", monto: 92.97, concepto: "deposito en transito", comprobante: "ME-00000001824", sentido: "credito" }],
+    { STG: est }, 0.01);
+  eq(r.pendientes.length, 0, "compensó partido en dos");
+  eq(est.filter(x => x._transitoUsado).length, 2, "las dos líneas quedan consumidas");
+});
+
 test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {
   const h = paso0(P0_VISA, EST_VISA(), [], null, 3, 0.01);
   eq(h.filter(x => esEnTransito(x) && /mes anterior/i.test(x.motivo || "")).length, 2, "se deja la traza");
