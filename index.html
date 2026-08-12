@@ -232,6 +232,7 @@
   .cg-tot{border-top:2px solid #CDE7D6;margin-top:4px;font-weight:700}
   .cg-tot span{font-weight:800;color:var(--heading)}
   .cg-dif b{font-size:15px}
+  .cg-src{font-style:normal;font-size:10.5px;color:var(--slate);opacity:.85;display:block}
   .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
     border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
   .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
@@ -421,6 +422,9 @@ function esc(s){
 }
 // Formato de las cifras que se MUESTRAN: separador de miles + 2 decimales (1,000.00). Los cálculos y las
 // claves internas siguen usando el número crudo.
+// Valor para un <input type="number">: SIN separador de miles. Un value con coma ("2,517.82") es
+// invalido para el control y el navegador lo deja VACIO — el campo se ve en blanco aunque haya dato.
+function numInput(n){ var v=Number(n); return isNaN(v)? "" : String(Math.round(v*100)/100); }
 function fmt(n){
   var v=Number(n); if(isNaN(v)) v=0;
   var neg=v<0, partes=Math.abs(v).toFixed(2).split(".");
@@ -1121,17 +1125,19 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
 // El banco a veces refleja un depósito combinado de Caja General partido en varias líneas
 // (ej. 429.74 aparece como 314.55 + 115.19). Devuelve los índices usados o null.
+// Importe con el que se concilia una linea: el neto cuando se conoce (VISA), si no el propio monto.
+function montoConc(x){ return x.montoConc!=null ? x.montoConc : x.monto; }
 function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
   for(var i=0;i<pool.length;i++){ if(!pool[i].usado && daysBetween(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
   var a, b, c;
-  for(a=0;a<idxs.length;a++){ if(Math.abs(pool[idxs[a]].monto - objetivo) <= tolerancia) return [idxs[a]]; }
+  for(a=0;a<idxs.length;a++){ if(Math.abs(montoConc(pool[idxs[a]]) - objetivo) <= tolerancia) return [idxs[a]]; }
   for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++){
-    if(Math.abs(pool[idxs[a]].monto + pool[idxs[b]].monto - objetivo) <= tolerancia) return [idxs[a],idxs[b]];
+    if(Math.abs(montoConc(pool[idxs[a]]) + montoConc(pool[idxs[b]]) - objetivo) <= tolerancia) return [idxs[a],idxs[b]];
   }
   for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++) for(c=b+1;c<idxs.length;c++){
-    if(Math.abs(pool[idxs[a]].monto + pool[idxs[b]].monto + pool[idxs[c]].monto - objetivo) <= tolerancia) return [idxs[a],idxs[b],idxs[c]];
+    if(Math.abs(montoConc(pool[idxs[a]]) + montoConc(pool[idxs[b]]) + montoConc(pool[idxs[c]]) - objetivo) <= tolerancia) return [idxs[a],idxs[b],idxs[c]];
   }
   return null;
 }
@@ -1159,8 +1165,8 @@ function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, 
     if(Math.abs(restante) <= tolerancia && acc.length>0){ res = acc.slice(); return; }
     if(acc.length >= maxN) return;
     for(var j=start;j<idxs.length;j++){
-      if(pool[idxs[j]].monto - restante > tolerancia) continue; // no puede pasarse
-      acc.push(idxs[j]); rec(j+1, restante - pool[idxs[j]].monto, acc); acc.pop();
+      if(montoConc(pool[idxs[j]]) - restante > tolerancia) continue; // no puede pasarse
+      acc.push(idxs[j]); rec(j+1, restante - montoConc(pool[idxs[j]]), acc); acc.pop();
       if(res) return;
     }
   }
@@ -1225,18 +1231,33 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   }
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
+  // VISA: el banco SIEMPRE compensa el NETO (bruto − retención del día). El diario registra el bruto, así
+  // que se le adjunta el importe con el que hay que conciliarlo. Todas las búsquedas usan `montoConc`, de
+  // modo que ninguna pasada —ni la directa ni la inversa— pueda engancharlo por el bruto.
+  if(retVisaPorDia){
+    poolDiario.forEach(function(d){
+      if(normTxt(d.descripcion).indexOf("VISA")===-1) return;
+      var r = retVisaPorDia[d.fecha];
+      if(r==null) return;
+      d.montoConc = Math.round((d.monto - r)*100)/100;
+      d.retencion = r;
+    });
+  }
   var VENTANA_BRINKS = Math.max(ventanaDias, 10); // el Brinks clarea con rezago (varios días)
   // 0) efectivo del día consolidado por el banco (Brinks + ventanilla en un solo crédito). Va PRIMERO:
   // el emparejamiento genérico por monto separaría las partidas y dejaría una huérfana.
   consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, tolerancia);
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
-    var combo = buscarCombinacion(poolEstado, d.fecha, d.monto, ventanaDias, tolerancia);
-    // VISA compensa NETO en el estado: el diario registra el bruto → probar bruto − retención del día
-    // (la 'Remisión V/Mc' del estado ya viene con la retención descontada). Solo aplica a líneas VISA.
-    if(!combo && retVisaPorDia && retVisaPorDia[d.fecha]!=null && normTxt(d.descripcion).indexOf("VISA")!==-1){
-      combo = buscarCombinacion(poolEstado, d.fecha, Math.round((d.monto - retVisaPorDia[d.fecha])*100)/100, ventanaDias, tolerancia);
-    }
+    // VISA: el banco SIEMPRE compensa el NETO (bruto − retención del día); el diario registra el bruto y la
+    // 'Remisión V/Mc' del estado ya viene con la retención descontada. Por eso, cuando se conoce la
+    // retención del día, el neto es la ÚNICA interpretación válida y se prueba PRIMERO: si se probara el
+    // bruto antes, podría engancharse con cualquier crédito que coincidiera en importe (o con una
+    // combinación de dos o tres) y dejar huérfana la remisión real.
+    // El objetivo es el importe conciliable: el neto para la VISA con retención conocida, el monto en el
+    // resto. Si la remisión no aparece por su neto es un pendiente real, no algo a emparejar por otra vía.
+    var objetivo = montoConc(d);
+    var combo = buscarCombinacion(poolEstado, d.fecha, objetivo, ventanaDias, tolerancia);
     // Brinks: depósito Brinks del diario → crédito Brinks del estado, con ventana amplia (rezago).
     if(!combo && esBrinks(d.descripcion)){
       combo = buscarBrinks(poolEstado, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
@@ -1245,7 +1266,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // 1313.10) que el estado refleja partido en MÁS de 3 líneas y con unos días de rezago. Se prueba una
     // combinación de hasta 5 créditos con ventana algo más amplia.
     if(!combo){
-      combo = buscarSubsetSuma(poolEstado, d.fecha, d.monto, Math.max(ventanaDias, 8), tolerancia, 5);
+      combo = buscarSubsetSuma(poolEstado, d.fecha, objetivo, Math.max(ventanaDias, 8), tolerancia, 5);
     }
     if(combo){ combo.forEach(function(i){ poolEstado[i].usado=true; }); d.usado=true; }
   });
@@ -3393,11 +3414,12 @@ function cierreCajaHtml(){
         '<div class="cg-note">'+tm.count+' partida(s). Este es el dinero que la empresa registró y el banco reflejará el mes siguiente.</div>' +
       '</div>' +
       '<div class="cg-box"><div class="cg-h">Balance de Caja General</div>' +
-        '<div class="cg-row"><span>Saldo inicial</span><input id="cajaInicial" class="cg-inp" type="number" step="0.01" value="'+fmt(inicial)+'"></div>' +
-        '<div class="cg-row"><span>+ Movimiento en tránsito</span><input id="cajaMov" class="cg-inp" type="number" step="0.01" value="'+fmt(movimiento)+'"></div>' +
+        '<div class="cg-row"><span>Saldo inicial'+(saldo.fechaInicial?' <i class="cg-src">del sistema · '+saldo.fechaInicial+'</i>':'')+'</span><input id="cajaInicial" class="cg-inp" type="number" step="0.01" value="'+numInput(inicial)+'"></div>' +
+        '<div class="cg-row"><span>+ Movimiento del mes <i class="cg-src">según el sistema</i></span><input id="cajaMov" class="cg-inp" type="number" step="0.01" value="'+numInput(movimiento)+'"></div>' +
         '<div class="cg-row cg-tot"><span>= Saldo final esperado</span><b id="cajaFinalEsp">B/ '+fmt(finalEsp)+'</b></div>' +
-        '<div class="cg-row"><span>Saldo final del sistema</span><input id="cajaSistema" class="cg-inp" type="number" step="0.01" value="'+fmt(sistema)+'"></div>' +
+        '<div class="cg-row"><span>Saldo final del sistema'+(saldo.fechaFinal?' <i class="cg-src">'+saldo.fechaFinal+'</i>':'')+'</span><input id="cajaSistema" class="cg-inp" type="number" step="0.01" value="'+numInput(sistema)+'"></div>' +
         '<div class="cg-row cg-dif"><span>Diferencia</span><b id="cajaDif" style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>' +
+        (saldo.inicial==null && saldo.final==null ? '<div class="cg-note">Los saldos no se pudieron leer del navegador de Caja General — ingresalos a mano para que la comparación tenga sentido.</div>' : '') +
       '</div>' +
     '</div>' +
     '<button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button>' +

@@ -216,6 +216,33 @@ test("si el banco los acredita por separado, también cuadra", () => {
   eq(c.faltanEnDiario.length, 0, "créditos del estado sin emparejar");
 });
 
+// Regla de negocio: el banco SIEMPRE compensa la VISA por el neto (bruto − retención del día).
+test("VISA: se empareja por el neto, no por el bruto", () => {
+  const diario = [{ fecha: "2026-06-08", debito: 503.17, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA STG DEL 08/6/2026", fila: 1 }];
+  const estado = [{ fecha: "2026-06-08", debito: 0, credito: 478.60, descripcion: "Remisión V/Mc 016005605", fila: 10 }];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, { "2026-06-08": 24.57 });
+  eq(c.faltanEnBanco.length, 0, "VISA sin emparejar");
+  eq(c.faltanEnDiario.length, 0, "remisión sin emparejar");
+});
+
+test("VISA: con la retención conocida NO se empareja por el bruto", () => {
+  // Un crédito que coincide con el BRUTO no debe capturar la línea VISA: su compensación es el neto.
+  const diario = [{ fecha: "2026-06-08", debito: 503.17, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA STG DEL 08/6/2026", fila: 1 }];
+  const estado = [{ fecha: "2026-06-08", debito: 0, credito: 503.17, descripcion: "Otro deposito cualquiera", fila: 10 }];
+  const c = conciliarBancoEstado(diario, estado, 3, 0.01, { "2026-06-08": 24.57 });
+  eq(c.faltanEnBanco.length, 1, "la VISA queda pendiente (su neto no llegó)");
+  eq(c.faltanEnDiario.length, 1, "el otro crédito queda sin par");
+});
+
+// Bug introducido al formatear las cifras: un <input type="number"> con value="2,517.82" se ve VACÍO.
+test("numInput: valores de input sin separador de miles", () => {
+  eq(numInput(2517.82), "2517.82");
+  eq(numInput(-15), "-15");
+  eq(numInput(0), "0");
+  eq(numInput(null), "0");
+  if (/,/.test(numInput(1234567.89))) throw new Error("numInput no debe llevar coma de miles");
+});
+
 test("no consolida efectivo con depósitos de tarjeta del mismo día", () => {
   const diario = [
     { fecha: "2026-06-09", debito: 395.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 09/6/2026", fila: 1 },
