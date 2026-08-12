@@ -234,6 +234,46 @@ test("VISA: con la retención conocida NO se empareja por el bruto", () => {
   eq(c.faltanEnDiario.length, 1, "el otro crédito queda sin par");
 });
 
+// Hallazgo: el navegador registró 1,127.27 como "DEPOSITO POR TARJETA VISA BANISTMO", pero el informe de
+// caja de ese día lo desglosa en VISA 733.55 + CLAVE 393.72, que es como el banco los acredita.
+// El informe es la fuente de referencia cuando el detalle del navegador viene incompleto.
+const REPORTE_02ENE = [
+  { fecha: "2026-01-02", cajera: "ANA", banco: "Banistmo", metodo: "VISA",  monto: 733.55, fila: 7 },
+  { fecha: "2026-01-02", cajera: "ANA", banco: "Banistmo", metodo: "CLAVE", monto: 393.72, fila: 7 }
+];
+const DIARIO_02ENE = [{ fecha: "2026-01-02", debito: 0, credito: 1127.27,
+  descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 02/01/2026", referencia: "ME-00000001827", fila: 6 }];
+
+test("desgloseDelInforme encuentra las partidas del día", () => {
+  const d = desgloseDelInforme(REPORTE_02ENE, "2026-01-02", "Banistmo", 1127.27, 0.01);
+  if (!d) throw new Error("no encontró el desglose");
+  eq(d.length, 2);
+  cerca(d.reduce((a, p) => a + p.monto, 0), 1127.27, "suma de las partidas");
+});
+
+test("desgloseDelInforme no inventa: si no suma el monto, devuelve null", () => {
+  eq(desgloseDelInforme(REPORTE_02ENE, "2026-01-02", "Banistmo", 999.99, 0.01), null);
+  eq(desgloseDelInforme(REPORTE_02ENE, "2026-01-03", "Banistmo", 1127.27, 0.01), null);
+});
+
+test("consolidado del navegador que el banco acredita separado: coteja, no es hallazgo", () => {
+  const estado = [
+    { fecha: "2026-01-02", debito: 0, credito: 733.55, descripcion: "DEPOSITO", fila: 2 },
+    { fecha: "2026-01-05", debito: 0, credito: 393.72, descripcion: "DEPOSITO", fila: 3 }
+  ];
+  const h = paso2(DIARIO_02ENE, estado, [], null, null, null, 3, 0.01, REPORTE_02ENE);
+  eq(h.filter(x => Math.abs(x.monto - 1127.27) < 0.01).length, 0, "no debe reportarse");
+});
+
+test("si falta una partida en el banco, sí se reporta y se explica el desglose", () => {
+  const estado = [{ fecha: "2026-01-02", debito: 0, credito: 733.55, descripcion: "DEPOSITO", fila: 2 }];
+  const h = paso2(DIARIO_02ENE, estado, [], null, null, null, 3, 0.01, REPORTE_02ENE);
+  const c = h.filter(x => Math.abs(x.monto - 1127.27) < 0.01);
+  eq(c.length, 1, "debe reportarse");
+  if (!/VISA B\/ 733\.55 \+ CLAVE B\/ 393\.72/.test(c[0].texto))
+    throw new Error("el hallazgo debe explicar el desglose del informe");
+});
+
 // Bug introducido al formatear las cifras: un <input type="number"> con value="2,517.82" se ve VACÍO.
 test("numInput: valores de input sin separador de miles", () => {
   eq(numInput(2517.82), "2517.82");

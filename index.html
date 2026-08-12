@@ -1292,8 +1292,21 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
 //    cada cheque se cuadra por separado contra el banco; los que no compensan quedan en tránsito.
 //  - Un cheque que no aparece en su banco se busca en los otros bancos; si aparece en otro, se marca
 //    como banco mal asignado; si no aparece en ninguno, queda "en tránsito" (pendiente por cambiar).
-// estBancoGeneral, retVisa y chequesDetalle son opcionales.
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia){
+// estBancoGeneral, retVisa, chequesDetalle y reporte son opcionales.
+//
+// El INFORME DE CAJA es la fuente de referencia del desglose: el navegador a veces registra un depósito
+// consolidado bajo una sola etiqueta (ej. "DEPOSITO POR TARJETA VISA BANISTMO" por 1,127.27) cuando en
+// realidad son varios métodos que el banco acredita por separado (VISA 733.55 + CLAVE 393.72). Ante un
+// depósito que no aparece en el estado se consulta el informe de ese día y banco: si sus partidas suman lo
+// mismo, el asiento COTEJA aunque la etiqueta del navegador esté incompleta. Devuelve las partidas o null.
+function desgloseDelInforme(reporte, fecha, banco, monto, tolerancia){
+  if(!reporte || !reporte.length) return null;
+  var partes = reporte.filter(function(r){ return r.fecha===fecha && r.banco===banco && r.monto>0; });
+  if(partes.length < 2) return null; // con una sola partida no aporta nada nuevo
+  var suma = Math.round(partes.reduce(function(a,r){ return a+r.monto; },0)*100)/100;
+  return Math.abs(suma - monto) <= tolerancia ? partes : null;
+}
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
@@ -1322,9 +1335,31 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(!combo && banco==="STG" && retVisaPorDia && retVisaPorDia[dep.fecha]!=null){
         combo = buscarCombinacion(pool, dep.fecha, Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100, ventanaDias, tolerancia);
       }
+      // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
+      // Se consulta el INFORME DE CAJA —la referencia del desglose— y se busca cada partida en el estado.
+      var desglose = null, partesHalladas = null;
+      if(!combo){
+        desglose = desgloseDelInforme(reporte, dep.fecha, banco, objetivo, tolerancia);
+        if(desglose){
+          var idxs = [], todas = true;
+          desglose.forEach(function(p){
+            if(!todas) return;
+            var c = buscarCombinacion(pool, dep.fecha, p.monto, ventanaDias, tolerancia);
+            if(c){ c.forEach(function(i){ pool[i].usado = true; idxs.push(i); }); }
+            else todas = false;
+          });
+          if(todas){ partesHalladas = desglose; }
+          else { idxs.forEach(function(i){ pool[i].usado = false; }); } // revertir: o cotejan todas, o ninguna
+        }
+      }
       if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // cuadrado
+      if(partesHalladas) return; // coteja: el banco lo reflejó separado, tal como lo desglosa el informe
 
       var ref = refComprobante(dep.referencia);
+      // Si el informe desglosa el monto pero el banco no tiene todas las partidas, se informa el desglose
+      // para que el cotejo sea directo (el navegador solo muestra el consolidado).
+      var textoDesglose = desglose ? " Según el informe de caja, ese día " + banco + " se compone de: " +
+        desglose.map(function(p){ return p.metodo + " B/ " + fmt(p.monto); }).join(" + ") + "." : "";
       var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
       var concepto = String(dep.descripcion||"").trim();
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
@@ -1370,7 +1405,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       hallazgos.push({
         fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
         texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " que el reporte/Caja General registró como depósito a " +
-               banco + " (\"" + String(dep.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + banco + "." + ref,
+               banco + " (\"" + String(dep.descripcion||"").trim() + "\") no aparece en el estado de cuenta de " + banco + "." + textoDesglose + ref,
         fuente: "Diario Caja General / Estado de cuenta " + banco
       });
     });
@@ -1666,7 +1701,8 @@ function computePasoResult(pasoKey, raws, opts){
     }
     // Desglose individual de cheques (2ª pestaña del reporte): si está, los cheques se cuadran uno a uno.
     var chequesDet = raws.reporte ? parseChequesDetalle(raws.reporte) : null;
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol);
+    var reporteCajas = raws.reporte ? parseReporteConsolidado(raws.reporte) : null;
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
