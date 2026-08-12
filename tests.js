@@ -256,6 +256,18 @@ test("desgloseDelInforme no inventa: si no suma el monto, devuelve null", () => 
   eq(desgloseDelInforme(REPORTE_02ENE, "2026-01-03", "Banistmo", 1127.27, 0.01), null);
 });
 
+// "No importa si el comprobante no define si es visa o clave: si cuadra la tarjeta, concílialo."
+test("el desglose ignora el método: toma el subconjunto que cuadra", () => {
+  const rep = REPORTE_02ENE.concat([
+    { fecha: "2026-01-02", cajera: "ANA", banco: "Banistmo", metodo: "EFECTIVO", monto: 500.00, fila: 8 }
+  ]);
+  // El asiento consolida solo las dos tarjetas; el efectivo del día va por otro lado.
+  const d = desgloseDelInforme(rep, "2026-01-02", "Banistmo", 1127.27, 0.01);
+  if (!d) throw new Error("debería encontrar el subconjunto VISA+CLAVE");
+  eq(d.length, 2);
+  cerca(d.reduce((a, p) => a + p.monto, 0), 1127.27);
+});
+
 test("consolidado del navegador que el banco acredita separado: coteja, no es hallazgo", () => {
   const estado = [
     { fecha: "2026-01-02", debito: 0, credito: 733.55, descripcion: "DEPOSITO", fila: 2 },

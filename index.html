@@ -1303,8 +1303,15 @@ function desgloseDelInforme(reporte, fecha, banco, monto, tolerancia){
   if(!reporte || !reporte.length) return null;
   var partes = reporte.filter(function(r){ return r.fecha===fecha && r.banco===banco && r.monto>0; });
   if(partes.length < 2) return null; // con una sola partida no aporta nada nuevo
+  // NO se mira el método: el comprobante puede decir "VISA" y contener también CLAVE. Lo que vale es que
+  // los importes cuadren. Primero se prueba con todas las partidas del día...
   var suma = Math.round(partes.reduce(function(a,r){ return a+r.monto; },0)*100)/100;
-  return Math.abs(suma - monto) <= tolerancia ? partes : null;
+  if(Math.abs(suma - monto) <= tolerancia) return partes;
+  // ...y si no, con el subconjunto que sume el monto (el asiento pudo consolidar solo algunos métodos).
+  var pool = partes.map(function(p){ return {fecha:fecha, monto:p.monto, usado:false}; });
+  var idxs = buscarSubsetSuma(pool, fecha, monto, 1, tolerancia, 8);
+  if(idxs && idxs.length >= 2) return idxs.map(function(i){ return partes[i]; });
+  return null;
 }
 function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte){
   var hallazgos = [];
