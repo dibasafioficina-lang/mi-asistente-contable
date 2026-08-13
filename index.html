@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13f";
+var APP_VERSION="2026.08.13g";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2223,6 +2223,7 @@ function contarRojas(items){ return Array.isArray(items) ? items.filter(function
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
 function contarEfectivo(items){ return Array.isArray(items) ? items.filter(esEfectivo).length : 0; }
+function contarAvisos(items){ return Array.isArray(items) ? items.filter(esAviso).length : 0; }
 
 // Cuadre limpio para el confetti: cero diferencias ROJAS en todo lo evaluado
 // (los "sin confirmar" no lo bloquean: la plata cuadra, solo falta la etiqueta de banco).
@@ -3691,6 +3692,7 @@ function renderResultados(){
   html += cuadreSaldoIniHtml(cuadreP0);
   html += ajusteHtml(cuadreP0, ajustesEnCajaGeneral(STATE.diarioCaja));
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
+  var totalAvisos = keysRender.reduce(function(sum,k){ return sum + contarAvisos(r[k]); }, 0);
 
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
   // Barra resumen (chips) — siempre visible.
@@ -3698,6 +3700,7 @@ function renderResultados(){
     '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
     (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '') +
     (totalTransito>0 ? '<span class="chip warn">'+totalTransito+' en tránsito</span>' : '') +
+    (totalAvisos>0 ? '<span class="chip warn">'+totalAvisos+' a revisar antes de cerrar</span>' : '') +
     (cuadreP0 && !cuadreP0.ok ? '<span class="chip alert">Paso 0 vs saldo inicial: B/ '+fmt(cuadreP0.dif)+'</span>' : '');
   pasosMeta.forEach(function(p){
     var items = r[p.key];
@@ -3734,8 +3737,10 @@ function renderResultados(){
   pasosMeta.forEach(function(p){
     var items = r[p.key];
     // Si la caja ya está cuadrada (cierre consolidado arriba), no repetimos los pasos que cuadran; solo
-    // se muestran abajo los que todavía tengan diferencias rojas (ej. Paso 3 con partidas de banco).
-    if(cajaLista && Array.isArray(items) && contarRojas(items)===0) return;
+    // se muestran abajo los que todavía piden algo. Los AVISOS cuentan como "pide algo": son cosas a
+    // revisar antes de cerrar (un ajuste manual, un dato mal escrito) y esconderlos justo cuando son lo
+    // único que queda es la peor forma de perderlos.
+    if(cajaLista && Array.isArray(items) && contarRojas(items)===0 && contarAvisos(items)===0) return;
     var esArray = Array.isArray(items);
     var bloqueado = items==="bloqueado";
     var cuadrado = esArray && contarRojas(items)===0;
