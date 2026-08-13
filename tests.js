@@ -679,54 +679,46 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
-/* ---- Conciliación de SALIDAS: pagos del diario ↔ cargos del banco ---- */
-test("la planilla partida por el banco cuadra contra el asiento único", () => {
-  const diario = [{ fecha: "2026-01-26", debito: 0, credito: 1589.71, descripcion: "SEGUNDA QUINCENA DE ENERO 2026", referencia: "ME-00000001851", fila: 30 }];
-  const estado = [273.98, 169.67, 180.81, 235.26, 238.72, 246.88, 244.39].map((m, i) => (
-    { fecha: "2026-01-26", debito: m, credito: 0, descripcion: "DB PAGO DE PLANILLA DETALLADA BLE//PLL SEG DE ENERO DE 2026", fila: 60 + i }));
-  const r = conciliarSalidas(diario, estado, 3, 0.01);
-  eq(r.sinCobrar.length, 0, "el asiento cuadra");
-  eq(r.sinAsiento.length, 0, "y consume los 7 débitos");
+/* ---- Las SALIDAS del banco quedan fuera del alcance ----
+   Este módulo coteja lo que pasa por Caja General. Los pagos (cheques emitidos, ACH, planillas) y los
+   cargos propios del banco (comisiones, ITBMS, retenciones, timbres) salen directo de la cuenta sin tocar
+   Caja General: no se concilian, pero se cuenta lo que quedó fuera para que la exclusión sea explícita. */
+const DIARIO_SALIDAS = [
+  { fecha: "2026-01-26", debito: 0, credito: 1589.71, descripcion: "SEGUNDA QUINCENA DE ENERO 2026", referencia: "ME-00000001851", fila: 30 },
+  { fecha: "2026-01-30", debito: 0, credito: 551.29, descripcion: "INDUSTRIAS MODERNAS, S.A. - Pago:PAY0004121", referencia: "PAY0004121", fila: 40 },
+  { fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "CARGOS BANCARIOS 45.27", referencia: "ME-1", fila: 50 },
+  { fecha: "2026-01-05", debito: 920, credito: 0, descripcion: "DEPOSITO BRINKS DEL 05/01/2026", referencia: "ME-2", fila: 9 }
+];
+const ESTADO_SALIDAS = [
+  { fecha: "2026-01-05", debito: 60, credito: 0, descripcion: "DB COMISION POR TRANSACCION DE ACH", fila: 3 },
+  { fecha: "2026-01-14", debito: 237.68, credito: 0, descripcion: "Cheque 7831", fila: 8 },
+  { fecha: "2026-06-30", debito: 30, credito: 0, descripcion: "DB COMISIÃ“N POR BAJO SALDO//COBRO COM JUN 26", fila: 9 },
+  { fecha: "2026-01-02", debito: 0, credito: 1341.20, descripcion: "CR REMISION - V/MC", fila: 5 }
+];
+
+test("las salidas se cuentan pero no se cotejan", () => {
+  const r = resumenSalidas(DIARIO_SALIDAS, ESTADO_SALIDAS);
+  eq(r.pagos.n, 3, "los 3 créditos del diario; el débito Brinks es una entrada");
+  cerca(r.pagos.total, 2241.00);
+  eq(r.cargos.n, 3, "los 3 débitos del estado; el crédito de remisión es una entrada");
+  cerca(r.cargos.total, 327.68);
 });
 
-// Los cargos propios del banco NO se concilian en este módulo: se apartan junto con el comprobante
-// mensual que los agrupa, y se informa cuánto quedó fuera para que la exclusión sea explícita.
-test("los cargos propios del banco quedan fuera del cotejo, no como diferencia", () => {
-  const diario = [{ fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "CARGOS BANCARIOS 45.27", referencia: "ME-1", fila: 50 }];
-  const estado = [
-    { fecha: "2026-01-05", debito: 60, credito: 0, descripcion: "DB COMISION POR TRANSACCION DE ACH", fila: 3 },
-    { fecha: "2026-01-06", debito: 72.71, credito: 0, descripcion: "DB ITBMS", fila: 4 }
-  ];
-  const r = conciliarSalidas(diario, estado, 3, 0.01);
-  eq(r.sinAsiento.length, 0, "ningún cargo sale como diferencia");
-  eq(r.sinCobrar.length, 0, "el comprobante que los agrupa tampoco queda pendiente");
-  eq(r.excluidos.nCargos, 2);
-  cerca(r.excluidos.totalCargos, 132.71);
-  eq(r.excluidos.nAsientos, 1);
-  cerca(r.excluidos.totalAsientos, 100);
+test("un cheque emitido que el banco cobró no genera diferencia", () => {
+  // "Cheque 7831" sale de la cuenta bancaria, no de Caja General: no es de este módulo.
+  const h = paso3([], [], [], ESTADO_SALIDAS, null, null, 3, 0.01, null, null);
+  eq(h.filter(x => (x.clase || "diff") === "diff" && /7831/.test(x.texto)).length, 0);
 });
 
-test("un cargo bancario nunca cuenta como diferencia roja", () => {
-  const estado = [{ fecha: "2026-06-30", debito: 30, credito: 0, descripcion: "DB COMISIÃ“N POR BAJO SALDO//COBRO COM JUN 26", fila: 9 }];
-  const r = conciliarSalidas([], estado, 3, 0.01);
-  eq(r.sinAsiento.length, 0, "aunque no haya asiento que lo agrupe");
-  eq(r.excluidos.nCargos, 1);
-});
-
-// El estado trae la Ó rota por el encoding: "DB COMISIÃ“N POR BAJO SALDO" no matcheaba "COMISION".
-test("un cargo con el acento roto igual cuenta como cargo bancario", () => {
-  eq(esCargoBancario("DB COMISIÃ“N POR BAJO SALDO//COBRO COM JUN 26"), true);
-  eq(esCargoBancario("Retencion Clave 29-01 16005605"), true);
-  eq(esCargoBancario("Timbre Por Cheques Emitidos Ene-2026"), true);
-  eq(esCargoBancario("DB PAGO DE PLANILLA DETALLADA BLE"), false);
-  eq(esCargoBancario("Cheque 7831"), false);
-});
-
-test("un pago que el banco no cobró queda en tránsito, no como diferencia", () => {
-  const diario = [{ fecha: "2026-01-30", debito: 0, credito: 551.29, descripcion: "INDUSTRIAS MODERNAS, S.A. - Pago:PAY0004121", referencia: "PAY0004121", fila: 40 }];
-  const r = conciliarSalidas(diario, [], 3, 0.01);
-  eq(r.sinCobrar.length, 1);
-  eq(r.sinAsiento.length, 0);
+test("la exclusión de salidas se informa, no se descarta en silencio", () => {
+  const h = paso3([], [], [], ESTADO_SALIDAS, null, null, 3, 0.01, null, null);
+  const inf = h.filter(esInformativo);
+  if (!inf.length) throw new Error("debe quedar constancia de lo que se dejó fuera");
+  if (!/no se cotejan en este módulo/.test(inf[0].texto)) throw new Error("y decir por qué");
+  // Ninguna SALIDA es diferencia roja. (El crédito de remisión del fixture sí lo es: es una entrada
+  // que llegó al banco sin respaldo en el diario, y eso sí es de este módulo.)
+  const rojasSalida = h.filter(x => !esNoRojo(x) && /Cheque 7831|COMISI/i.test(x.texto || ""));
+  eq(rojasSalida.length, 0, "ni el cheque emitido ni las comisiones cuentan como diferencia");
 });
 
 test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {

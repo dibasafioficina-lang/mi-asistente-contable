@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13d";
+var APP_VERSION="2026.08.13e";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1644,58 +1644,20 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
       fuente: "Diario " + banco + " / Estado de cuenta " + banco });
   });
 }
-/* ---- Conciliación de SALIDAS: pagos del diario ↔ cargos del estado ----
-   La otra mitad de la conciliación bancaria. Sin esto ni un pago registrado que el banco nunca cobró ni un
-   cargo del banco sin asiento aparecen en ningún lado: quedaban fuera del cotejo en silencio. */
-// Cargo propio del banco: comisión, ITBMS, retención de tarjeta, timbre, manejo de cuenta. NO se cotejan
-// en este módulo (decisión de Diba): la empresa no los asienta uno por uno sino en un comprobante mensual
-// ("CARGOS BANCARIOS"), y su revisión va por otra vía. Se apartan del cotejo junto con ese asiento, y se
-// informa cuánto se dejó fuera para que la exclusión sea explícita y no parezca un olvido.
-function esCargoBancario(desc){
-  // "COMISI" y "RETENCI" sin la vocal final: el estado a veces trae la Ó rota por el encoding
-  // ("DB COMISIÃ“N POR BAJO SALDO"), y con el acento mal no matchea "COMISION".
-  return /COMISI|ITBMS|RETENCI|TIMBRE|MANEJO DE CUENTA/.test(normTxt(desc));
-}
-function esAsientoCargosBancarios(desc){ return normTxt(desc).indexOf("CARGOS BANCARIOS")!==-1; }
-function conciliarSalidas(diario, estado, ventanaDias, tolerancia){
+/* ---- SALIDAS del banco: fuera del alcance de este módulo ----
+   Este módulo concilia lo que pasa por CAJA GENERAL: el dinero que entra por caja y se deposita al banco.
+   Los pagos (cheques emitidos, ACH a proveedores, planillas) y los cargos propios del banco (comisiones,
+   ITBMS, retenciones de tarjeta, timbres) salen directo de la cuenta bancaria sin tocar Caja General, así
+   que no se cotejan acá. No se descartan en silencio: se cuenta y se totaliza lo que quedó fuera para que
+   la exclusión sea explícita. */
+function resumenSalidas(diario, estado){
   var noAborted = function(x){ return normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; };
-  function limpio(arr, campo){
-    return arr.filter(function(x){ return x[campo]>0 && !x._neutro && noAborted(x); })
-      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
+  function junta(arr, campo){
+    var xs = arr.filter(function(x){ return x[campo]>0 && !x._neutro && noAborted(x); });
+    return { n: xs.length, total: Math.round(xs.reduce(function(a,x){ return a+x[campo]; },0)*100)/100 };
   }
-  var pagos  = limpio(diario, "credito");  // lo que la empresa registró que salió
-  var cargos = limpio(estado, "debito");   // lo que el banco efectivamente cobró
-  // 1) Cargos propios del banco y su comprobante mensual: FUERA de este cotejo.
-  var asientos = pagos.filter(function(p){ return esAsientoCargosBancarios(p.descripcion); });
-  var propios  = cargos.filter(function(c){ return esCargoBancario(c.descripcion); });
-  function suma(arr){ return Math.round(arr.reduce(function(a,x){ return a+x.monto; },0)*100)/100; }
-  asientos.forEach(function(p){ p.usado=true; });
-  propios.forEach(function(c){ c.usado=true; });
-  var excluidos = { nCargos: propios.length, totalCargos: suma(propios),
-                    nAsientos: asientos.length, totalAsientos: suma(asientos) };
-  // Un pago puede asentarse días después de que el banco lo cobró (y al revés), así que la ventana de las
-  // salidas es más ancha que la de los depósitos.
-  var VENT = Math.max(ventanaDias, 12);
-  // 2) Cada pago contra el cargo del banco. Hasta 20 líneas: el banco parte la planilla en un débito por
-  // empleado (la 2ª quincena de enero son 7 débitos que suman el asiento de 1,589.71).
-  pagos.forEach(function(p){
-    if(p.usado) return;
-    var combo = buscarCombinacion(cargos, p.fecha, p.monto, VENT, tolerancia);
-    if(!combo) combo = buscarSubsetSuma(cargos, p.fecha, p.monto, VENT, tolerancia, 20);
-    if(combo){ combo.forEach(function(i){ cargos[i].usado=true; }); p.usado=true; }
-  });
-  // 3) Cada cargo no usado contra una combinación de pagos (el banco junta varios en un solo débito).
-  cargos.forEach(function(c){
-    if(c.usado) return;
-    var combo = buscarCombinacion(pagos, c.fecha, c.monto, VENT, tolerancia);
-    if(!combo) combo = buscarSubsetSuma(pagos, c.fecha, c.monto, VENT, tolerancia, 8);
-    if(combo){ combo.forEach(function(i){ pagos[i].usado=true; }); c.usado=true; }
-  });
-  return {
-    sinCobrar: pagos.filter(function(p){ return !p.usado; }),   // registrado como pagado, el banco no lo cobró
-    sinAsiento: cargos.filter(function(c){ return !c.usado; }), // el banco lo cobró, no está en el diario
-    excluidos: excluidos                                        // cargos bancarios: fuera del alcance de este módulo
-  };
+  return { pagos: junta(diario, "credito"),   // lo que la empresa registró que salió del banco
+           cargos: junta(estado, "debito") }; // lo que el banco efectivamente cobró
 }
 
 // diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
@@ -1783,64 +1745,23 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       });
     });
 
-    /* ---- La otra mitad: SALIDAS (pagos del diario ↔ cargos del banco) ----
-       Antes ningún paso las miraba: un pago registrado que el banco nunca cobró, o un cargo del banco sin
-       asiento, no aparecían en ningún lado. */
-    var sal = conciliarSalidas(cfg.diario, cfg.estado, ventanaDias, tolerancia);
-    // Cargos propios del banco: apartados a propósito. Se deja constancia de cuánto quedó fuera para que
-    // la exclusión sea explícita — si no, parecería que nadie los miró.
-    var ex = sal.excluidos;
-    if(ex && (ex.nCargos || ex.nAsientos)){
+    /* ---- SALIDAS: fuera del alcance ----
+       Este módulo coteja lo que pasa por CAJA GENERAL. Los pagos (cheques emitidos, ACH a proveedores,
+       planillas) y los cargos propios del banco (comisiones, ITBMS, retenciones, timbres) salen directo de
+       la cuenta sin tocar Caja General. No se concilian acá, pero se deja constancia de cuánto quedó
+       fuera: si no, parecería que nadie los miró. */
+    var sal = resumenSalidas(cfg.diario, cfg.estado);
+    if(sal.pagos.n || sal.cargos.n){
       hallazgos.push({
-        fecha:"", banco:cfg.nombre, monto:ex.totalCargos, clase:"informativo",
-        concepto:"Cargos bancarios del mes", comprobante:"",
-        texto: cfg.nombre + ": se dejaron fuera del cotejo " + ex.nCargos +
-               " cargos propios del banco (comisiones, ITBMS, retenciones, timbres) por B/ " + fmt(ex.totalCargos) +
-               (ex.nAsientos ? ", junto con el comprobante \"CARGOS BANCARIOS\" que los agrupa (B/ " + fmt(ex.totalAsientos) + ")" : "") +
-               ". No se concilian en este módulo.",
+        fecha:"", banco:cfg.nombre, monto:sal.cargos.total, clase:"informativo",
+        concepto:"Salidas del banco", comprobante:"",
+        texto: cfg.nombre + ": las salidas no se cotejan en este módulo, que concilia lo que pasa por Caja General. " +
+               "Quedaron fuera " + sal.pagos.n + " pago(s) registrados en el diario por B/ " + fmt(sal.pagos.total) +
+               " y " + sal.cargos.n + " cargo(s) del estado de cuenta por B/ " + fmt(sal.cargos.total) +
+               " (cheques emitidos, ACH, planillas, comisiones, ITBMS, retenciones y timbres).",
         fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre
       });
     }
-    // Pago registrado que el banco todavía no cobró = en tránsito (cheque/transferencia en circulación).
-    sal.sinCobrar.forEach(function(p){
-      var d2 = (p.descripcion||"").trim();
-      hallazgos.push({
-        fecha:p.fecha, banco:cfg.nombre, monto:p.monto, clase:"en_transito",
-        concepto:d2, comprobante:/^ME-/i.test(String(p.referencia||"").trim())?String(p.referencia).trim():"",
-        motivo:"pago pendiente de cobro en banco",
-        texto: cfg.nombre + " " + p.fecha + ": B/ " + fmt(p.monto) + " (\"" + d2 +
-               "\") está registrado como pagado pero el banco todavía no lo cobró — en circulación." + refComprobante(p.referencia),
-        fuente: "Diario " + cfg.nombre + " (fila " + p.fila + ") / Estado de cuenta " + cfg.nombre
-      });
-    });
-    // Cargo del banco sin asiento: plata que salió de la cuenta y no está en la contabilidad.
-    sal.sinAsiento.forEach(function(cg){
-      var d3 = (cg.descripcion||"").trim();
-      // El estado suele traer unos días del mes siguiente. Esos cargos todavía no tienen por qué estar
-      // asentados: son del próximo cierre, no una diferencia de este.
-      if(ultimoDia && cg.fecha > ultimoDia){
-        hallazgos.push({
-          fecha:cg.fecha, banco:cfg.nombre, monto:cg.monto, clase:"en_transito",
-          concepto:d3, comprobante:"", motivo:"cargo posterior al cierre",
-          texto: cfg.nombre + " " + cg.fecha + ": B/ " + fmt(cg.monto) + " (\"" + d3 +
-                 "\") es posterior al cierre del " + ultimoDia + " — el estado trae días del mes siguiente. Se asienta en el próximo cierre.",
-          fuente: "Estado de cuenta " + cfg.nombre + " (fila " + cg.fila + ") / Diario " + cfg.nombre
-        });
-        return;
-      }
-      // Un cheque que el banco cobró y no está en el diario suele ser de un mes anterior: entonces le
-      // toca estar en el resumen del Paso 0 como cheque en circulación.
-      var pista = esChequeDesc(d3)
-        ? " Si se emitió en un mes anterior, tiene que estar en el resumen del Paso 0 como cheque en circulación."
-        : "";
-      hallazgos.push({
-        fecha:cg.fecha, banco:cfg.nombre, monto:cg.monto, clase:"diff",
-        concepto:d3, comprobante:"",
-        texto: cfg.nombre + " " + cg.fecha + ": el banco cobró B/ " + fmt(cg.monto) + " (\"" + d3 +
-               "\") y no hay asiento que lo respalde en el diario." + pista,
-        fuente: "Estado de cuenta " + cfg.nombre + " (fila " + cg.fila + ") / Diario " + cfg.nombre
-      });
-    });
   });
   return hallazgos;
 }
