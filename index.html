@@ -416,6 +416,7 @@ var STATE = {
   results:null,
   saldoCajaGeneral:null,
   transitoPrevio:null,
+  diarioCaja:null,
   saldoIniDetalle:[],
   checks:{}
 };
@@ -428,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13";
+var APP_VERSION="2026.08.13b";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1806,7 +1807,11 @@ function archivosDePaso(pasoKey){
 function computePasoResult(pasoKey, raws, opts){
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
   // mostrarlo como contexto de partidas en tránsito entre meses.
-  if(raws.diarioCaja){ try{ STATE.saldoCajaGeneral = parseSaldoCajaGeneral(raws.diarioCaja); }catch(e){} }
+  if(raws.diarioCaja){
+    try{ STATE.saldoCajaGeneral = parseSaldoCajaGeneral(raws.diarioCaja); }catch(e){}
+    // El diario queda a mano para buscar asientos de ajuste ya registrados (cuadre del saldo inicial).
+    try{ STATE.diarioCaja = parseDiario(raws.diarioCaja,"Caja General"); }catch(e){}
+  }
   if(pasoKey==="paso0"){
     if(!raws.transitoPrevio) return null; // único archivo requerido: el resumen en tránsito
     var trPrev = parseTransitoPrevio(raws.transitoPrevio);
@@ -3490,6 +3495,7 @@ function renderResultados(){
   // alerta quedaría invisible justo en el caso en que hay que verla.
   var cuadreP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral);
   html += cuadreSaldoIniHtml(cuadreP0);
+  html += ajusteHtml(cuadreP0, ajustesEnCajaGeneral(STATE.diarioCaja));
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
 
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
@@ -3622,6 +3628,7 @@ function renderResultados(){
   document.getElementById("exportBtn").onclick = exportarChecklist;
   var btnT = document.getElementById("btnTransito");
   if(btnT) btnT.onclick = exportarEnTransito;
+  bindAjusteCopy(cuadreP0);       // botón "copiar el asiento" del ajuste sugerido
   if(cajaLista) bindCajaInputs(); // campos editables del cierre de Caja General (saldo inicial / sistema)
   bindSaldoIniDetalle(); // Paso 0: detalle editable del saldo inicial (manual o por Excel)
 }
@@ -3635,6 +3642,10 @@ function exportarChecklist(){
       "El resumen del Paso 0 suma B/ "+fmt(cP0.total)+" y el saldo inicial de Caja General es B/ "+fmt(cP0.saldoInicial)+
       " — diferencia B/ "+fmt(cP0.dif)+". El resumen está incompleto o trae partidas de más.",
       "Resumen en tránsito del mes anterior / Navegador de Caja General", ""]);
+    var aj = ajusteCajaGeneral(cP0);
+    rows.push(["Paso 0", aj.fecha, "", aj.monto, "Asiento de ajuste sugerido",
+      aj.columna+" a "+aj.cuenta+" por B/ "+fmt(aj.monto)+". "+aj.concepto,
+      "Navegador de Caja General", ""]);
   }
   var pasosMeta = [["Paso 0","paso0"],["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"]];
   pasosMeta.forEach(function(p){
@@ -4019,6 +4030,78 @@ function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG){
            totalFuera: suma(fuera), nFuera: fuera.length, porBanco: porBanco,
            dif: dif, ok: Math.abs(dif) < 0.01 };
 }
+// Día anterior a una fecha ISO. El ajuste al saldo INICIAL se fecha en el mes anterior: dentro del mes
+// corregiría el saldo final y el de apertura seguiría mal.
+function diaAnterior(iso){
+  var d = new Date(iso+"T12:00:00Z");
+  d.setUTCDate(d.getUTCDate()-1);
+  return d.toISOString().slice(0,10);
+}
+// Asiento de ajuste que hay que registrar para que el saldo de apertura de Caja General refleje lo que
+// realmente quedó en tránsito. El signo manda la columna: todo lo que viene en tránsito es dinero
+// registrado como depositado, o sea DÉBITO; un saldo acreedor (negativo) en esta cuenta no tiene sentido.
+function ajusteCajaGeneral(c){
+  if(!c || c.ok) return null;
+  return {
+    fecha: c.fecha ? diaAnterior(c.fecha) : "",
+    columna: c.dif > 0 ? "Débito" : "Crédito",
+    monto: Math.round(Math.abs(c.dif)*100)/100,
+    cuenta: "[1.1.8] Caja General",
+    concepto: "Ajuste al saldo en tránsito de Caja General — lleva el saldo de apertura a B/ " + fmt(c.total) +
+              ", el total de las partidas en tránsito del mes anterior"
+  };
+}
+function ajusteTexto(a){
+  return "Fecha: " + a.fecha + "\nCuenta: " + a.cuenta + "\n" + a.columna + ": " + fmt(a.monto) +
+         "\nConcepto: " + a.concepto;
+}
+// Asientos que YA dicen "ajuste" en el diario de Caja General del mes: se listan para no proponer uno que
+// ya se hizo, o para ver que el que se hizo no alcanza.
+function ajustesEnCajaGeneral(diarioCaja){
+  return (diarioCaja||[]).filter(function(x){ return normTxt(x.descripcion).indexOf("AJUSTE")!==-1; })
+    .map(function(x){
+      return { fecha:x.fecha, monto: x.debito>0 ? x.debito : x.credito, columna: x.debito>0 ? "Débito" : "Crédito",
+               desc: (x.descripcion||"").trim(), referencia: String(x.referencia||"").trim() };
+    });
+}
+function ajusteHtml(c, yaHechos){
+  var a = ajusteCajaGeneral(c);
+  if(!a) return "";
+  var previos = (yaHechos||[]).length
+    ? '<p class="per-nota">En el navegador de este mes ya hay ' + (yaHechos.length===1?'un asiento que dice':yaHechos.length+' asientos que dicen') +
+      ' "ajuste": ' +
+      yaHechos.map(function(x){ return '<b>'+x.fecha+' · '+x.columna+' B/ '+fmt(x.monto)+'</b> ('+esc(x.desc)+
+        (x.referencia?' · '+esc(x.referencia):'')+')'; }).join('; ') +
+      '. Verificá que no sea este mismo ajuste antes de volver a registrarlo.</p>'
+    : "";
+  return '<div class="per-panel" style="background:#F2F0F8;border-color:#C3B8DE;color:#4A3C63;margin-top:-4px">' +
+    '<div class="per-title" style="color:#4A3C63">✎ Asiento de ajuste sugerido</div>' +
+    '<p class="per-txt">' + (c.saldoInicial < 0
+      ? 'El saldo de apertura está en la columna equivocada, así que el ajuste va acá — no hay nada que corregir en el resumen del Paso 0.'
+      : 'Primero revisá el resumen del Paso 0. <b>Si confirmás que está completo</b>, entonces el descuadre es del navegador y se corrige con este asiento.') +
+    '</p>' +
+    '<table class="per-tabla"><tbody>' +
+      '<tr><td>Fecha</td><td class="per-rango">'+a.fecha+'</td></tr>' +
+      '<tr><td>Cuenta</td><td class="per-rango">'+esc(a.cuenta)+'</td></tr>' +
+      '<tr class="per-mal"><td><b>'+a.columna+'</b></td><td class="per-rango"><b>B/ '+fmt(a.monto)+'</b></td></tr>' +
+      '<tr><td colspan="2">'+esc(a.concepto)+'</td></tr>' +
+    '</tbody></table>' +
+    '<p class="per-nota">Va fechado el <b>'+a.fecha+'</b>, del mes anterior: es el saldo de <b>apertura</b> lo que hay que corregir. ' +
+    'Un asiento dentro del mes cambia el saldo final y deja el inicial igual de mal. La contrapartida la definís vos según de dónde venga el descuadre.</p>' +
+    previos +
+    '<button class="btn-export" id="ajusteCopy">📋 Copiar el asiento</button>' +
+  '</div>';
+}
+function bindAjusteCopy(c){
+  var b = document.getElementById("ajusteCopy");
+  if(!b) return;
+  var a = ajusteCajaGeneral(c);
+  b.onclick = function(){
+    var txt = ajusteTexto(a);
+    try{ navigator.clipboard.writeText(txt).then(function(){ b.textContent="✓ Copiado"; setTimeout(function(){ b.textContent="📋 Copiar el asiento"; },1800); }); }
+    catch(e){ alert(txt); }
+  };
+}
 function cuadreSaldoIniHtml(c){
   if(!c) return "";
   var bancos = Object.keys(c.porBanco).sort().map(function(b){
@@ -4048,14 +4131,19 @@ function cuadreSaldoIniHtml(c){
       bancos.replace(/<tr><td>/g, '<tr><td style="padding-left:26px;opacity:.8">') +
       '<tr class="per-mal"><td><b>Diferencia</b></td><td class="per-rango"><b>B/ '+fmt(c.dif)+'</b></td></tr>' +
     '</tbody></table>' + excluidas +
-    '<p class="per-nota">' + (faltan
+    // Con el saldo en negativo el error está del lado del navegador, no del resumen: no tiene sentido
+    // mandar a buscar partidas que sobran cuando lo que hay es un saldo mal ubicado.
+    (c.saldoInicial < 0 ? '' : '<p class="per-nota">' + (faltan
       ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Revisá si quedó alguna partida sin anotar — lo más común es una fila de tarjeta (clave/visa) sin monto o un depósito de los últimos días del mes anterior.'
       : '<b>El resumen trae B/ '+fmt(Math.abs(c.dif))+' de más.</b> Revisá si hay una partida repetida, una que ya había compensado antes, o alguna que no debería estar (un pago, no un depósito).') +
-    '</p>' +
+    '</p>') +
     (c.saldoInicial < 0
-      ? '<p class="per-nota">⚠ Ojo: el saldo inicial de Caja General es <b>negativo</b>. Esa cuenta es un puente de depósitos en tránsito, así que su saldo normalmente es positivo — un saldo acreedor suele ser señal de un asiento invertido o de un archivo exportado con el rango equivocado. Verificá el navegador de Caja General antes de tocar el resumen.</p>'
+      ? '<p class="per-nota">⚠ <b>El saldo inicial viene en negativo, o sea en la columna CRÉDITO.</b> Eso acá no tiene sentido: todo lo que viene en tránsito es dinero ya registrado como depositado, así que el saldo de apertura tiene que quedar al <b>débito</b>. El descuadre no está en el resumen del Paso 0 — está en el navegador, y se corrige con el asiento de ajuste de abajo.</p>'
       : '') +
-    '<p class="per-nota">La conciliación corre igual, pero mientras esto no cuadre <b>el resumen está incompleto</b>: lo que le falte va a aparecer como diferencia en los pasos siguientes, y lo que le sobre va a quedar como "pendiente de compensar" para siempre.</p>' +
+    '<p class="per-nota">' + (c.saldoInicial < 0
+      ? 'La conciliación corre igual: empareja partida por partida y no usa este saldo. Pero mientras no se registre el ajuste, el saldo de apertura de Caja General queda mal y el descuadre se arrastra al cierre.'
+      : 'La conciliación corre igual, pero mientras esto no cuadre <b>el resumen está incompleto</b>: lo que le falte va a aparecer como diferencia en los pasos siguientes, y lo que le sobre va a quedar como "pendiente de compensar" para siempre.') +
+    '</p>' +
   '</div>';
 }
 

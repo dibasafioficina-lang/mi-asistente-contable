@@ -608,6 +608,50 @@ test("el panel avisa aparte si el saldo inicial es negativo", () => {
   if (!/negativo/.test(h)) throw new Error("debe advertir del saldo negativo");
 });
 
+/* ---- Asiento de ajuste al saldo de apertura de Caja General ----
+   Un saldo inicial NEGATIVO está en la columna crédito, y ahí no tiene sentido: todo lo que viene en
+   tránsito es dinero ya registrado como depositado, o sea débito. Se corrige con un asiento fechado en el
+   mes anterior (dentro del mes cambiaría el saldo final y dejaría el de apertura igual de mal). */
+test("saldo inicial negativo → ajuste al DÉBITO por la diferencia completa", () => {
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: -2469.06, fechaInicial: "2026-01-01" });
+  const a = ajusteCajaGeneral(c);
+  eq(a.columna, "Débito");
+  cerca(a.monto, 4291.74, "1,822.68 − (−2,469.06)");
+  eq(a.fecha, "2025-12-31", "se fecha en el mes anterior, no dentro del mes");
+});
+
+test("si el saldo se pasa, el ajuste va al CRÉDITO", () => {
+  const a = ajusteCajaGeneral(cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 2517.82, fechaInicial: "2026-06-01" }));
+  eq(a.columna, "Crédito");
+  cerca(a.monto, 695.14);
+  eq(a.fecha, "2026-05-31");
+});
+
+test("si el Paso 0 cuadra no se propone ningún ajuste", () => {
+  eq(ajusteCajaGeneral(cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 1822.68, fechaInicial: "2026-06-01" })), null);
+  eq(ajusteCajaGeneral(null), null);
+  eq(ajusteHtml(null, []), "");
+});
+
+test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
+  const diario = [
+    { fecha: "2026-01-02", debito: 0, credito: 56.49, descripcion: "ajuste en caja general movido de diciembre 2025", referencia: "ME-00000001827", fila: 4 },
+    { fecha: "2026-01-05", debito: 100, credito: 0, descripcion: "DEPOSITO BRINKS", referencia: "ME-00000001829", fila: 9 }
+  ];
+  const y = ajustesEnCajaGeneral(diario);
+  eq(y.length, 1, "solo el que dice ajuste");
+  eq(y[0].columna, "Crédito");
+  cerca(y[0].monto, 56.49);
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: -2469.06, fechaInicial: "2026-01-01" });
+  if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
+});
+
+test("diaAnterior cruza fin de mes y fin de año", () => {
+  eq(diaAnterior("2026-01-01"), "2025-12-31");
+  eq(diaAnterior("2026-06-01"), "2026-05-31");
+  eq(diaAnterior("2026-03-01"), "2026-02-28");
+});
+
 test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {
   const h = paso0(P0_VISA, EST_VISA(), [], null, 3, 0.01);
   eq(h.filter(x => esEnTransito(x) && /mes anterior/i.test(x.motivo || "")).length, 2, "se deja la traza");
