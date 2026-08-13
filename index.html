@@ -415,6 +415,7 @@ var STATE = {
   options:{ ventanaDias:3, tolerancia:0.01 },
   results:null,
   saldoCajaGeneral:null,
+  transitoPrevio:null,
   saldoIniDetalle:[],
   checks:{}
 };
@@ -427,7 +428,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.12";
+var APP_VERSION="2026.08.13";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1809,6 +1810,7 @@ function computePasoResult(pasoKey, raws, opts){
   if(pasoKey==="paso0"){
     if(!raws.transitoPrevio) return null; // único archivo requerido: el resumen en tránsito
     var trPrev = parseTransitoPrevio(raws.transitoPrevio);
+    STATE.transitoPrevio = trPrev; // lo usa el cuadre contra el saldo inicial de Caja General
     // Estados de cuenta opcionales: si no están, se valida contra vacío (todo queda en tránsito).
     var eB = raws.estBanistmo ? parseEstadoCuenta(raws.estBanistmo,"banistmo") : [];
     var eS = raws.estStg ? parseEstadoCuenta(raws.estStg,"stg") : [];
@@ -1853,6 +1855,7 @@ function computePasoResult(pasoKey, raws, opts){
     // Cheques en tránsito del mes anterior (Paso 0): si están, se usan para no marcar como diferencia
     // los depósitos de junio que en realidad compensan cheques de meses anteriores.
     var transitoPrevio = raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null;
+    if(transitoPrevio) STATE.transitoPrevio = transitoPrevio;
     var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio);
     // Validación VISA (antes Paso 4): chequeo independiente de que el neto VISA del informe tiene su
     // 'Remisión V/Mc' en el estado de cuenta STG (además del cuadre diario↔estado de arriba).
@@ -3482,6 +3485,11 @@ function renderResultados(){
   var html = '<div class="results-head"><h2>Hallazgos</h2>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
   html += periodosHtml(STATE.periodos); // primero: si un archivo es de otro mes, nada de lo demás es confiable
+  // El total del resumen del Paso 0 tiene que ser el saldo inicial de Caja General. Va ACÁ ARRIBA y no
+  // dentro del bloque del Paso 0: cuando la caja cuadra, los pasos sin diferencias no se dibujan y la
+  // alerta quedaría invisible justo en el caso en que hay que verla.
+  var cuadreP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral);
+  html += cuadreSaldoIniHtml(cuadreP0);
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
 
   var todoCuadrado = tieneCuadreLimpio(PASO_ORDEN, r) && PASO_ORDEN.every(pasoCuadrado);
@@ -3489,7 +3497,8 @@ function renderResultados(){
   html += '<div class="summary-bar">' +
     '<span class="chip'+(totalRojas===0?" ok":" alert")+'">'+totalRojas+' diferencia(s) en total</span>' +
     (totalSinConf>0 ? '<span class="chip warn">'+totalSinConf+' sin confirmar banco</span>' : '') +
-    (totalTransito>0 ? '<span class="chip warn">'+totalTransito+' en tránsito</span>' : '');
+    (totalTransito>0 ? '<span class="chip warn">'+totalTransito+' en tránsito</span>' : '') +
+    (cuadreP0 && !cuadreP0.ok ? '<span class="chip alert">Paso 0 vs saldo inicial: B/ '+fmt(cuadreP0.dif)+'</span>' : '');
   pasosMeta.forEach(function(p){
     var items = r[p.key];
     var chipTxt = items===undefined ? "—" : items===null ? "omitido" : String(contarRojas(items));
@@ -3620,6 +3629,13 @@ function renderResultados(){
 function exportarChecklist(){
   var r = STATE.results;
   var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
+  var cP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral);
+  if(cP0 && !cP0.ok){
+    rows.push(["Paso 0", cP0.fecha||"", "", cP0.dif, "Corregir archivo de origen",
+      "El resumen del Paso 0 suma B/ "+fmt(cP0.total)+" y el saldo inicial de Caja General es B/ "+fmt(cP0.saldoInicial)+
+      " — diferencia B/ "+fmt(cP0.dif)+". El resumen está incompleto o trae partidas de más.",
+      "Resumen en tránsito del mes anterior / Navegador de Caja General", ""]);
+  }
   var pasosMeta = [["Paso 0","paso0"],["Paso 1","paso1"],["Paso 2","paso2"],["Paso 3","paso3"]];
   pasosMeta.forEach(function(p){
     var label = p[0], key = p[1], items = r[key];
@@ -3974,6 +3990,73 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
     chs.forEach(function(ch){ (ch.usado ? compensadas : pendientes).push(ch); });
   });
   return {compensadas:compensadas, pendientes:pendientes, fechasRaras:fechasRaras};
+}
+
+/* ---- Cuadre del Paso 0 contra el saldo inicial de Caja General ----
+   Caja General es una cuenta PUENTE: se acredita cuando se registra un depósito al banco y se salda cuando
+   el banco lo refleja. Por eso su saldo al arrancar el mes ES, en teoría, lo que quedó en tránsito del mes
+   anterior — o sea, el total del resumen del Paso 0. Si no coinciden, al resumen le falta (o le sobra) una
+   partida, y la conciliación va a dar por "pendientes" cosas que ya compensaron o al revés. */
+// Una partida del Paso 0 pasó por Caja General si es dinero que la empresa registró como depositado y el
+// banco todavía no reflejó: depósito, cheque POR DEPOSITAR, tarjeta, Yappy. Los cheques EMITIDOS (en
+// circulación) son pagos que salen de la cuenta bancaria — nunca tocan Caja General, así que no suman.
+function pasaPorCajaGeneral(t){
+  if(t.sentido==="debito") return false;
+  var c = normTxt(t.concepto);
+  return c.indexOf("CIRCULACION")===-1 && c.indexOf("EMITIDO")===-1;
+}
+function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG){
+  if(!transitoPrevio || !transitoPrevio.length) return null;
+  if(!saldoCG || saldoCG.inicial==null) return null;
+  var dentro = [], fuera = [];
+  transitoPrevio.forEach(function(t){ (pasaPorCajaGeneral(t) ? dentro : fuera).push(t); });
+  function suma(arr){ return Math.round(arr.reduce(function(a,t){ return a+t.monto; },0)*100)/100; }
+  var total = suma(dentro);
+  var porBanco = {};
+  dentro.forEach(function(t){ porBanco[t.banco] = Math.round(((porBanco[t.banco]||0) + t.monto)*100)/100; });
+  var dif = Math.round((total - saldoCG.inicial)*100)/100;
+  return { saldoInicial: saldoCG.inicial, fecha: saldoCG.fechaInicial, total: total, n: dentro.length,
+           totalFuera: suma(fuera), nFuera: fuera.length, porBanco: porBanco,
+           dif: dif, ok: Math.abs(dif) < 0.01 };
+}
+function cuadreSaldoIniHtml(c){
+  if(!c) return "";
+  var bancos = Object.keys(c.porBanco).sort().map(function(b){
+    return '<tr><td>'+esc(b)+'</td><td class="per-rango">B/ '+fmt(c.porBanco[b])+'</td></tr>';
+  }).join("");
+  var partidas = c.n===1 ? "1 partida" : c.n+" partidas";
+  var excluidas = c.nFuera
+    ? '<p class="per-nota">No se '+(c.nFuera===1?'cuenta 1 cheque':'cuentan '+c.nFuera+' cheques')+' en circulación por B/ '+fmt(c.totalFuera)+
+      ': son pagos que salen de la cuenta bancaria y nunca pasan por Caja General.</p>'
+    : "";
+  if(c.ok){
+    return '<div class="per-panel" style="background:#EDF7F0;border-color:#A9CFB6;color:#2F6B45">' +
+      '<div class="per-title" style="color:#2F6B45">✓ El Paso 0 cuadra con el saldo inicial de Caja General</div>' +
+      '<p class="per-txt">Saldo inicial'+(c.fecha?' ('+c.fecha+')':'')+': <b>B/ '+fmt(c.saldoInicial)+
+      '</b> = '+(c.n===1?'la única partida':'las '+c.n+' partidas')+' en tránsito del mes anterior.</p>' + excluidas + '</div>';
+  }
+  var faltan = c.dif < 0; // el resumen suma MENOS que el saldo: le faltan partidas
+  return '<div class="per-panel per-grave">' +
+    '<div class="per-title">⛔ El Paso 0 no cuadra con el saldo inicial de Caja General</div>' +
+    '<p class="per-txt">El saldo de Caja General al arrancar el mes es lo que quedó en tránsito del mes anterior, ' +
+    'así que tiene que ser igual al total del resumen del Paso 0.</p>' +
+    '<table class="per-tabla"><tbody>' +
+      '<tr><td>Saldo inicial de Caja General'+(c.fecha?' <span class="per-arch">'+c.fecha+'</span>':'')+'</td>' +
+        '<td class="per-rango">B/ '+fmt(c.saldoInicial)+'</td></tr>' +
+      '<tr><td>Resumen del Paso 0 — '+partidas+' que '+(c.n===1?"pasa":"pasan")+' por Caja General</td>' +
+        '<td class="per-rango">B/ '+fmt(c.total)+'</td></tr>' +
+      bancos.replace(/<tr><td>/g, '<tr><td style="padding-left:26px;opacity:.8">') +
+      '<tr class="per-mal"><td><b>Diferencia</b></td><td class="per-rango"><b>B/ '+fmt(c.dif)+'</b></td></tr>' +
+    '</tbody></table>' + excluidas +
+    '<p class="per-nota">' + (faltan
+      ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Revisá si quedó alguna partida sin anotar — lo más común es una fila de tarjeta (clave/visa) sin monto o un depósito de los últimos días del mes anterior.'
+      : '<b>El resumen trae B/ '+fmt(Math.abs(c.dif))+' de más.</b> Revisá si hay una partida repetida, una que ya había compensado antes, o alguna que no debería estar (un pago, no un depósito).') +
+    '</p>' +
+    (c.saldoInicial < 0
+      ? '<p class="per-nota">⚠ Ojo: el saldo inicial de Caja General es <b>negativo</b>. Esa cuenta es un puente de depósitos en tránsito, así que su saldo normalmente es positivo — un saldo acreedor suele ser señal de un asiento invertido o de un archivo exportado con el rango equivocado. Verificá el navegador de Caja General antes de tocar el resumen.</p>'
+      : '') +
+    '<p class="per-nota">La conciliación corre igual, pero mientras esto no cuadre <b>el resumen está incompleto</b>: lo que le falte va a aparecer como diferencia en los pasos siguientes, y lo que le sobre va a quedar como "pendiente de compensar" para siempre.</p>' +
+  '</div>';
 }
 
 // Paso 0: valida que las partidas en tránsito de meses anteriores compensaron en los bancos de este mes.

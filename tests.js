@@ -559,6 +559,55 @@ test("una partida del Paso 0 puede compensar en varias líneas del estado", () =
   eq(est.filter(x => x._transitoUsado).length, 2, "las dos líneas quedan consumidas");
 });
 
+/* ---- El total del Paso 0 tiene que ser el saldo inicial de Caja General ----
+   Caja General es la cuenta puente: su saldo al arrancar el mes ES lo que quedó en tránsito del anterior. */
+const P0_MIXTO = [
+  { fecha: "2026-05-30", banco: "STG", monto: 470.00, concepto: "deposito en transito", comprobante: "", sentido: "credito" },
+  { fecha: "2026-05-30", banco: "STG", monto: 1352.68, concepto: "deposito en transito", comprobante: "", sentido: "credito" },
+  { fecha: "2026-05-27", banco: "Banistmo", monto: 282.72, concepto: "Cheque en circulacion", comprobante: "", sentido: "credito" }
+];
+
+test("el cuadre del Paso 0 deja fuera los cheques en circulación", () => {
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 1822.68, fechaInicial: "2026-06-01" });
+  cerca(c.total, 1822.68, "solo lo que pasa por Caja General");
+  cerca(c.totalFuera, 282.72, "el cheque emitido no suma");
+  eq(c.nFuera, 1);
+  eq(c.ok, true, "cuadra");
+});
+
+test("el cuadre detecta que al resumen le faltan partidas", () => {
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 2517.82, fechaInicial: "2026-06-01" });
+  eq(c.ok, false);
+  cerca(c.dif, -695.14, "negativo = al resumen le falta");
+  if (!/faltan/.test(cuadreSaldoIniHtml(c))) throw new Error("el panel debe decir que faltan partidas");
+});
+
+test("el cuadre detecta que el resumen trae partidas de más", () => {
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 1000, fechaInicial: "2026-06-01" });
+  cerca(c.dif, 822.68, "positivo = sobra");
+  if (!/de más/.test(cuadreSaldoIniHtml(c))) throw new Error("el panel debe decir que sobra");
+});
+
+test("un cheque emitido por referencia PAY tampoco suma", () => {
+  const c = cuadreSaldoInicialPaso0(
+    [{ fecha: "2026-05-30", banco: "Banistmo", monto: 500, concepto: "cheque", comprobante: "PAY0004133", sentido: "debito" }],
+    { inicial: 0, fechaInicial: "2026-06-01" });
+  cerca(c.total, 0); eq(c.ok, true);
+});
+
+test("sin saldo de Caja General no se puede cuadrar (no se inventa una alerta)", () => {
+  eq(cuadreSaldoInicialPaso0(P0_MIXTO, null), null);
+  eq(cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: null }), null);
+  eq(cuadreSaldoInicialPaso0([], { inicial: 100 }), null);
+  eq(cuadreSaldoIniHtml(null), "");
+});
+
+// Un saldo acreedor en una cuenta puente de depósitos en tránsito es señal de otro problema.
+test("el panel avisa aparte si el saldo inicial es negativo", () => {
+  const h = cuadreSaldoIniHtml(cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: -2469.06, fechaInicial: "2026-01-01" }));
+  if (!/negativo/.test(h)) throw new Error("debe advertir del saldo negativo");
+});
+
 test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {
   const h = paso0(P0_VISA, EST_VISA(), [], null, 3, 0.01);
   eq(h.filter(x => esEnTransito(x) && /mes anterior/i.test(x.motivo || "")).length, 2, "se deja la traza");
