@@ -617,14 +617,47 @@ test("saldo inicial negativo → ajuste al DÉBITO por la diferencia completa", 
   const a = ajusteCajaGeneral(c);
   eq(a.columna, "Débito");
   cerca(a.monto, 4291.74, "1,822.68 − (−2,469.06)");
-  eq(a.fecha, "2025-12-31", "se fecha en el mes anterior, no dentro del mes");
+  // El ejercicio anterior ya está declarado y no se toca: el ajuste entra en el período abierto.
+  eq(a.fecha, "2026-01-01", "primer día del período que se revisa");
 });
 
 test("si el saldo se pasa, el ajuste va al CRÉDITO", () => {
   const a = ajusteCajaGeneral(cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 2517.82, fechaInicial: "2026-06-01" }));
   eq(a.columna, "Crédito");
   cerca(a.monto, 695.14);
-  eq(a.fecha, "2026-05-31");
+  eq(a.fecha, "2026-06-01");
+});
+
+/* ---- El ajuste de apertura ya asentado ----
+   Caso real: ME-00000002023, débito de 18,123.07 fechado el 01-ene. El navegador sigue mostrando el
+   Balance Inicial viejo (lo calcula al corte), así que hay que sumarle los ajustes de apertura. */
+test("un ajuste fechado el primer día del período corrige la apertura", () => {
+  const diario = [
+    { fecha: "2026-01-01", debito: 18123.07, credito: 0, descripcion: "ajusta saldo errado de la caja general al cierre 2025.", referencia: "ME-00000002023", fila: 2 },
+    { fecha: "2026-01-02", debito: 0, credito: 56.49, descripcion: "ajuste en caja general movido de diciembre 2025", referencia: "ME-00000001827", fila: 12 }
+  ];
+  const p0 = [{ fecha: "2025-12-31", banco: "STG", monto: 15654.01, concepto: "deposito en transito", comprobante: "", sentido: "credito" }];
+  const c = cuadreSaldoInicialPaso0(p0, { inicial: -2469.06, fechaInicial: "2026-01-01" }, diario);
+  eq(c.ajustes.length, 1, "solo el del 01-ene; el del 02-ene es movimiento del mes");
+  cerca(c.totalAjustes, 18123.07);
+  cerca(c.apertura, 15654.01, "−2,469.06 + 18,123.07");
+  eq(c.ok, true, "con el ajuste, cuadra");
+  eq(ajusteCajaGeneral(c), null, "y ya no se propone otro");
+});
+
+test("un ajuste al crédito en la apertura resta", () => {
+  const diario = [{ fecha: "2026-06-01", debito: 0, credito: 529.18, descripcion: "ajuste de apertura", referencia: "ME-1", fila: 2 }];
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 2351.86, fechaInicial: "2026-06-01" }, diario);
+  cerca(c.totalAjustes, -529.18);
+  cerca(c.apertura, 1822.68);
+  eq(c.ok, true);
+});
+
+test("sin diario, el cuadre usa el Balance Inicial tal cual", () => {
+  const c = cuadreSaldoInicialPaso0(P0_MIXTO, { inicial: 1822.68, fechaInicial: "2026-06-01" });
+  eq(c.ajustes.length, 0);
+  cerca(c.apertura, 1822.68);
+  eq(c.ok, true);
 });
 
 test("si el Paso 0 cuadra no se propone ningún ajuste", () => {
@@ -646,10 +679,43 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
-test("diaAnterior cruza fin de mes y fin de año", () => {
-  eq(diaAnterior("2026-01-01"), "2025-12-31");
-  eq(diaAnterior("2026-06-01"), "2026-05-31");
-  eq(diaAnterior("2026-03-01"), "2026-02-28");
+/* ---- Conciliación de SALIDAS: pagos del diario ↔ cargos del banco ---- */
+test("la planilla partida por el banco cuadra contra el asiento único", () => {
+  const diario = [{ fecha: "2026-01-26", debito: 0, credito: 1589.71, descripcion: "SEGUNDA QUINCENA DE ENERO 2026", referencia: "ME-00000001851", fila: 30 }];
+  const estado = [273.98, 169.67, 180.81, 235.26, 238.72, 246.88, 244.39].map((m, i) => (
+    { fecha: "2026-01-26", debito: m, credito: 0, descripcion: "DB PAGO DE PLANILLA DETALLADA BLE//PLL SEG DE ENERO DE 2026", fila: 60 + i }));
+  const r = conciliarSalidas(diario, estado, 3, 0.01);
+  eq(r.sinCobrar.length, 0, "el asiento cuadra");
+  eq(r.sinAsiento.length, 0, "y consume los 7 débitos");
+});
+
+test("los cargos propios del banco se cotejan EN BLOQUE contra el asiento mensual", () => {
+  const diario = [{ fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "CARGOS BANCARIOS 45.27", referencia: "ME-1", fila: 50 }];
+  const estado = [
+    { fecha: "2026-01-05", debito: 60, credito: 0, descripcion: "DB COMISION POR TRANSACCION DE ACH", fila: 3 },
+    { fecha: "2026-01-06", debito: 72.71, credito: 0, descripcion: "DB ITBMS", fila: 4 }
+  ];
+  const r = conciliarSalidas(diario, estado, 3, 0.01);
+  eq(r.sinAsiento.length, 0, "no se reportan uno por uno");
+  eq(r.bloque.n, 2);
+  cerca(r.bloque.dif, 32.71, "la diferencia del bloque es UN hallazgo, no dos");
+  eq(r.bloque.ok, false);
+});
+
+// El estado trae la Ó rota por el encoding: "DB COMISIÃ“N POR BAJO SALDO" no matcheaba "COMISION".
+test("un cargo con el acento roto igual cuenta como cargo bancario", () => {
+  eq(esCargoBancario("DB COMISIÃ“N POR BAJO SALDO//COBRO COM JUN 26"), true);
+  eq(esCargoBancario("Retencion Clave 29-01 16005605"), true);
+  eq(esCargoBancario("Timbre Por Cheques Emitidos Ene-2026"), true);
+  eq(esCargoBancario("DB PAGO DE PLANILLA DETALLADA BLE"), false);
+  eq(esCargoBancario("Cheque 7831"), false);
+});
+
+test("un pago que el banco no cobró queda en tránsito, no como diferencia", () => {
+  const diario = [{ fecha: "2026-01-30", debito: 0, credito: 551.29, descripcion: "INDUSTRIAS MODERNAS, S.A. - Pago:PAY0004121", referencia: "PAY0004121", fila: 40 }];
+  const r = conciliarSalidas(diario, [], 3, 0.01);
+  eq(r.sinCobrar.length, 1);
+  eq(r.sinAsiento.length, 0);
 });
 
 test("lo que ya compensó se lista como tránsito ENTRANTE, no como pendiente", () => {

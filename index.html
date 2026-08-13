@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13b";
+var APP_VERSION="2026.08.13c";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1644,6 +1644,65 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
       fuente: "Diario " + banco + " / Estado de cuenta " + banco });
   });
 }
+/* ---- Conciliación de SALIDAS: pagos del diario ↔ cargos del estado ----
+   La otra mitad de la conciliación bancaria. Sin esto ni un pago registrado que el banco nunca cobró ni un
+   cargo del banco sin asiento aparecen en ningún lado: quedaban fuera del cotejo en silencio. */
+// Cargo propio del banco: comisión, ITBMS, retención de tarjeta, timbre, manejo de cuenta. La empresa NO
+// los asienta uno por uno — los agrupa en un solo comprobante mensual ("CARGOS BANCARIOS 45.27"). Por eso
+// se cotejan EN BLOQUE contra ese asiento: 87 líneas sueltas serían ruido, la diferencia del bloque no.
+function esCargoBancario(desc){
+  // "COMISI" y "RETENCI" sin la vocal final: el estado a veces trae la Ó rota por el encoding
+  // ("DB COMISIÃ“N POR BAJO SALDO"), y con el acento mal no matchea "COMISION".
+  return /COMISI|ITBMS|RETENCI|TIMBRE|MANEJO DE CUENTA/.test(normTxt(desc));
+}
+function esAsientoCargosBancarios(desc){ return normTxt(desc).indexOf("CARGOS BANCARIOS")!==-1; }
+function conciliarSalidas(diario, estado, ventanaDias, tolerancia){
+  var noAborted = function(x){ return normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; };
+  function limpio(arr, campo){
+    return arr.filter(function(x){ return x[campo]>0 && !x._neutro && noAborted(x); })
+      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
+  }
+  var pagos  = limpio(diario, "credito");  // lo que la empresa registró que salió
+  var cargos = limpio(estado, "debito");   // lo que el banco efectivamente cobró
+  // 1) Bloque de cargos bancarios: el asiento mensual contra TODOS los cargos propios del banco.
+  var bloque = null;
+  var asientos = pagos.filter(function(p){ return esAsientoCargosBancarios(p.descripcion); });
+  var propios  = cargos.filter(function(c){ return esCargoBancario(c.descripcion); });
+  if(asientos.length && propios.length){
+    var totalAsiento = Math.round(asientos.reduce(function(a,p){ return a+p.monto; },0)*100)/100;
+    var totalCargos  = Math.round(propios.reduce(function(a,c){ return a+c.monto; },0)*100)/100;
+    // Cuadre o no, el bloque se da por cotejado: la diferencia se informa como UN hallazgo, no como 87.
+    asientos.forEach(function(p){ p.usado=true; });
+    propios.forEach(function(c){ c.usado=true; });
+    var dif = Math.round((totalCargos - totalAsiento)*100)/100;
+    bloque = { asiento: totalAsiento, cargos: totalCargos, n: propios.length, dif: dif,
+               ok: Math.abs(dif) < 0.01, fecha: asientos[0].fecha };
+  }
+  // Un pago puede asentarse días después de que el banco lo cobró (y al revés), así que la ventana de las
+  // salidas es más ancha que la de los depósitos.
+  var VENT = Math.max(ventanaDias, 12);
+  // 2) Cada pago contra el cargo del banco. Hasta 20 líneas: el banco parte la planilla en un débito por
+  // empleado (la 2ª quincena de enero son 7 débitos que suman el asiento de 1,589.71).
+  pagos.forEach(function(p){
+    if(p.usado) return;
+    var combo = buscarCombinacion(cargos, p.fecha, p.monto, VENT, tolerancia);
+    if(!combo) combo = buscarSubsetSuma(cargos, p.fecha, p.monto, VENT, tolerancia, 20);
+    if(combo){ combo.forEach(function(i){ cargos[i].usado=true; }); p.usado=true; }
+  });
+  // 3) Cada cargo no usado contra una combinación de pagos (el banco junta varios en un solo débito).
+  cargos.forEach(function(c){
+    if(c.usado) return;
+    var combo = buscarCombinacion(pagos, c.fecha, c.monto, VENT, tolerancia);
+    if(!combo) combo = buscarSubsetSuma(pagos, c.fecha, c.monto, VENT, tolerancia, 8);
+    if(combo){ combo.forEach(function(i){ pagos[i].usado=true; }); c.usado=true; }
+  });
+  return {
+    sinCobrar: pagos.filter(function(p){ return !p.usado; }),   // registrado como pagado, el banco no lo cobró
+    sinAsiento: cargos.filter(function(c){ return !c.usado; }), // el banco lo cobró, no está en el diario
+    bloque: bloque
+  };
+}
+
 // diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
 function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia, transitoPrevio){
   var hallazgos = [];
@@ -1726,6 +1785,64 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
         fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"diff",
         texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " en el estado de cuenta no aparece registrado en el diario contable — " + desc,
         fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
+      });
+    });
+
+    /* ---- La otra mitad: SALIDAS (pagos del diario ↔ cargos del banco) ----
+       Antes ningún paso las miraba: un pago registrado que el banco nunca cobró, o un cargo del banco sin
+       asiento, no aparecían en ningún lado. */
+    var sal = conciliarSalidas(cfg.diario, cfg.estado, ventanaDias, tolerancia);
+    // Bloque de cargos bancarios del mes: un solo hallazgo con la diferencia, no una línea por comisión.
+    if(sal.bloque && !sal.bloque.ok){
+      var b = sal.bloque;
+      hallazgos.push({
+        fecha:b.fecha, banco:cfg.nombre, monto:Math.abs(b.dif), clase:"diff",
+        concepto:"Cargos bancarios del mes", comprobante:"",
+        texto: cfg.nombre + ": el banco cobró B/ " + fmt(b.cargos) + " en " + b.n +
+               " cargos propios (comisiones, ITBMS, retenciones, timbres) y el asiento \"CARGOS BANCARIOS\" del " +
+               b.fecha + " registra B/ " + fmt(b.asiento) + " — faltan B/ " + fmt(Math.abs(b.dif)) +
+               " por asentar." ,
+        fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre + " (cargos del banco)"
+      });
+    }
+    // Pago registrado que el banco todavía no cobró = en tránsito (cheque/transferencia en circulación).
+    sal.sinCobrar.forEach(function(p){
+      var d2 = (p.descripcion||"").trim();
+      hallazgos.push({
+        fecha:p.fecha, banco:cfg.nombre, monto:p.monto, clase:"en_transito",
+        concepto:d2, comprobante:/^ME-/i.test(String(p.referencia||"").trim())?String(p.referencia).trim():"",
+        motivo:"pago pendiente de cobro en banco",
+        texto: cfg.nombre + " " + p.fecha + ": B/ " + fmt(p.monto) + " (\"" + d2 +
+               "\") está registrado como pagado pero el banco todavía no lo cobró — en circulación." + refComprobante(p.referencia),
+        fuente: "Diario " + cfg.nombre + " (fila " + p.fila + ") / Estado de cuenta " + cfg.nombre
+      });
+    });
+    // Cargo del banco sin asiento: plata que salió de la cuenta y no está en la contabilidad.
+    sal.sinAsiento.forEach(function(cg){
+      var d3 = (cg.descripcion||"").trim();
+      // El estado suele traer unos días del mes siguiente. Esos cargos todavía no tienen por qué estar
+      // asentados: son del próximo cierre, no una diferencia de este.
+      if(ultimoDia && cg.fecha > ultimoDia){
+        hallazgos.push({
+          fecha:cg.fecha, banco:cfg.nombre, monto:cg.monto, clase:"en_transito",
+          concepto:d3, comprobante:"", motivo:"cargo posterior al cierre",
+          texto: cfg.nombre + " " + cg.fecha + ": B/ " + fmt(cg.monto) + " (\"" + d3 +
+                 "\") es posterior al cierre del " + ultimoDia + " — el estado trae días del mes siguiente. Se asienta en el próximo cierre.",
+          fuente: "Estado de cuenta " + cfg.nombre + " (fila " + cg.fila + ") / Diario " + cfg.nombre
+        });
+        return;
+      }
+      // Un cheque que el banco cobró y no está en el diario suele ser de un mes anterior: entonces le
+      // toca estar en el resumen del Paso 0 como cheque en circulación.
+      var pista = esChequeDesc(d3)
+        ? " Si se emitió en un mes anterior, tiene que estar en el resumen del Paso 0 como cheque en circulación."
+        : "";
+      hallazgos.push({
+        fecha:cg.fecha, banco:cfg.nombre, monto:cg.monto, clase:"diff",
+        concepto:d3, comprobante:"",
+        texto: cfg.nombre + " " + cg.fecha + ": el banco cobró B/ " + fmt(cg.monto) + " (\"" + d3 +
+               "\") y no hay asiento que lo respalde en el diario." + pista,
+        fuente: "Estado de cuenta " + cfg.nombre + " (fila " + cg.fila + ") / Diario " + cfg.nombre
       });
     });
   });
@@ -3493,7 +3610,7 @@ function renderResultados(){
   // El total del resumen del Paso 0 tiene que ser el saldo inicial de Caja General. Va ACÁ ARRIBA y no
   // dentro del bloque del Paso 0: cuando la caja cuadra, los pasos sin diferencias no se dibujan y la
   // alerta quedaría invisible justo en el caso en que hay que verla.
-  var cuadreP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral);
+  var cuadreP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral, STATE.diarioCaja);
   html += cuadreSaldoIniHtml(cuadreP0);
   html += ajusteHtml(cuadreP0, ajustesEnCajaGeneral(STATE.diarioCaja));
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);
@@ -3636,7 +3753,7 @@ function renderResultados(){
 function exportarChecklist(){
   var r = STATE.results;
   var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
-  var cP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral);
+  var cP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral, STATE.diarioCaja);
   if(cP0 && !cP0.ok){
     rows.push(["Paso 0", cP0.fecha||"", "", cP0.dif, "Corregir archivo de origen",
       "El resumen del Paso 0 suma B/ "+fmt(cP0.total)+" y el saldo inicial de Caja General es B/ "+fmt(cP0.saldoInicial)+
@@ -4016,7 +4133,21 @@ function pasaPorCajaGeneral(t){
   var c = normTxt(t.concepto);
   return c.indexOf("CIRCULACION")===-1 && c.indexOf("EMITIDO")===-1;
 }
-function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG){
+// Asiento de AJUSTE DE APERTURA: corrige el saldo con el que arranca el mes. Puede estar fechado el
+// primer día del período (queda dentro del navegador, que es lo práctico para dejar la traza) o en el mes
+// anterior (ahí el Balance Inicial ya viene corregido y no hay nada que sumar). Los ajustes de fecha
+// posterior son movimientos del mes, no tocan la apertura.
+function ajustesDeApertura(diarioCaja, fechaInicial){
+  if(!diarioCaja || !fechaInicial) return [];
+  return diarioCaja.filter(function(x){
+    return x.fecha && x.fecha <= fechaInicial && normTxt(x.descripcion).indexOf("AJUST")!==-1;
+  }).map(function(x){
+    return { fecha:x.fecha, monto: Math.round((x.debito - x.credito)*100)/100,
+             columna: x.debito>0 ? "Débito" : "Crédito", desc:(x.descripcion||"").trim(),
+             referencia: String(x.referencia||"").trim() };
+  });
+}
+function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG, diarioCaja){
   if(!transitoPrevio || !transitoPrevio.length) return null;
   if(!saldoCG || saldoCG.inicial==null) return null;
   var dentro = [], fuera = [];
@@ -4025,25 +4156,27 @@ function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG){
   var total = suma(dentro);
   var porBanco = {};
   dentro.forEach(function(t){ porBanco[t.banco] = Math.round(((porBanco[t.banco]||0) + t.monto)*100)/100; });
-  var dif = Math.round((total - saldoCG.inicial)*100)/100;
+  // El saldo con el que realmente arranca el mes = Balance Inicial + los ajustes de apertura ya asentados.
+  var aj = ajustesDeApertura(diarioCaja, saldoCG.fechaInicial);
+  var totalAj = Math.round(aj.reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+  var apertura = Math.round((saldoCG.inicial + totalAj)*100)/100;
+  var dif = Math.round((total - apertura)*100)/100;
   return { saldoInicial: saldoCG.inicial, fecha: saldoCG.fechaInicial, total: total, n: dentro.length,
            totalFuera: suma(fuera), nFuera: fuera.length, porBanco: porBanco,
+           ajustes: aj, totalAjustes: totalAj, apertura: apertura,
            dif: dif, ok: Math.abs(dif) < 0.01 };
-}
-// Día anterior a una fecha ISO. El ajuste al saldo INICIAL se fecha en el mes anterior: dentro del mes
-// corregiría el saldo final y el de apertura seguiría mal.
-function diaAnterior(iso){
-  var d = new Date(iso+"T12:00:00Z");
-  d.setUTCDate(d.getUTCDate()-1);
-  return d.toISOString().slice(0,10);
 }
 // Asiento de ajuste que hay que registrar para que el saldo de apertura de Caja General refleje lo que
 // realmente quedó en tránsito. El signo manda la columna: todo lo que viene en tránsito es dinero
 // registrado como depositado, o sea DÉBITO; un saldo acreedor (negativo) en esta cuenta no tiene sentido.
+// Se fecha el PRIMER DÍA DEL PERÍODO que se está revisando: el ejercicio anterior ya está declarado y no
+// se toca, así que la corrección entra en el período abierto. Fechado ese día queda antes de todos los
+// movimientos del mes, o sea que corrige la apertura y no el movimiento — y `ajustesDeApertura` lo suma
+// al Balance Inicial (que el navegador sigue mostrando sin corregir, porque lo calcula al corte).
 function ajusteCajaGeneral(c){
   if(!c || c.ok) return null;
   return {
-    fecha: c.fecha ? diaAnterior(c.fecha) : "",
+    fecha: c.fecha || "",
     columna: c.dif > 0 ? "Débito" : "Crédito",
     monto: Math.round(Math.abs(c.dif)*100)/100,
     cuenta: "[1.1.8] Caja General",
@@ -4067,7 +4200,9 @@ function ajustesEnCajaGeneral(diarioCaja){
 function ajusteHtml(c, yaHechos){
   var a = ajusteCajaGeneral(c);
   if(!a) return "";
-  var previos = (yaHechos||[]).length
+  // Los ajustes de APERTURA ya están sumados en el cuadre: acá solo se listan los del mes, que no la tocan.
+  yaHechos = (yaHechos||[]).filter(function(x){ return !c.fecha || x.fecha > c.fecha; });
+  var previos = yaHechos.length
     ? '<p class="per-nota">En el navegador de este mes ya hay ' + (yaHechos.length===1?'un asiento que dice':yaHechos.length+' asientos que dicen') +
       ' "ajuste": ' +
       yaHechos.map(function(x){ return '<b>'+x.fecha+' · '+x.columna+' B/ '+fmt(x.monto)+'</b> ('+esc(x.desc)+
@@ -4076,7 +4211,7 @@ function ajusteHtml(c, yaHechos){
     : "";
   return '<div class="per-panel" style="background:#F2F0F8;border-color:#C3B8DE;color:#4A3C63;margin-top:-4px">' +
     '<div class="per-title" style="color:#4A3C63">✎ Asiento de ajuste sugerido</div>' +
-    '<p class="per-txt">' + (c.saldoInicial < 0
+    '<p class="per-txt">' + (c.apertura < 0
       ? 'El saldo de apertura está en la columna equivocada, así que el ajuste va acá — no hay nada que corregir en el resumen del Paso 0.'
       : 'Primero revisá el resumen del Paso 0. <b>Si confirmás que está completo</b>, entonces el descuadre es del navegador y se corrige con este asiento.') +
     '</p>' +
@@ -4086,8 +4221,10 @@ function ajusteHtml(c, yaHechos){
       '<tr class="per-mal"><td><b>'+a.columna+'</b></td><td class="per-rango"><b>B/ '+fmt(a.monto)+'</b></td></tr>' +
       '<tr><td colspan="2">'+esc(a.concepto)+'</td></tr>' +
     '</tbody></table>' +
-    '<p class="per-nota">Va fechado el <b>'+a.fecha+'</b>, del mes anterior: es el saldo de <b>apertura</b> lo que hay que corregir. ' +
-    'Un asiento dentro del mes cambia el saldo final y deja el inicial igual de mal. La contrapartida la definís vos según de dónde venga el descuadre.</p>' +
+    '<p class="per-nota">Va fechado el <b>'+a.fecha+'</b>, el primer día del período: el ejercicio anterior ya está declarado y no se toca, ' +
+    'así que la corrección entra acá. Con esa fecha queda antes de todos los movimientos del mes, o sea que corrige la <b>apertura</b>. ' +
+    'El Balance Inicial del navegador va a seguir mostrando el saldo viejo (lo calcula al corte), pero esta app suma el ajuste y da el cuadre por bueno. ' +
+    'La contrapartida la definís vos según de dónde venga el descuadre.</p>' +
     previos +
     '<button class="btn-export" id="ajusteCopy">📋 Copiar el asiento</button>' +
   '</div>';
@@ -4112,11 +4249,25 @@ function cuadreSaldoIniHtml(c){
     ? '<p class="per-nota">No se '+(c.nFuera===1?'cuenta 1 cheque':'cuentan '+c.nFuera+' cheques')+' en circulación por B/ '+fmt(c.totalFuera)+
       ': son pagos que salen de la cuenta bancaria y nunca pasan por Caja General.</p>'
     : "";
+  // Ajustes de apertura ya asentados: se muestran siempre, cuadre o no, para que se vea de dónde sale la cifra.
+  var filasAj = (c.ajustes||[]).map(function(x){
+    return '<tr><td style="padding-left:26px;opacity:.85">'+(x.monto>=0?'+':'−')+' Ajuste de apertura ya asentado — '+esc(x.desc)+
+      (x.referencia?' <span class="per-arch">'+esc(x.referencia)+' · '+x.fecha+'</span>':'')+'</td>' +
+      '<td class="per-rango">B/ '+fmt(Math.abs(x.monto))+'</td></tr>';
+  }).join("");
   if(c.ok){
     return '<div class="per-panel" style="background:#EDF7F0;border-color:#A9CFB6;color:#2F6B45">' +
       '<div class="per-title" style="color:#2F6B45">✓ El Paso 0 cuadra con el saldo inicial de Caja General</div>' +
-      '<p class="per-txt">Saldo inicial'+(c.fecha?' ('+c.fecha+')':'')+': <b>B/ '+fmt(c.saldoInicial)+
-      '</b> = '+(c.n===1?'la única partida':'las '+c.n+' partidas')+' en tránsito del mes anterior.</p>' + excluidas + '</div>';
+      '<p class="per-txt">El saldo de apertura es <b>B/ '+fmt(c.apertura)+'</b> = '+
+      (c.n===1?'la única partida':'las '+c.n+' partidas')+' en tránsito del mes anterior.</p>' +
+      (c.ajustes && c.ajustes.length
+        ? '<table class="per-tabla"><tbody>' +
+          '<tr><td>Balance Inicial del navegador'+(c.fecha?' <span class="per-arch">'+c.fecha+'</span>':'')+'</td>' +
+            '<td class="per-rango">B/ '+fmt(c.saldoInicial)+'</td></tr>' + filasAj +
+          '<tr><td><b>Saldo de apertura</b></td><td class="per-rango"><b>B/ '+fmt(c.apertura)+'</b></td></tr>' +
+          '</tbody></table>'
+        : '') +
+      excluidas + '</div>';
   }
   var faltan = c.dif < 0; // el resumen suma MENOS que el saldo: le faltan partidas
   return '<div class="per-panel per-grave">' +
@@ -4124,8 +4275,9 @@ function cuadreSaldoIniHtml(c){
     '<p class="per-txt">El saldo de Caja General al arrancar el mes es lo que quedó en tránsito del mes anterior, ' +
     'así que tiene que ser igual al total del resumen del Paso 0.</p>' +
     '<table class="per-tabla"><tbody>' +
-      '<tr><td>Saldo inicial de Caja General'+(c.fecha?' <span class="per-arch">'+c.fecha+'</span>':'')+'</td>' +
-        '<td class="per-rango">B/ '+fmt(c.saldoInicial)+'</td></tr>' +
+      '<tr><td>Balance Inicial del navegador'+(c.fecha?' <span class="per-arch">'+c.fecha+'</span>':'')+'</td>' +
+        '<td class="per-rango">B/ '+fmt(c.saldoInicial)+'</td></tr>' + filasAj +
+      (filasAj ? '<tr><td><b>Saldo de apertura</b></td><td class="per-rango"><b>B/ '+fmt(c.apertura)+'</b></td></tr>' : '') +
       '<tr><td>Resumen del Paso 0 — '+partidas+' que '+(c.n===1?"pasa":"pasan")+' por Caja General</td>' +
         '<td class="per-rango">B/ '+fmt(c.total)+'</td></tr>' +
       bancos.replace(/<tr><td>/g, '<tr><td style="padding-left:26px;opacity:.8">') +
@@ -4133,14 +4285,14 @@ function cuadreSaldoIniHtml(c){
     '</tbody></table>' + excluidas +
     // Con el saldo en negativo el error está del lado del navegador, no del resumen: no tiene sentido
     // mandar a buscar partidas que sobran cuando lo que hay es un saldo mal ubicado.
-    (c.saldoInicial < 0 ? '' : '<p class="per-nota">' + (faltan
+    (c.apertura < 0 ? '' : '<p class="per-nota">' + (faltan
       ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Revisá si quedó alguna partida sin anotar — lo más común es una fila de tarjeta (clave/visa) sin monto o un depósito de los últimos días del mes anterior.'
       : '<b>El resumen trae B/ '+fmt(Math.abs(c.dif))+' de más.</b> Revisá si hay una partida repetida, una que ya había compensado antes, o alguna que no debería estar (un pago, no un depósito).') +
     '</p>') +
-    (c.saldoInicial < 0
+    (c.apertura < 0
       ? '<p class="per-nota">⚠ <b>El saldo inicial viene en negativo, o sea en la columna CRÉDITO.</b> Eso acá no tiene sentido: todo lo que viene en tránsito es dinero ya registrado como depositado, así que el saldo de apertura tiene que quedar al <b>débito</b>. El descuadre no está en el resumen del Paso 0 — está en el navegador, y se corrige con el asiento de ajuste de abajo.</p>'
       : '') +
-    '<p class="per-nota">' + (c.saldoInicial < 0
+    '<p class="per-nota">' + (c.apertura < 0
       ? 'La conciliación corre igual: empareja partida por partida y no usa este saldo. Pero mientras no se registre el ajuste, el saldo de apertura de Caja General queda mal y el descuadre se arrastra al cierre.'
       : 'La conciliación corre igual, pero mientras esto no cuadre <b>el resumen está incompleto</b>: lo que le falte va a aparecer como diferencia en los pasos siguientes, y lo que le sobre va a quedar como "pendiente de compensar" para siempre.') +
     '</p>' +
