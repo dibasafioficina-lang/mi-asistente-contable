@@ -689,17 +689,28 @@ test("la planilla partida por el banco cuadra contra el asiento único", () => {
   eq(r.sinAsiento.length, 0, "y consume los 7 débitos");
 });
 
-test("los cargos propios del banco se cotejan EN BLOQUE contra el asiento mensual", () => {
+// Los cargos propios del banco NO se concilian en este módulo: se apartan junto con el comprobante
+// mensual que los agrupa, y se informa cuánto quedó fuera para que la exclusión sea explícita.
+test("los cargos propios del banco quedan fuera del cotejo, no como diferencia", () => {
   const diario = [{ fecha: "2026-01-31", debito: 0, credito: 100, descripcion: "CARGOS BANCARIOS 45.27", referencia: "ME-1", fila: 50 }];
   const estado = [
     { fecha: "2026-01-05", debito: 60, credito: 0, descripcion: "DB COMISION POR TRANSACCION DE ACH", fila: 3 },
     { fecha: "2026-01-06", debito: 72.71, credito: 0, descripcion: "DB ITBMS", fila: 4 }
   ];
   const r = conciliarSalidas(diario, estado, 3, 0.01);
-  eq(r.sinAsiento.length, 0, "no se reportan uno por uno");
-  eq(r.bloque.n, 2);
-  cerca(r.bloque.dif, 32.71, "la diferencia del bloque es UN hallazgo, no dos");
-  eq(r.bloque.ok, false);
+  eq(r.sinAsiento.length, 0, "ningún cargo sale como diferencia");
+  eq(r.sinCobrar.length, 0, "el comprobante que los agrupa tampoco queda pendiente");
+  eq(r.excluidos.nCargos, 2);
+  cerca(r.excluidos.totalCargos, 132.71);
+  eq(r.excluidos.nAsientos, 1);
+  cerca(r.excluidos.totalAsientos, 100);
+});
+
+test("un cargo bancario nunca cuenta como diferencia roja", () => {
+  const estado = [{ fecha: "2026-06-30", debito: 30, credito: 0, descripcion: "DB COMISIÃ“N POR BAJO SALDO//COBRO COM JUN 26", fila: 9 }];
+  const r = conciliarSalidas([], estado, 3, 0.01);
+  eq(r.sinAsiento.length, 0, "aunque no haya asiento que lo agrupe");
+  eq(r.excluidos.nCargos, 1);
 });
 
 // El estado trae la Ó rota por el encoding: "DB COMISIÃ“N POR BAJO SALDO" no matcheaba "COMISION".

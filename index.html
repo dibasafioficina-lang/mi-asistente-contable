@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13c";
+var APP_VERSION="2026.08.13d";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1647,9 +1647,10 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
 /* ---- Conciliación de SALIDAS: pagos del diario ↔ cargos del estado ----
    La otra mitad de la conciliación bancaria. Sin esto ni un pago registrado que el banco nunca cobró ni un
    cargo del banco sin asiento aparecen en ningún lado: quedaban fuera del cotejo en silencio. */
-// Cargo propio del banco: comisión, ITBMS, retención de tarjeta, timbre, manejo de cuenta. La empresa NO
-// los asienta uno por uno — los agrupa en un solo comprobante mensual ("CARGOS BANCARIOS 45.27"). Por eso
-// se cotejan EN BLOQUE contra ese asiento: 87 líneas sueltas serían ruido, la diferencia del bloque no.
+// Cargo propio del banco: comisión, ITBMS, retención de tarjeta, timbre, manejo de cuenta. NO se cotejan
+// en este módulo (decisión de Diba): la empresa no los asienta uno por uno sino en un comprobante mensual
+// ("CARGOS BANCARIOS"), y su revisión va por otra vía. Se apartan del cotejo junto con ese asiento, y se
+// informa cuánto se dejó fuera para que la exclusión sea explícita y no parezca un olvido.
 function esCargoBancario(desc){
   // "COMISI" y "RETENCI" sin la vocal final: el estado a veces trae la Ó rota por el encoding
   // ("DB COMISIÃ“N POR BAJO SALDO"), y con el acento mal no matchea "COMISION".
@@ -1664,20 +1665,14 @@ function conciliarSalidas(diario, estado, ventanaDias, tolerancia){
   }
   var pagos  = limpio(diario, "credito");  // lo que la empresa registró que salió
   var cargos = limpio(estado, "debito");   // lo que el banco efectivamente cobró
-  // 1) Bloque de cargos bancarios: el asiento mensual contra TODOS los cargos propios del banco.
-  var bloque = null;
+  // 1) Cargos propios del banco y su comprobante mensual: FUERA de este cotejo.
   var asientos = pagos.filter(function(p){ return esAsientoCargosBancarios(p.descripcion); });
   var propios  = cargos.filter(function(c){ return esCargoBancario(c.descripcion); });
-  if(asientos.length && propios.length){
-    var totalAsiento = Math.round(asientos.reduce(function(a,p){ return a+p.monto; },0)*100)/100;
-    var totalCargos  = Math.round(propios.reduce(function(a,c){ return a+c.monto; },0)*100)/100;
-    // Cuadre o no, el bloque se da por cotejado: la diferencia se informa como UN hallazgo, no como 87.
-    asientos.forEach(function(p){ p.usado=true; });
-    propios.forEach(function(c){ c.usado=true; });
-    var dif = Math.round((totalCargos - totalAsiento)*100)/100;
-    bloque = { asiento: totalAsiento, cargos: totalCargos, n: propios.length, dif: dif,
-               ok: Math.abs(dif) < 0.01, fecha: asientos[0].fecha };
-  }
+  function suma(arr){ return Math.round(arr.reduce(function(a,x){ return a+x.monto; },0)*100)/100; }
+  asientos.forEach(function(p){ p.usado=true; });
+  propios.forEach(function(c){ c.usado=true; });
+  var excluidos = { nCargos: propios.length, totalCargos: suma(propios),
+                    nAsientos: asientos.length, totalAsientos: suma(asientos) };
   // Un pago puede asentarse días después de que el banco lo cobró (y al revés), así que la ventana de las
   // salidas es más ancha que la de los depósitos.
   var VENT = Math.max(ventanaDias, 12);
@@ -1699,7 +1694,7 @@ function conciliarSalidas(diario, estado, ventanaDias, tolerancia){
   return {
     sinCobrar: pagos.filter(function(p){ return !p.usado; }),   // registrado como pagado, el banco no lo cobró
     sinAsiento: cargos.filter(function(c){ return !c.usado; }), // el banco lo cobró, no está en el diario
-    bloque: bloque
+    excluidos: excluidos                                        // cargos bancarios: fuera del alcance de este módulo
   };
 }
 
@@ -1792,17 +1787,18 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
        Antes ningún paso las miraba: un pago registrado que el banco nunca cobró, o un cargo del banco sin
        asiento, no aparecían en ningún lado. */
     var sal = conciliarSalidas(cfg.diario, cfg.estado, ventanaDias, tolerancia);
-    // Bloque de cargos bancarios del mes: un solo hallazgo con la diferencia, no una línea por comisión.
-    if(sal.bloque && !sal.bloque.ok){
-      var b = sal.bloque;
+    // Cargos propios del banco: apartados a propósito. Se deja constancia de cuánto quedó fuera para que
+    // la exclusión sea explícita — si no, parecería que nadie los miró.
+    var ex = sal.excluidos;
+    if(ex && (ex.nCargos || ex.nAsientos)){
       hallazgos.push({
-        fecha:b.fecha, banco:cfg.nombre, monto:Math.abs(b.dif), clase:"diff",
+        fecha:"", banco:cfg.nombre, monto:ex.totalCargos, clase:"informativo",
         concepto:"Cargos bancarios del mes", comprobante:"",
-        texto: cfg.nombre + ": el banco cobró B/ " + fmt(b.cargos) + " en " + b.n +
-               " cargos propios (comisiones, ITBMS, retenciones, timbres) y el asiento \"CARGOS BANCARIOS\" del " +
-               b.fecha + " registra B/ " + fmt(b.asiento) + " — faltan B/ " + fmt(Math.abs(b.dif)) +
-               " por asentar." ,
-        fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre + " (cargos del banco)"
+        texto: cfg.nombre + ": se dejaron fuera del cotejo " + ex.nCargos +
+               " cargos propios del banco (comisiones, ITBMS, retenciones, timbres) por B/ " + fmt(ex.totalCargos) +
+               (ex.nAsientos ? ", junto con el comprobante \"CARGOS BANCARIOS\" que los agrupa (B/ " + fmt(ex.totalAsientos) + ")" : "") +
+               ". No se concilian en este módulo.",
+        fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre
       });
     }
     // Pago registrado que el banco todavía no cobró = en tránsito (cheque/transferencia en circulación).
@@ -2141,7 +2137,10 @@ function esEfectivo(item){ return item && item.clase==="efectivo"; } // depósit
 // "aviso": problema de CALIDAD DEL DATO (ej. una fecha imposible en el resumen del Paso 0). No es una
 // diferencia de plata —el cotejo se resolvió igual— pero hay que corregir el archivo de origen.
 function esAviso(item){ return item && item.clase==="aviso"; }
-function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || esEfectivo(item) || esAviso(item); }
+// "informativo": queda FUERA del alcance del paso a propósito (ej. los cargos propios del banco). No es
+// una diferencia ni algo a corregir — se lista para que la exclusión sea explícita y no parezca un olvido.
+function esInformativo(item){ return item && item.clase==="informativo"; }
+function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || esEfectivo(item) || esAviso(item) || esInformativo(item); }
 function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esNoRojo(i);}).length : 0; }
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
@@ -3667,6 +3666,7 @@ function renderResultados(){
     var enTransito = esArray ? items.filter(esEnTransito) : [];
     var efectivo = esArray ? items.filter(esEfectivo) : [];
     var avisos = esArray ? items.filter(esAviso) : [];
+    var informativos = esArray ? items.filter(esInformativo) : [];
     var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : bloqueado ? "bloqueado"
       : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : '') + (avisos.length? ' · '+avisos.length+' aviso(s)' : ''));
     var idxPaso = PASO_ORDEN.indexOf(p.key);
@@ -3714,6 +3714,12 @@ function renderResultados(){
         html += '<div class="sinconf-block"><div class="sinconf-head">Sin confirmar el banco ('+sinConf.length+')' +
           '<span class="sinconf-sub">La plata está en el sistema, pero el depósito no trae etiqueta de banco. Verifica manualmente.</span></div>';
         items.forEach(function(item, idx){ if(esSinConfirmar(item)) html += findingHtml(p, item, idx); });
+        html += '</div>';
+      }
+      if(informativos.length){
+        html += '<div class="sinconf-block"><div class="sinconf-head">Fuera del alcance de este paso ('+informativos.length+')' +
+          '<span class="sinconf-sub">Se apartaron del cotejo a propósito. No son diferencias ni hay nada que corregir — se listan para que quede claro qué no se comparó.</span></div>';
+        items.forEach(function(item, idx){ if(esInformativo(item)) html += findingHtml(p, item, idx); });
         html += '</div>';
       }
       if(avisos.length){
@@ -3779,7 +3785,7 @@ function exportarChecklist(){
     }
     items.forEach(function(item, idx){
       var ckKey = key+"_"+idx;
-      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : esAviso(item) ? "Corregir archivo de origen" : "Diferencia";
+      var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : esAviso(item) ? "Corregir archivo de origen" : esInformativo(item) ? "Fuera del alcance" : "Diferencia";
       rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });
   });
