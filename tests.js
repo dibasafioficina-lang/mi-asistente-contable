@@ -679,6 +679,75 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
+/* ---- Faltantes, sobrantes y ajustes ----
+   No son un método de pago ni un depósito, pero mueven el saldo de Caja General en su propio diario. */
+test("el asiento partido en dos líneas no cuenta doble", () => {
+  // El navegador trae el faltante como dos líneas de Caja General con la MISMA referencia: una al débito
+  // y otra al crédito, del mismo importe. El faltante es 0.20, ni 0.40 ni 0.
+  const diario = [
+    { fecha: "2026-06-02", debito: 0, credito: 0.20, descripcion: "FALTANTE DEL 02/6/2026", referencia: "ME-00000001961", fila: 43 },
+    { fecha: "2026-06-02", debito: 0.20, credito: 0, descripcion: "FALTANTE DEL 02/06/2026", referencia: "ME-00000001961", fila: 57 }
+  ];
+  const d = faltSobrDiario(diario);
+  eq(d.length, 1, "un comprobante, no dos");
+  cerca(d[0].monto, 0.20);
+  eq(d[0].tipo, "FALTANTE");
+});
+
+test("un asiento de una sola línea se toma tal cual", () => {
+  const d = faltSobrDiario([{ fecha: "2026-01-21", debito: 0, credito: 0.75, descripcion: "FALTANTE DEL 21/01/2026", referencia: "ME-1", fila: 9 }]);
+  eq(d.length, 1);
+  cerca(d[0].monto, 0.75);
+});
+
+test("un faltante reportado y no asentado es diferencia", () => {
+  const c = cotejarFaltantesSobrantes(
+    [{ fecha: "2026-01-21", cajera: "ANA", tipo: "FALTANTE", monto: 5.00 }], [], 0.01);
+  eq(c.length, 1);
+  eq(c[0].clase, "monto");
+  cerca(c[0].dif, -5.00, "el diario no tiene nada");
+});
+
+test("un asiento sin respaldo en el reporte también es diferencia", () => {
+  const c = cotejarFaltantesSobrantes([], [{ fecha: "2026-01-10", tipo: "FALTANTE", tipos: ["FALTANTE"], monto: 3.00 }], 0.01);
+  eq(c.length, 1);
+  cerca(c[0].dif, 3.00);
+});
+
+test("si el importe cuadra pero la etiqueta no, es aviso y no diferencia", () => {
+  const c = cotejarFaltantesSobrantes(
+    [{ fecha: "2026-06-27", cajera: "EIRA", tipo: "SOBRANTE", monto: 0.01 }],
+    [{ fecha: "2026-06-27", tipo: "AMBOS", tipos: ["FALTANTE", "SOBRANTE"], monto: 0.01 }], 0.01);
+  eq(c.length, 1);
+  eq(c[0].clase, "etiqueta", "el importe cuadra: lo que falla es la descripción");
+});
+
+test("lo que cuadra no genera nada", () => {
+  eq(cotejarFaltantesSobrantes(
+    [{ fecha: "2026-01-21", tipo: "FALTANTE", monto: 0.75 }],
+    [{ fecha: "2026-01-21", tipo: "FALTANTE", tipos: ["FALTANTE"], monto: 0.75 }], 0.01).length, 0);
+});
+
+test("los ajustes del mes se listan; los de apertura no (los cuenta el Paso 0)", () => {
+  const diario = [
+    { fecha: "2026-01-01", debito: 18123.07, credito: 0, descripcion: "ajusta saldo errado de la caja general al cierre 2025.", referencia: "ME-00000002023", fila: 2 },
+    { fecha: "2026-01-02", debito: 0, credito: 56.49, descripcion: "ajuste en caja general movido de diciembre 2025", referencia: "ME-00000001827", fila: 12 }
+  ];
+  const a = ajustesDelMes(diario, "2026-01-01");
+  eq(a.length, 1, "solo el del 02-ene");
+  cerca(a[0].monto, 56.49);
+  eq(a[0].columna, "Crédito");
+  eq(ajustesDelMes(diario, null).length, 2, "sin fecha de apertura, se listan los dos");
+});
+
+test("un ajuste en Caja General se reporta como aviso, no como diferencia", () => {
+  const diario = [{ fecha: "2026-01-02", debito: 0, credito: 56.49, descripcion: "ajuste en caja general", referencia: "ME-1", fila: 12 }];
+  const h = paso1([], diario, null, 0.01, [], "2026-01-01");
+  eq(h.length, 1);
+  eq(h[0].clase, "aviso");
+  eq(esNoRojo(h[0]), true, "no bloquea el cierre");
+});
+
 /* ---- Las SALIDAS del banco quedan fuera del alcance ----
    Este módulo coteja lo que pasa por Caja General. Los pagos (cheques emitidos, ACH, planillas) y los
    cargos propios del banco (comisiones, ITBMS, retenciones, timbres) salen directo de la cuenta sin tocar

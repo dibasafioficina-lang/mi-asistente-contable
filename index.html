@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13e";
+var APP_VERSION="2026.08.13f";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -662,6 +662,108 @@ function parseReporteConsolidado(rows){
   return out;
 }
 
+/* ---- Faltantes, sobrantes y ajustes ----
+   No son un método de pago ni un depósito, pero afectan el saldo de Caja General directamente en su
+   diario, así que el Paso 1 los coteja igual que las ventas: lo que la cajera reportó tiene que estar
+   asentado, y todo asiento de faltante/sobrante tiene que venir del reporte. */
+// Faltantes y sobrantes del informe de cajeras. Reutiliza el mismo parseo de fecha que
+// parseReporteConsolidado: el informe a veces trae la fecha en D/M y hay que resolverla por el mes dominante.
+function parseFaltantesSobrantes(rows){
+  var subIdx = findHeaderRow(rows, ["Fecha","Cajera"]);
+  if(subIdx===-1) return [];
+  var subRow = rows[subIdx];
+  var cFecha = colIdx(subRow,"Fecha"), cCajera = colIdx(subRow,"Cajera");
+  var cFal = colIdx(subRow,"Faltante"), cSob = colIdx(subRow,"Sobrante");
+  if(cFal<0 && cSob<0) return [];
+  var meses = mesesDominantesReporte(rows, cFecha, subIdx+1);
+  var out = [], lastIso = null;
+  for(var r=subIdx+1;r<rows.length;r++){
+    var row = rows[r]; if(!row) continue;
+    var fechaRaw = row[cFecha], cajera = cCajera>=0 ? row[cCajera] : "", iso;
+    if(fechaRaw===null||fechaRaw===undefined||normTxt(fechaRaw)===""){
+      if(!lastIso || !(cajera && normTxt(cajera)!=="")) continue; // fila de continuación (2ª cajera del día)
+      iso = lastIso;
+    } else {
+      if(normTxt(fechaRaw).indexOf("TOTAL")!==-1) continue;
+      iso = fechaReporteConsolidado(fechaRaw, meses);
+      if(!iso) continue;
+      lastIso = iso;
+    }
+    var f = cFal>=0 ? money(row[cFal]) : 0, s = cSob>=0 ? money(row[cSob]) : 0;
+    if(f) out.push({fecha:iso, cajera:cajera, tipo:"FALTANTE", monto:Math.abs(f), fila:r+1});
+    if(s) out.push({fecha:iso, cajera:cajera, tipo:"SOBRANTE", monto:Math.abs(s), fila:r+1});
+  }
+  return out;
+}
+// Asientos de faltante/sobrante del diario de Caja General, agrupados POR COMPROBANTE: el asiento a veces
+// viene en dos líneas de Caja General con la misma referencia —una al débito y otra al crédito, del mismo
+// importe— y el faltante es ese importe, no la suma de los dos lados ni el neto (que daría cero).
+function faltSobrDiario(diarioCaja){
+  var g = {};
+  (diarioCaja||[]).forEach(function(x){
+    var n = normTxt(x.descripcion);
+    if(!/FALTANTE|SOBRANTE/.test(n)) return;
+    var k = x.fecha + "|" + (String(x.referencia||"").trim() || ("fila"+x.fila));
+    g[k] = g[k] || {fecha:x.fecha, referencia:String(x.referencia||"").trim(), d:0, c:0,
+                    tipos:{}, fila:x.fila, descripcion:(x.descripcion||"").trim()};
+    g[k].d += (x.debito||0);
+    g[k].c += (x.credito||0);
+    g[k].tipos[/SOBRANTE/.test(n) ? "SOBRANTE" : "FALTANTE"] = true;
+  });
+  return Object.keys(g).map(function(k){
+    var v = g[k], tipos = Object.keys(v.tipos);
+    return { fecha:v.fecha, tipo: tipos.length===1 ? tipos[0] : "AMBOS", tipos: tipos,
+             monto: Math.round(Math.max(v.d, v.c)*100)/100,
+             descripcion:v.descripcion, referencia:v.referencia, fila:v.fila };
+  });
+}
+// Coteja día por día lo que reportó la cajera contra lo que quedó asentado. Un faltante reportado que
+// nadie asentó —o un asiento sin respaldo en el reporte— mueve el saldo de Caja General sin dejar rastro.
+// Se compara POR DÍA el importe total, sin separar faltante de sobrante: en la práctica un mismo
+// comprobante llega a llevar las dos etiquetas, y lo que tiene que cuadrar es cuánto se descuadró la caja
+// ese día. Si el importe cuadra pero la etiqueta no, se avisa aparte (es un error de descripción).
+function cotejarFaltantesSobrantes(delReporte, delDiario, tolerancia){
+  var tol = tolerancia || 0.01;
+  function agrupa(arr){
+    var m = {};
+    (arr||[]).forEach(function(x){
+      var e = m[x.fecha] = m[x.fecha] || {monto:0, tipos:{}, cajera:""};
+      e.monto = Math.round((e.monto + x.monto)*100)/100;
+      (x.tipos || [x.tipo]).forEach(function(t){ if(t!=="AMBOS") e.tipos[t] = true; });
+      if(!e.cajera && x.cajera) e.cajera = String(x.cajera).trim();
+    });
+    return m;
+  }
+  var R = agrupa(delReporte), D = agrupa(delDiario), out = [], vistas = {};
+  Object.keys(R).concat(Object.keys(D)).forEach(function(f){
+    if(vistas[f]) return;
+    vistas[f] = true;
+    var r = R[f] || {monto:0, tipos:{}, cajera:""}, d = D[f] || {monto:0, tipos:{}};
+    var tr = Object.keys(r.tipos).sort().join("+"), td = Object.keys(d.tipos).sort().join("+");
+    if(Math.abs(r.monto - d.monto) > tol){
+      out.push({ fecha:f, clase:"monto", reporte:r.monto, diario:d.monto,
+                 dif: Math.round((d.monto - r.monto)*100)/100,
+                 tipoReporte:tr, tipoDiario:td, cajera:r.cajera });
+    } else if(tr && td && tr !== td){
+      out.push({ fecha:f, clase:"etiqueta", reporte:r.monto, diario:d.monto, dif:0,
+                 tipoReporte:tr, tipoDiario:td, cajera:r.cajera });
+    }
+  });
+  return out.sort(function(a,b){ return a.fecha < b.fecha ? -1 : 1; });
+}
+// Asientos de AJUSTE del mes (los de apertura ya los cuenta el cuadre del Paso 0). Afectan el saldo de
+// Caja General directamente y no vienen del reporte de cajeras, así que se listan para revisión.
+function ajustesDelMes(diarioCaja, fechaApertura){
+  return (diarioCaja||[]).filter(function(x){
+    if(normTxt(x.descripcion).indexOf("AJUST")===-1) return false;
+    return !fechaApertura || x.fecha > fechaApertura;
+  }).map(function(x){
+    var neto = Math.round(((x.debito||0)-(x.credito||0))*100)/100;
+    return { fecha:x.fecha, monto:Math.abs(neto), columna: neto>=0 ? "Débito" : "Crédito",
+             descripcion:(x.descripcion||"").trim(), referencia:String(x.referencia||"").trim(), fila:x.fila };
+  });
+}
+
 // 1b) Desglose individual de cheques (2ª pestaña del reporte de cajeras: "CK ...").
 // Los cheques no compensan en bloque: cada uno clarea por separado, así que se listan uno a uno.
 // Devuelve [{fecha, banco:"STG"|"Banistmo", monto}]. El banco lo da la columna (Cheque Sr.George / Banistmo).
@@ -887,7 +989,7 @@ function metodoDeposito(desc){
   if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
   return null;
 }
-function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
+function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte, aperturaCaja){
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
@@ -1076,6 +1178,57 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia){
       }
     });
   }
+
+  /* ---- Faltantes y sobrantes ----
+     No son un depósito, pero mueven el saldo de Caja General en su propio diario: si la cajera reporta un
+     faltante y nadie lo asienta (o hay un asiento que el reporte no respalda), el saldo queda descuadrado
+     sin que ningún otro control lo detecte. */
+  cotejarFaltantesSobrantes(faltSobrReporte, faltSobrDiario(diarioCaja), tolerancia).forEach(function(x){
+    var etq = function(t){ return (t||"").toLowerCase().replace("+"," y ") || "faltante/sobrante"; };
+    if(x.clase === "etiqueta"){
+      // El importe cuadra: es la descripción del asiento la que no coincide con lo que reportó la cajera.
+      hallazgos.push({
+        fecha:x.fecha, banco:"", monto:x.diario, clase:"aviso",
+        concepto:"Faltante/sobrante", comprobante:"", motivo:"etiqueta que no coincide",
+        texto: "Caja General " + x.fecha + ": el importe de B/ " + fmt(x.diario) + " cuadra, pero el informe lo reporta como " +
+               etq(x.tipoReporte) + " y el asiento dice " + etq(x.tipoDiario) + ". Corregí la descripción del asiento.",
+        fuente: "Reporte consolidado de caja (Faltante/Sobrante) / Diario Caja General"
+      });
+      return;
+    }
+    var texto;
+    if(x.reporte === 0){
+      texto = "Caja General " + x.fecha + ": hay un asiento de " + etq(x.tipoDiario) + " por B/ " + fmt(x.diario) +
+              " que el informe de cajeras no reporta ese día.";
+    } else if(x.diario === 0){
+      texto = "Caja General " + x.fecha + ": la cajera" + (x.cajera ? " (" + x.cajera + ")" : "") +
+              " reportó un " + etq(x.tipoReporte) + " de B/ " + fmt(x.reporte) + " que no está asentado en el diario.";
+    } else {
+      texto = "Caja General " + x.fecha + ": el " + etq(x.tipoReporte) + " del informe es B/ " + fmt(x.reporte) +
+              " y el asiento del diario es B/ " + fmt(x.diario) + " (dif. B/ " + fmt(x.dif) + ").";
+    }
+    hallazgos.push({
+      fecha:x.fecha, banco:"", monto:Math.abs(x.dif), clase:"diff",
+      concepto:"Faltante/sobrante", comprobante:"",
+      texto: texto + " Afecta el saldo de Caja General.",
+      fuente: "Reporte consolidado de caja (Faltante/Sobrante) / Diario Caja General"
+    });
+  });
+
+  /* ---- Ajustes ----
+     Asientos manuales que mueven el saldo de Caja General y no vienen del reporte de cajeras. No son un
+     error, pero nadie los valida: se listan para que se revisen antes de cerrar. Los de apertura quedan
+     fuera — esos ya los cuenta el cuadre del Paso 0 contra el resumen en tránsito. */
+  ajustesDelMes(diarioCaja, aperturaCaja).forEach(function(a){
+    hallazgos.push({
+      fecha:a.fecha, banco:"", monto:a.monto, clase:"aviso",
+      concepto:"Ajuste en Caja General", comprobante:a.referencia, motivo:"asiento manual",
+      texto: "Caja General " + a.fecha + ": asiento de ajuste por B/ " + fmt(a.monto) + " al " + a.columna +
+             " (\"" + a.descripcion + "\")" + (a.referencia ? " · " + a.referencia : "") +
+             ". Mueve el saldo y no viene del reporte de cajeras — verificá que corresponda.",
+      fuente: "Diario Caja General (fila " + a.fila + ")"
+    });
+  });
   return hallazgos;
 }
 
@@ -1858,7 +2011,11 @@ function computePasoResult(pasoKey, raws, opts){
   }
   if(pasoKey==="paso1"){
     if(!raws.reporte || !raws.diarioCaja) return null;
-    return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"), parseChequesDetalle(raws.reporte), opts.tol);
+    // Faltantes/sobrantes del informe y fecha de apertura: para cotejar lo que mueve el saldo de Caja
+    // General sin ser un depósito (los ajustes de apertura los cuenta el Paso 0, no el Paso 1).
+    var apertura = STATE.saldoCajaGeneral ? STATE.saldoCajaGeneral.fechaInicial : null;
+    return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"),
+                 parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura);
   }
   if(pasoKey==="paso2"){
     if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;
@@ -3644,8 +3801,8 @@ function renderResultados(){
         html += '</div>';
       }
       if(avisos.length){
-        html += '<div class="sinconf-block"><div class="sinconf-head">Corregir el archivo de origen ('+avisos.length+')' +
-          '<span class="sinconf-sub">El cotejo se resolvió igual, pero el dato viene mal escrito y hay que arreglarlo en el archivo para que el próximo cierre no falle.</span></div>';
+        html += '<div class="sinconf-block"><div class="sinconf-head">Revisar antes de cerrar ('+avisos.length+')' +
+          '<span class="sinconf-sub">No son diferencias: son asientos que mueven el saldo y nadie valida (ajustes manuales), o datos mal escritos en el archivo de origen que conviene arreglar para el próximo cierre.</span></div>';
         items.forEach(function(item, idx){ if(esAviso(item)) html += findingHtml(p, item, idx); });
         html += '</div>';
       }
