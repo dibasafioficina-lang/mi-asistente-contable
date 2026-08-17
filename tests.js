@@ -710,6 +710,70 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
+/* ---- Diferencias que se cancelan entre sí ----
+   Caso real de febrero: los cheques del 11 (255.60+164.08+292.62+273.49 = 985.79) se depositaron el 12,
+   el diario los registró ese día en dos asientos y el reporte solo puso 273.49 en su columna Cheque.
+   Salían tres diferencias que son la misma partida vista tres veces, y suman cero. */
+const D_FEB = () => [
+  { fecha: "2026-02-12", banco: "Banistmo", monto: -712.30, clase: "diff", texto: "Diferencia Banistmo 2026-02-12", fuente: "x" },
+  { fecha: "2026-02-11", banco: "Banistmo", monto: 985.79, clase: "diff", texto: "Cheques Banistmo 2026-02-11", fuente: "x" },
+  { fecha: "2026-02-12", banco: "Banistmo", monto: -273.49, clase: "diff", texto: "Cheques Banistmo 2026-02-12", fuente: "x" }
+];
+
+test("tres diferencias que suman cero se colapsan en un aviso", () => {
+  const r = colapsarCompensados(D_FEB(), 0.01);
+  eq(r.length, 1, "las tres se reemplazan por uno solo");
+  eq(r[0].clase, "aviso");
+  eq(esNoRojo(r[0]), true, "ya no es una diferencia");
+  cerca(r[0].monto, 985.79, "el monto es el bruto de la partida");
+  if (!/se cancelan entre sí/.test(r[0].texto)) throw new Error("debe explicar por qué");
+  ["985.79", "-712.30", "-273.49"].forEach(m => {
+    if (!r[0].texto.includes(m)) throw new Error("debe nombrar las tres: falta " + m);
+  });
+});
+
+test("dos diferencias opuestas también se colapsan", () => {
+  const r = colapsarCompensados([
+    { fecha: "2026-02-11", banco: "STG", monto: 300, clase: "diff", texto: "a", fuente: "x" },
+    { fecha: "2026-02-12", banco: "STG", monto: -300, clase: "diff", texto: "b", fuente: "x" }
+  ], 0.01);
+  eq(r.length, 1);
+  eq(r[0].clase, "aviso");
+});
+
+test("no se colapsan diferencias de bancos distintos", () => {
+  const r = colapsarCompensados([
+    { fecha: "2026-02-11", banco: "STG", monto: 300, clase: "diff", texto: "a", fuente: "x" },
+    { fecha: "2026-02-11", banco: "Banistmo", monto: -300, clase: "diff", texto: "b", fuente: "x" }
+  ], 0.01);
+  eq(r.length, 2, "el cruce entre bancos lo maneja aparte el swap de banco");
+});
+
+test("no se colapsan diferencias separadas por semanas", () => {
+  const r = colapsarCompensados([
+    { fecha: "2026-02-02", banco: "STG", monto: 300, clase: "diff", texto: "a", fuente: "x" },
+    { fecha: "2026-02-25", banco: "STG", monto: -300, clase: "diff", texto: "b", fuente: "x" }
+  ], 0.01);
+  eq(r.length, 2, "un corrimiento de fecha es de días, no de 23 días");
+});
+
+test("las diferencias que NO se cancelan quedan intactas", () => {
+  const h = [
+    { fecha: "2026-02-11", banco: "STG", monto: 300, clase: "diff", texto: "a", fuente: "x" },
+    { fecha: "2026-02-12", banco: "STG", monto: -250, clase: "diff", texto: "b", fuente: "x" }
+  ];
+  eq(colapsarCompensados(h, 0.01).length, 2);
+  eq(colapsarCompensados([], 0.01).length, 0);
+});
+
+test("solo se colapsan diferencias, no lo que ya era aviso o tránsito", () => {
+  const h = [
+    { fecha: "2026-02-11", banco: "STG", monto: 300, clase: "en_transito", texto: "a", fuente: "x" },
+    { fecha: "2026-02-12", banco: "STG", monto: -300, clase: "aviso", texto: "b", fuente: "x" }
+  ];
+  eq(colapsarCompensados(h, 0.01).length, 2);
+});
+
 /* ---- Faltantes, sobrantes y ajustes ----
    No son un método de pago ni un depósito, pero mueven el saldo de Caja General en su propio diario. */
 test("el asiento partido en dos líneas no cuenta doble", () => {

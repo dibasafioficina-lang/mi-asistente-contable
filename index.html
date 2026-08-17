@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.14";
+var APP_VERSION="2026.08.14b";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -659,6 +659,77 @@ function parseReporteConsolidado(rows){
       }
     });
   }
+  return out;
+}
+
+/* ---- Diferencias que se cancelan entre sí ----
+   Un mismo depósito anotado en otro día, o en otra columna del reporte, produce varias diferencias que
+   SUMAN CERO: la plata está toda, lo que está mal es dónde quedó anotada. Pasó en febrero: los cheques
+   del 11 (255.60 + 164.08 + 292.62 + 273.49 = 985.79) se depositaron el 12, el diario los registró ese
+   día en dos asientos y el reporte solo puso 273.49 en su columna Cheque. Salían tres diferencias
+   —−712.30, +985.79 y −273.49— que son la misma partida vista tres veces. Se colapsan en un aviso. */
+// Busca un subconjunto de EXACTAMENTE n hallazgos (mismo banco, fechas cercanas) que sume cero.
+function grupoQueSeCancela(hallazgos, idx, inicio, n, usados, tol){
+  var base = hallazgos[idx[inicio]];
+  var cand = idx.filter(function(i){
+    if(usados[i] || i===idx[inicio]) return false;
+    var h = hallazgos[i];
+    if(String(h.banco||"") !== String(base.banco||"")) return false;
+    if(!h.fecha || !base.fecha) return true;
+    return daysBetween(base.fecha, h.fecha) <= 7; // un corrimiento de fecha es de días, no de semanas
+  });
+  var res = null;
+  function rec(start, acc, suma){
+    if(res) return;
+    if(acc.length === n-1){
+      if(Math.abs(suma + base.monto) <= tol) res = [idx[inicio]].concat(acc);
+      return;
+    }
+    for(var j=start;j<cand.length;j++){
+      acc.push(cand[j]);
+      rec(j+1, acc, suma + hallazgos[cand[j]].monto);
+      acc.pop();
+      if(res) return;
+    }
+  }
+  rec(0, [], 0);
+  return res;
+}
+function colapsarCompensados(hallazgos, tolerancia){
+  var tol = tolerancia || 0.01;
+  var idx = [];
+  hallazgos.forEach(function(h,i){
+    if((h.clase||"diff")!=="diff") return;
+    if(typeof h.monto !== "number" || Math.abs(h.monto) <= tol) return;
+    idx.push(i);
+  });
+  if(idx.length < 2) return hallazgos;
+  var usados = {}, grupos = [];
+  // Grupos chicos primero: que dos diferencias se cancelen es la explicación más simple y más probable.
+  for(var n=2; n<=4; n++){
+    for(var a=0; a<idx.length; a++){
+      if(usados[idx[a]]) continue;
+      var g = grupoQueSeCancela(hallazgos, idx, a, n, usados, tol);
+      if(g){ g.forEach(function(i){ usados[i]=true; }); grupos.push(g); }
+    }
+  }
+  if(!grupos.length) return hallazgos;
+  var out = hallazgos.filter(function(h,i){ return !usados[i]; });
+  grupos.forEach(function(g){
+    var items = g.map(function(i){ return hallazgos[i]; })
+                 .sort(function(a,b){ return (a.fecha||"") < (b.fecha||"") ? -1 : 1; });
+    var bruto = items.reduce(function(s,h){ return s + Math.max(h.monto, 0); }, 0);
+    var fechas = items.map(function(h){ return h.fecha; }).filter(Boolean);
+    out.push({
+      fecha: fechas[0] || "", banco: items[0].banco || "", monto: Math.round(bruto*100)/100, clase:"aviso",
+      concepto:"Diferencias que se compensan", comprobante:"", motivo:"anotado en otro día o columna",
+      texto: (items[0].banco ? items[0].banco + ": " : "") + "estas " + items.length +
+             " diferencias se cancelan entre sí, así que la plata está completa — lo que cambia es el día o la columna en que quedó anotada: " +
+             items.map(function(h){ return (h.fecha||"") + " B/ " + fmt(h.monto); }).join(" · ") +
+             ". Suman cero, así que el cotejo cierra. Corregí el reporte para que cada depósito quede en su día y su columna.",
+      fuente: items[0].fuente || "Reporte consolidado de caja / Diario Caja General"
+    });
+  });
   return out;
 }
 
@@ -1229,7 +1300,8 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
       fuente: "Diario Caja General (fila " + a.fila + ")"
     });
   });
-  return hallazgos;
+  // Último: las diferencias que se cancelan entre sí no son plata faltante, son plata mal ubicada.
+  return colapsarCompensados(hallazgos, tolerancia);
 }
 
 // Mes dominante (YYYY-MM) entre un conjunto de fechas ISO.
