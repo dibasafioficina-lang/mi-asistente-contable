@@ -267,6 +267,13 @@
   /* Version cargada, en el encabezado (para distinguir un resultado viejo por cache de un error real) */
   .app-ver{margin-left:auto;margin-right:14px;font-size:11px;font-weight:700;letter-spacing:.02em;
            color:var(--brand);background:rgba(181,107,134,.10);padding:3px 9px;border-radius:999px;cursor:help}
+  /* Aviso de version nueva: el navegador cachea el HTML y una version vieja corre sin que nada lo delate */
+  .ver-banner{position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;
+              justify-content:center;gap:16px;flex-wrap:wrap;padding:13px 20px;background:#8E2F2F;color:#fff;
+              font-size:13px;line-height:1.45;box-shadow:0 -3px 14px rgba(0,0,0,.18)}
+  .ver-banner b{font-weight:800}
+  .ver-banner button{background:#fff;color:#8E2F2F;border:0;border-radius:999px;padding:7px 18px;
+                     font-weight:800;font-size:13px;cursor:pointer;font-family:inherit}
   /* Aviso de archivos de otro periodo */
   .per-panel{margin:16px 0;padding:14px 18px;border-radius:12px;background:#FDF3E7;border:1px solid #F0D9B8;font-size:12.5px;color:#7A5320}
   .per-grave{background:#FBEAEA;border:2px solid #D98A8A;color:#7A3B3B}
@@ -432,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.14c";
+var APP_VERSION="2026.08.14d";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -3513,6 +3520,36 @@ function exportarRetenciones(){
   XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
 }
 
+/* ---- Aviso de versión nueva ----
+   GitHub Pages sirve el HTML con caché, así que el navegador puede seguir corriendo una versión vieja sin
+   que nada lo delate: los resultados salen "mal" y en realidad es código viejo. Ya pasó tres veces. Al
+   arrancar se pide el propio HTML sin caché y se compara la versión publicada contra la que está en
+   memoria; si no coinciden, se avisa con un botón que recarga saltando la caché. */
+function chequearVersion(){
+  // Sin navegador (las pruebas corren este script en Node) o abierto como archivo local no hay qué pedir.
+  if(typeof location === "undefined" || typeof fetch !== "function" || location.protocol === "file:") return;
+  fetch(location.pathname + "?_v=" + (+new Date()), {cache:"no-store"})
+    .then(function(r){ return r.ok ? r.text() : null; })
+    .then(function(t){
+      if(!t) return;
+      var m = t.match(/APP_VERSION\s*=\s*"([^"]+)"/);
+      if(m && m[1] !== APP_VERSION) mostrarAvisoVersion(m[1]);
+    })
+    .catch(function(){}); // sin conexión no hay nada que avisar
+}
+function mostrarAvisoVersion(nueva){
+  if(document.getElementById("verBanner")) return;
+  var d = document.createElement("div");
+  d.id = "verBanner";
+  d.className = "ver-banner";
+  d.innerHTML = '<span>Hay una versión nueva de la app (<b>v'+esc(nueva)+'</b>) y estás usando la <b>v'+esc(APP_VERSION)+
+    '</b>. Los resultados pueden no reflejar lo último corregido.</span>' +
+    '<button id="verReload">Actualizar ahora</button>';
+  document.body.appendChild(d);
+  var b = document.getElementById("verReload");
+  if(b) b.onclick = function(){ location.replace(location.pathname + "?_v=" + (+new Date())); };
+}
+
 function render(){
   if(STATE.view==="menu") return renderMenu();
   if(STATE.view==="modulo1") return renderModulo1();
@@ -4529,6 +4566,7 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
   return hallazgos;
 }
 
+chequearVersion();
 render();
 </script>
 </body>
