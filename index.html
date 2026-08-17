@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.14f";
+var APP_VERSION="2026.08.15";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -523,6 +523,108 @@ function readWorkbook(file, cb){
   };
   reader.readAsArrayBuffer(file);
 }
+
+/* ---- Validación del archivo al subirlo ----
+   Cada casilla espera un archivo con una forma reconocible. Si se sube otro, el error aparecía tarde y
+   confuso: unas veces reventaba al ejecutar y otras —peor— el parser devolvía vacío y el paso salía
+   "sin diferencias" con media información faltando. Se identifica el archivo por su CONTENIDO (no por el
+   nombre, que ya nos mintió más de una vez) y si no corresponde se rechaza diciendo qué fue lo que se subió. */
+// Cuenta contable de un navegador ("[1.1.8] Caja General" → "1.1.8 CAJA GENERAL"). null si no es uno.
+function cuentaDeNavegador(rows){
+  var h = findHeaderRow(rows, ["Account","Fecha","Referencia"]);
+  if(h===-1) return null;
+  var c = colIdx(rows[h],"Account");
+  if(c<0) return null;
+  for(var r=h+1;r<rows.length;r++){
+    var v = rows[r] && rows[r][c];
+    if(v!==null && v!==undefined && String(v).trim()!=="") return normTxt(v);
+  }
+  return null;
+}
+// Qué archivo es, mirando su contenido. Devuelve el tipo, o null si no se reconoce.
+function identificarArchivo(rows){
+  if(!rows || !rows.length) return null;
+  var cta = cuentaDeNavegador(rows);
+  if(cta){
+    if(cta.indexOf("CAJA GENERAL")!==-1) return "diarioCaja";
+    if(cta.indexOf("BANISTMO")!==-1) return "diarioBanistmo";
+    if(cta.indexOf("GEORGE")!==-1) return "diarioStg";
+    if(cta.indexOf("RETENCION")!==-1) return "retenciones";      // el del Módulo 2
+    if(cta.indexOf("GENERAL")!==-1) return "diarioBancoGeneral";
+    return "navegador"; // un navegador contable, pero de otra cuenta
+  }
+  if(findHeaderRow(rows,["Fecha","Banco","Monto","Concepto"])!==-1) return "transitoPrevio";
+  if(findHeaderRow(rows,["Fecha","Cajera"])!==-1) return "reporte";
+  if(findHeaderRow(rows,["Fecha","Descripcion","Debitos","Creditos"])!==-1) return "estado";
+  if(findHeaderRow(rows,["Fecha","Descripcion","Debito","Credito"])!==-1) return "estado";
+  try{ if(parseRetencionesVisa(rows).length) return "retVisa"; }catch(e){}
+  return null;
+}
+var CASILLA_ESPERA = {
+  transitoPrevio:     {acepta:["transitoPrevio"],     nombre:"el resumen en tránsito del mes anterior"},
+  reporte:            {acepta:["reporte"],            nombre:"el informe de cajeras"},
+  diarioCaja:         {acepta:["diarioCaja"],         nombre:"el navegador de Caja General"},
+  diarioBanistmo:     {acepta:["diarioBanistmo"],     nombre:"el navegador del diario de Banistmo"},
+  diarioStg:          {acepta:["diarioStg"],          nombre:"el navegador del diario de St. Georges"},
+  diarioBancoGeneral: {acepta:["diarioBancoGeneral"], nombre:"el navegador del diario de Banco General"},
+  estBanistmo:        {acepta:["estado"], tipo:"banistmo",     nombre:"el estado de cuenta de Banistmo"},
+  estStg:             {acepta:["estado"], tipo:"stg",          nombre:"el estado de cuenta de St. Georges"},
+  estBancoGeneral:    {acepta:["estado"], tipo:"bancogeneral", nombre:"el estado de cuenta de Banco General"},
+  retVisa:            {acepta:["retVisa"],            nombre:"el informe de retenciones VISA"},
+  retenciones:        {acepta:["retenciones"],        nombre:"el navegador de retenciones a empleados por pagar"}
+};
+// Los tres estados de cuenta se parecen, pero su encabezado los delata:
+//   St. Georges  → Fecha | Descripción | Débitos(-) | Créditos(+) | Balance
+//   Banco General→ Fecha | Referencia | Transacción | Descripción | Débito | Crédito | Saldo total
+//   Banistmo     → Cuenta | Fecha | Hora | Cheque | Descripción | Débito | Crédito | Saldo | Signo
+// El parser de Banistmo es tolerante y traga el de STG ("Débitos" contiene "Débito"), así que sin esto
+// un estado en la casilla del otro banco pasaba sin chistar.
+function bancoDeEstado(rows){
+  var h = findHeaderRow(rows,["Fecha","Descripcion"]);
+  if(h===-1) return null;
+  var cab = (rows[h]||[]).map(function(c){ return normTxt(c); }).join(" | ");
+  if(cab.indexOf("BALANCE")!==-1) return "stg";
+  if(cab.indexOf("SALDO TOTAL")!==-1) return "bancogeneral";      // antes que "SALDO" a secas
+  if(cab.indexOf("SIGNO")!==-1 || cab.indexOf("HORA")!==-1) return "banistmo";
+  if(cab.indexOf("SALDO")!==-1) return "banistmo";
+  return null;                                                    // no se puede afirmar: no se bloquea
+}
+var NOMBRE_ESTADO = {banistmo:"el estado de cuenta de Banistmo", stg:"el estado de cuenta de St. Georges",
+                     bancogeneral:"el estado de cuenta de Banco General"};
+var NOMBRE_TIPO = {
+  transitoPrevio:"un resumen en tránsito", reporte:"un informe de cajeras",
+  diarioCaja:"el navegador de Caja General", diarioBanistmo:"el navegador de Banistmo",
+  diarioStg:"el navegador de St. Georges", diarioBancoGeneral:"el navegador de Banco General",
+  navegador:"un navegador de otra cuenta contable", estado:"un estado de cuenta bancario",
+  retVisa:"el informe de retenciones VISA",
+  retenciones:"el navegador de retenciones a empleados por pagar"
+};
+// null si el archivo va en esa casilla; si no, el texto de la alerta.
+function validarArchivoParaCasilla(key, rows){
+  var esp = CASILLA_ESPERA[key];
+  if(!esp) return null;                 // casilla sin firma conocida: no se valida
+  var id = identificarArchivo(rows);
+  if(!id) return "Archivo equivocado: no se reconoce el formato. Acá va " + esp.nombre + ".";
+  if(esp.acepta.indexOf(id) === -1){
+    return "Archivo equivocado: esto es " + (NOMBRE_TIPO[id] || "otro archivo") +
+           ", y en esta casilla va " + esp.nombre + ".";
+  }
+  // Los tres estados de cuenta comparten la firma genérica, así que se distinguen por su propio parser:
+  // Banistmo trae Débito/Crédito/Saldo y St. Georges Débitos/Créditos/Balance.
+  if(esp.tipo){
+    var banco = bancoDeEstado(rows);
+    if(banco && banco !== esp.tipo){
+      return "Archivo equivocado: esto es " + NOMBRE_ESTADO[banco] + ", y en esta casilla va " + esp.nombre + ".";
+    }
+    var movs = null;
+    try{ movs = parseEstadoCuenta(rows, esp.tipo); }catch(e){ movs = null; }
+    if(!movs || !movs.length){
+      return "Archivo equivocado: es un estado de cuenta, pero no tiene el formato de " + esp.nombre + ".";
+    }
+  }
+  return null;
+}
+
 function findHeaderRow(rows, tokens){
   for(var i=0;i<rows.length;i++){
     var row = rows[i];
@@ -3060,8 +3162,14 @@ function renderModulo2(){
 }
 // Sube el navegador de retenciones: guarda el archivo, lee el saldo inicial (para el Paso 0) y re-renderiza.
 function subirRetenciones(file){
-  STATE.files.retenciones=file; STATE.mod2.saldoIni=null; STATE.mod2.verIgual=false; renderModulo2();
-  readWorkbook(file, function(rows){ try{ STATE.mod2.saldoIni=parseRetenciones(rows).saldoInicial; }catch(e){} renderModulo2(); });
+  readWorkbook(file, function(rows){
+    var err = null;
+    try{ err = validarArchivoParaCasilla("retenciones", rows); }catch(e){ err = null; }
+    if(err){ alert("⚠ " + err + "\n\nArchivo: " + file.name); return; }
+    STATE.files.retenciones=file; STATE.mod2.saldoIni=null; STATE.mod2.verIgual=false;
+    try{ STATE.mod2.saldoIni=parseRetenciones(rows).saldoInicial; }catch(e){}
+    renderModulo2();
+  });
 }
 function ejecutarModulo2(){
   var note=document.getElementById("runNote2"); if(note) note.textContent="Leyendo archivo...";
@@ -3719,11 +3827,19 @@ function renderModulo1(){
 
   document.getElementById("backBtn").onclick = function(){ STATE.view="menu"; render(); };
   document.getElementById("printBtn1").onclick = function(){ window.print(); };
+  // Antes de aceptar el archivo se mira su contenido: si no es el que va en esa casilla se rechaza y se
+  // avisa. Vale la molestia de leerlo dos veces — un archivo en la casilla equivocada no siempre revienta,
+  // a veces sale "sin diferencias" con media información faltando, que es mucho peor.
   function assignFile(key, file){
     if(!file) return;
-    STATE.files[key] = file;
-    renderModulo1();
-    if(STATE.results) renderResultados();
+    readWorkbook(file, function(rows){
+      var err = null;
+      try{ err = validarArchivoParaCasilla(key, rows); }catch(e){ err = null; } // ante la duda, dejar pasar
+      if(err){ alert("⚠ " + err + "\n\nArchivo: " + file.name); return; }
+      STATE.files[key] = file;
+      renderModulo1();
+      if(STATE.results) renderResultados();
+    });
   }
   document.querySelectorAll('input[type=file]').forEach(function(inp){
     inp.addEventListener("change", function(e){

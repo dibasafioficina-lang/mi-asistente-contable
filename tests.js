@@ -710,6 +710,66 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
+/* ---- Archivo equivocado en la casilla ----
+   Se identifica por el CONTENIDO, no por el nombre. Un archivo en la casilla que no le toca no siempre
+   revienta: a veces el parser devuelve vacío y el paso sale "sin diferencias" con media información menos. */
+const NAV = (cuenta) => [
+  [null, "Account", "Fecha", "Referencia", "Ref. Sec", "Fuente", "Descripción", "Guardado Por"],
+  [null, cuenta, "2026-01-02", "ME-1", null, "MAN-ENTRY", "DEPOSITO", "IRIS"]
+];
+const EST_BANISTMO = [["Cuenta", "Fecha", "Hora", "Cheque", "Descripción", "Débito", "Crédito", "Saldo", "Signo"],
+                      ["011", "2026-01-02", "03:15", "0", "DB COMISION", "1.5", "0", "12180.32", "D"]];
+const EST_STG = [["Fecha", "Descripción", "Débitos(-)", "Créditos(+)", "Balance"],
+                 ["2026-01-02", "Remisión V/Mc", "0", "155.35", "1000.00"]];
+const EST_BG = [["Fecha", "Referencia", "Transacción", "Descripción", "Débito", "Crédito", "Saldo total"],
+                ["2026-01-31", "305", "50", "COMISION MENSUAL", 5.35, 0, 983.95]];
+
+test("identifica cada archivo por su contenido", () => {
+  eq(identificarArchivo(NAV("[1.1.8] Caja General")), "diarioCaja");
+  eq(identificarArchivo(NAV("[1.1.1.10] St. Georges Bank")), "diarioStg");
+  eq(identificarArchivo(NAV("[1.1.1.5] Banistmo")), "diarioBanistmo");
+  eq(identificarArchivo(NAV("[2.3.1.4] Retencion a empleados por pagar")), "retenciones");
+  eq(identificarArchivo([["FECHA", "BANCO", "MONTO", "CONCEPTO", "COMPROBANTE"]]), "transitoPrevio");
+  eq(identificarArchivo(EST_STG), "estado");
+  eq(identificarArchivo([["hola"], ["mundo"]]), null);
+});
+
+test("cada estado de cuenta se reconoce por su encabezado", () => {
+  eq(bancoDeEstado(EST_BANISTMO), "banistmo");
+  eq(bancoDeEstado(EST_STG), "stg");
+  eq(bancoDeEstado(EST_BG), "bancogeneral", "Saldo total, antes que Saldo a secas");
+});
+
+test("el archivo correcto en su casilla pasa", () => {
+  eq(validarArchivoParaCasilla("diarioCaja", NAV("[1.1.8] Caja General")), null);
+  eq(validarArchivoParaCasilla("estStg", EST_STG), null);
+  eq(validarArchivoParaCasilla("estBanistmo", EST_BANISTMO), null);
+});
+
+test("el archivo equivocado se rechaza diciendo qué es", () => {
+  const e = validarArchivoParaCasilla("diarioCaja", NAV("[1.1.1.5] Banistmo"));
+  if (!/^Archivo equivocado/.test(e)) throw new Error("debe arrancar con 'Archivo equivocado'");
+  if (!/navegador de Banistmo/.test(e)) throw new Error("debe decir qué se subió");
+  if (!/va el navegador de Caja General/.test(e)) throw new Error("y qué iba ahí");
+});
+
+// El parser de Banistmo es tolerante ("Débitos" contiene "Débito"), así que sin mirar el encabezado
+// completo el estado de STG pasaba en la casilla de Banistmo sin chistar.
+test("un estado de cuenta no pasa por el de otro banco", () => {
+  if (!validarArchivoParaCasilla("estBanistmo", EST_STG)) throw new Error("STG no va en Banistmo");
+  if (!validarArchivoParaCasilla("estStg", EST_BANISTMO)) throw new Error("Banistmo no va en STG");
+  if (!validarArchivoParaCasilla("estBanistmo", EST_BG)) throw new Error("Banco General no va en Banistmo");
+});
+
+test("un archivo irreconocible se rechaza", () => {
+  const e = validarArchivoParaCasilla("reporte", [["cualquier", "cosa"], [1, 2]]);
+  if (!/no se reconoce el formato/.test(e)) throw new Error("debe decir que no lo reconoce");
+});
+
+test("una casilla sin firma conocida no se valida", () => {
+  eq(validarArchivoParaCasilla("otraCosa", [["x"]]), null);
+});
+
 /* ---- El Paso 0 necesita los estados de cuenta ----
    Sin ellos no hay contra qué cotejar y TODAS las partidas salen como pendientes. Ese resultado se
    arrastra al resumen del mes siguiente: enero devolvía 22 partidas por 17,225.11 en vez de 10 por
