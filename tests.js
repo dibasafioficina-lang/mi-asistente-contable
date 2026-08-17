@@ -1113,6 +1113,33 @@ if (!fs.existsSync(ARCHIVO)) {
   });
 }
 
+/* ---- De qué está hecho el saldo de Caja General ----
+   El saldo contable al cierre NO es el tránsito: arrastra la apertura que ya compensó en el banco (nadie
+   la da de baja de la cuenta) y las retenciones de tarjeta (la venta entra bruta, el depósito sale neto). */
+test("el desglose del saldo de Caja General suma el saldo final", () => {
+  STATE.saldoCajaGeneral = { inicial: -2469.06, movimiento: 20660.32, final: 18191.26, fechaFinal: "2026-01-31" };
+  STATE.results = {
+    paso0: [
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", monto: 13003.97, concepto: "x", texto: "x" },
+      { clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", monto: 2650.04, concepto: "cheque", texto: "x" }
+    ],
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", monto: 1571.10, concepto: "tarjeta", texto: "x" }]
+  };
+  const d = desgloseSaldoCaja();
+  cerca(d.transito, 4221.14, "solo lo pendiente + lo nuevo del mes");
+  cerca(d.compenso, 13003.97, "la apertura que ya compensó");
+  cerca(d.resto, 966.15, "retenciones y comisiones");
+  cerca(d.transito + d.compenso + d.resto, d.final, "las tres partes dan el saldo final");
+});
+
+test("sin saldo final no hay desglose que mostrar", () => {
+  STATE.saldoCajaGeneral = null;
+  eq(desgloseSaldoCaja(), null);
+  eq(desgloseSaldoCajaHtml(), "");
+  STATE.saldoCajaGeneral = { inicial: 100, final: null };
+  eq(desgloseSaldoCaja(), null);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
