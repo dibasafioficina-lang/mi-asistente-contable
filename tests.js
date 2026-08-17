@@ -710,6 +710,31 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
+/* ---- El Paso 0 necesita los estados de cuenta ----
+   Sin ellos no hay contra qué cotejar y TODAS las partidas salen como pendientes. Ese resultado se
+   arrastra al resumen del mes siguiente: enero devolvía 22 partidas por 17,225.11 en vez de 10 por
+   4,221.14, con las 12 que ya habían compensado adentro. Pasaba al ejecutar el Paso 1 antes de subir los
+   estados: el Paso 0 quedaba calculado sin ellos y no se recalculaba nunca más. */
+test("sin estados de cuenta, el Paso 0 avisa que no pudo cotejar nada", () => {
+  const p0 = [
+    { fecha: "2025-12-31", banco: "Banistmo", monto: 1341.20, concepto: "visa en transito", comprobante: "ME-1", sentido: "credito" },
+    { fecha: "2025-12-30", banco: "Banistmo", monto: 80.00, concepto: "cheque en transito", comprobante: "ME-2", sentido: "credito" }
+  ];
+  const h = paso0(p0, [], [], null, 3, 0.01);
+  const avisos = h.filter(x => x.clase === "aviso");
+  eq(avisos.length, 1, "tiene que avisar");
+  if (!/sin estados de cuenta/i.test(avisos[0].texto)) throw new Error("y decir por qué");
+  eq(h.filter(x => esEnTransito(x) && /aún NO compensó/.test(x.texto)).length, 2, "las dos quedan pendientes");
+});
+
+test("con estados de cuenta no avisa y las partidas compensan", () => {
+  const p0 = [{ fecha: "2025-12-31", banco: "Banistmo", monto: 1341.20, concepto: "visa en transito", comprobante: "ME-1", sentido: "credito" }];
+  const est = [{ fecha: "2026-01-02", debito: 0, credito: 1341.20, descripcion: "CR REMISION - V/MC", fila: 5 }];
+  const h = paso0(p0, est, [], null, 3, 0.01);
+  eq(h.filter(x => x.clase === "aviso").length, 0);
+  eq(h.filter(x => /aún NO compensó/.test(x.texto)).length, 0, "compensó");
+});
+
 /* ---- El navegador de Caja General recortado ----
    El de febrero llegó sin la etiqueta "Balance Inicial (fecha):" y sin las filas de totales del final:
    quedó solo el importe suelto en la primera fila. Sin esa cifra no corre el cuadre del Paso 0, que es

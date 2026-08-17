@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.14e";
+var APP_VERSION="2026.08.14f";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2374,20 +2374,20 @@ function ejecutarPaso(pasoKey){
   if(!pasoListo(pasoKey) || !pasoDesbloqueado(pasoKey)) return; // condicionado a que el paso anterior cuadre
   var note = document.getElementById("runNote");
   if(note) note.textContent = "Leyendo archivos de este paso...";
-  // El Paso 1 (primer paso de la cadena) ejecuta primero el Paso 0 obligatorio; para eso lee sus archivos.
-  var esPrimero = pasoKey===PASO_ORDEN[0];
-  var keys = esPrimero ? archivosDePaso("paso0").concat(archivosDePaso(pasoKey)) : archivosDePaso(pasoKey);
+  // El Paso 0 se RECALCULA en cada ejecución, no solo junto al Paso 1. Sus insumos son el resumen en
+  // tránsito y los estados de cuenta, y los estados se suben en el Paso 2: si el Paso 0 se calculó antes
+  // de tenerlos, ninguna partida compensa y TODAS quedan como pendientes, arrastrando al resumen del mes
+  // siguiente cosas que ya habían compensado. Recalcularlo siempre cuesta nada y evita ese estado viejo.
+  var keys = archivosDePaso("paso0").concat(archivosDePaso(pasoKey));
   readMany(keys, function(raws){
     try{
       var opts = {ventana: STATE.options.ventanaDias, tol: STATE.options.tolerancia};
       ensureResults();
-      if(esPrimero){
-        STATE.results.paso0 = computePasoResult("paso0", raws, opts);
-        if(!pasoCuadrado("paso0")){
-          propagarBloqueo();
-          refrescarModulo("El Paso 0 (obligatorio) no cuadró — revisá las partidas en tránsito del mes anterior antes de continuar.");
-          return;
-        }
+      STATE.results.paso0 = computePasoResult("paso0", raws, opts);
+      if(!pasoCuadrado("paso0")){
+        propagarBloqueo();
+        refrescarModulo("El Paso 0 (obligatorio) no cuadró — revisá las partidas en tránsito del mes anterior antes de continuar.");
+        return;
       }
       var result = computePasoResult(pasoKey, raws, opts);
       Object.keys(STATE.checks).forEach(function(k){ if(k.indexOf(pasoKey+"_")===0) delete STATE.checks[k]; });
@@ -4214,6 +4214,16 @@ function parseSaldoIniDetalle(rows){
   return out;
 }
 function exportarEnTransito(){
+  // Si el Paso 0 corrió sin estados de cuenta, ninguna partida pudo darse por compensada y el resumen
+  // arrastraría al mes siguiente cosas que ya cerraron. Mejor frenar acá que descubrirlo el mes que viene.
+  var p0 = STATE.results && STATE.results.paso0;
+  var sinEstados = Array.isArray(p0) && p0.some(function(x){
+    return x.clase==="aviso" && /sin estados de cuenta/i.test(x.concepto||"");
+  });
+  if(sinEstados && typeof confirm === "function" &&
+     !confirm("El Paso 0 se corrió SIN estados de cuenta, así que ninguna partida pudo darse por compensada: " +
+              "el resumen va a arrastrar al mes siguiente partidas que ya cerraron.\n\n" +
+              "Subí los estados de cuenta y volvé a ejecutar.\n\n¿Descargar igual?")) return;
   var items = recolectarEnTransito();
   var rows = [["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]];
   items.forEach(function(it){
@@ -4554,6 +4564,19 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
   var hallazgos = [];
+  // Sin estados de cuenta no hay contra qué cotejar: TODAS las partidas salen como pendientes y ese
+  // resultado se arrastra al resumen del mes siguiente. Hay que decirlo, no dejarlo pasar por bueno.
+  var hayEstados = Object.keys(estados).some(function(b){ return estados[b] && estados[b].length; });
+  if(!hayEstados && transitoPrevio && transitoPrevio.length){
+    hallazgos.push({
+      fecha:"", banco:"", monto:0, clase:"aviso",
+      concepto:"Paso 0 sin estados de cuenta", comprobante:"", motivo:"faltan los estados de cuenta",
+      texto:"El Paso 0 se corrió sin estados de cuenta, así que no se pudo saber qué partidas compensaron: " +
+            "las " + transitoPrevio.length + " quedaron como pendientes. Subí los estados de cuenta (Paso 2) y volvé a ejecutar, " +
+            "o el resumen para el mes siguiente va a arrastrar partidas que ya cerraron.",
+      fuente:"Paso 0 — partidas en tránsito"
+    });
+  }
   var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
   // Fechas imposibles en el resumen del Paso 0 (error de tecleo): se concilian igual, pero hay que avisar.
   res.fechasRaras.forEach(function(f){
