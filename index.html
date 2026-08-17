@@ -429,7 +429,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.13g";
+var APP_VERSION="2026.08.14";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4124,6 +4124,26 @@ function parseTransitoPrevio(rows){
 function esRemisionClave(desc){ var n = normTxt(desc); return n.indexOf("REMISION")!==-1 && n.indexOf("CLAVE")!==-1; }
 // Línea del estado que es una "Remisión V/Mc" (compensación de tarjeta VISA/MasterCard).
 function esRemisionVisa(desc){ var n = normTxt(desc); return n.indexOf("REMISION")!==-1 && (n.indexOf("V/MC")!==-1 || n.indexOf("VISA")!==-1); }
+// Combinación de 2+ líneas del MISMO día que sumen el objetivo. Un depósito que el banco parte en varias
+// líneas las acredita todas la misma fecha; permitir que se arme con líneas de días distintos convierte
+// cualquier importe chico en "compensado" a fuerza de sumar céntimos sueltos.
+function comboMismoDia(pool, fecha, objetivo, ventanaDias, tolerancia, maxN){
+  var dias = {};
+  for(var i=0;i<pool.length;i++){
+    if(pool[i].usado || pool[i].fecha < fecha) continue;          // la compensación nunca es anterior
+    if(daysBetween(fecha, pool[i].fecha) > ventanaDias) continue;
+    (dias[pool[i].fecha] = dias[pool[i].fecha] || []).push(i);
+  }
+  var fechas = Object.keys(dias).sort();
+  for(var d=0; d<fechas.length; d++){
+    var idxs = dias[fechas[d]];
+    if(idxs.length < 2) continue;
+    var sub = idxs.map(function(i){ return pool[i]; });
+    var combo = buscarSubsetSuma(sub, fechas[d], objetivo, 0, tolerancia, maxN);
+    if(combo && combo.length >= 2) return combo.map(function(k){ return idxs[k]; });
+  }
+  return null;
+}
 // Primera fecha de un arreglo de movimientos (inicio real del período del estado de cuenta).
 function primeraFecha(arr){
   var f = (arr||[]).map(function(x){ return x.fecha; }).filter(Boolean).sort();
@@ -4183,13 +4203,16 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
               sentido:t.sentido, banco:banco, usado:false, pool:poolDe(t)};
     });
-    // Paso A: cada partida contra su pool, hacia adelante. Hasta 3 líneas: el banco a veces parte un
-    // depósito en varios créditos (el depósito en tránsito de 92.97 del 29-dic entró el 02-ene como
-    // 60.41 + 32.56); con una sola línea permitida quedaba "pendiente" y sus dos créditos salían como
-    // diferencia en el Paso 3.
+    // Paso A: cada partida contra su pool, hacia adelante. Primero 1:1; si no aparece, una combinación de
+    // líneas DEL MISMO DÍA, porque cuando el banco parte un depósito lo acredita el mismo día (el depósito
+    // de 92.97 del 29-dic entró el 02-ene como 60.41 + 32.56). La restricción de día es imprescindible:
+    // sin ella un importe chico se arma sumando céntimos sueltos de fechas distintas y se da por
+    // compensado algo que sigue pendiente — pasó con el depósito de 5.85, que se "cuadró" con
+    // 1.63 del 28-ene + 0.72 del 26-ene + 3.50 del 19-ene y encima dejó huérfanos esos tres depósitos.
     chs.forEach(function(ch){
       if(ch.usado) return;
-      var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 3, "adelante");
+      var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 1, "adelante");
+      if(!combo) combo = comboMismoDia(ch.pool, ch.fecha, ch.monto, VENTANA, tolerancia, 3);
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
     // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco

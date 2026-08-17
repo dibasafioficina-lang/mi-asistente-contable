@@ -547,6 +547,37 @@ test("un día VISA en cero no genera hallazgo", () => {
 });
 
 // El banco parte un depósito en tránsito en varios créditos: 92.97 del 29-dic entró como 60.41 + 32.56.
+/* ---- La combinación tiene que ser del MISMO día ----
+   Permitir que una partida se arme con líneas de fechas distintas convierte cualquier importe chico en
+   "compensado" a fuerza de sumar céntimos sueltos. El depósito de 5.85 del 06-dic se daba por cuadrado
+   con 1.63 del 28-ene + 0.72 del 26-ene + 3.50 del 19-ene, y encima dejaba huérfanos esos tres. */
+test("una partida no se arma sumando céntimos de días distintos", () => {
+  const est = [
+    { fecha: "2026-01-19", debito: 0, credito: 3.50, descripcion: "Descripción", fila: 20 },
+    { fecha: "2026-01-26", debito: 0, credito: 0.72, descripcion: "Descripción", fila: 30 },
+    { fecha: "2026-01-28", debito: 0, credito: 1.63, descripcion: "Descripción", fila: 40 }
+  ];
+  const r = consumirTransitoPrevio(
+    [{ fecha: "2025-12-06", banco: "STG", monto: 5.85, concepto: "deposito en transito", comprobante: "ME-00000001799", sentido: "credito" }],
+    { STG: est }, 0.01);
+  eq(r.pendientes.length, 1, "sigue pendiente: 5.85 no está en el banco");
+  eq(est.filter(x => x._transitoUsado).length, 0, "y no se come los depósitos de enero");
+});
+
+test("comboMismoDia solo acepta líneas de la misma fecha", () => {
+  const pool = [
+    { fecha: "2026-01-02", monto: 60.41, usado: false },
+    { fecha: "2026-01-02", monto: 32.56, usado: false },
+    { fecha: "2026-01-05", monto: 40.00, usado: false }
+  ];
+  const c = comboMismoDia(pool, "2025-12-29", 92.97, 366, 0.01, 3);
+  eq(c.length, 2);
+  eq(pool[c[0]].fecha, "2026-01-02");
+  eq(pool[c[1]].fecha, "2026-01-02");
+  // 100.41 = 60.41 + 40.00 existe, pero son días distintos: no se acepta.
+  eq(comboMismoDia(pool, "2025-12-29", 100.41, 366, 0.01, 3), null);
+});
+
 test("una partida del Paso 0 puede compensar en varias líneas del estado", () => {
   const est = [
     { fecha: "2026-01-02", debito: 0, credito: 60.41, descripcion: "Descripción", fila: 3 },
