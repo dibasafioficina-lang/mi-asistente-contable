@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.14d";
+var APP_VERSION="2026.08.14e";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -943,6 +943,17 @@ function parseSaldoCajaGeneral(rows){
     if(etq.indexOf("BALANCE INICIAL")!==-1){ res.inicial = valorFila(row); res.fechaInicial = fecha; }
     else if(etq.indexOf("MOVIMIENTO MOSTRADO")!==-1){ res.movimiento = valorFila(row); }
     else if(etq.indexOf("BALANCE FINAL")!==-1){ res.final = valorFila(row); res.fechaFinal = fecha; }
+  }
+  // Algunos navegadores llegan recortados y el saldo de apertura queda como un importe suelto en la
+  // primera fila, sin su etiqueta "Balance Inicial (fecha):" — pasó con el de febrero. Sin esa cifra no
+  // corre el cuadre del Paso 0, que es justo el control que avisa si el resumen en tránsito está mal, así
+  // que vale la pena recuperarla. Se exige el patrón exacto: una sola celda y con forma de importe.
+  if(res.inicial===null && rows.length){
+    var f0 = (rows[0]||[]).filter(function(c){ return c!==null && c!==undefined && String(c).trim()!==""; });
+    if(f0.length===1 && /B\/|^-?[\d,]*\d\.\d{2}$/.test(String(f0[0]).trim())){
+      var v = money(f0[0]);
+      if(!isNaN(v)){ res.inicial = v; res.inicialInferido = true; }
+    }
   }
   return (res.inicial!==null || res.final!==null) ? res : null;
 }
@@ -3804,6 +3815,16 @@ function renderResultados(){
   // dentro del bloque del Paso 0: cuando la caja cuadra, los pasos sin diferencias no se dibujan y la
   // alerta quedaría invisible justo en el caso en que hay que verla.
   var cuadreP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral, STATE.diarioCaja);
+  // Sin saldo de apertura no hay cuadre del Paso 0, y ése es el control que avisa si el resumen en
+  // tránsito está mal. Antes eso pasaba en silencio: el panel simplemente no salía.
+  if(!cuadreP0 && STATE.diarioCaja && STATE.transitoPrevio && STATE.transitoPrevio.length){
+    var sinSaldo = !STATE.saldoCajaGeneral || STATE.saldoCajaGeneral.inicial==null;
+    if(sinSaldo){
+      html += '<div class="per-panel per-grave"><div class="per-title">⛔ No se pudo leer el saldo de apertura de Caja General</div>' +
+        '<p class="per-txt">El navegador de Caja General no trae la fila <b>"Balance Inicial (fecha):"</b> — suele pasar cuando el archivo se editó a mano y se borraron las filas de encabezado o de totales.</p>' +
+        '<p class="per-nota">Sin esa cifra <b>no se puede validar el resumen del Paso 0</b>, que es el control que avisa si trae partidas de más o de menos. Volvé a exportar el navegador completo, sin recortarlo.</p></div>';
+    }
+  }
   html += cuadreSaldoIniHtml(cuadreP0);
   html += ajusteHtml(cuadreP0, ajustesEnCajaGeneral(STATE.diarioCaja));
   var totalTransito = keysRender.reduce(function(sum,k){ return sum + contarEnTransito(r[k]); }, 0);

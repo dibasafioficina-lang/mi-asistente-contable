@@ -710,6 +710,34 @@ test("los asientos que ya dicen 'ajuste' se listan para no duplicarlos", () => {
   if (!/56\.49/.test(ajusteHtml(c, y))) throw new Error("el panel debe mostrar el ajuste ya registrado");
 });
 
+/* ---- El navegador de Caja General recortado ----
+   El de febrero llegó sin la etiqueta "Balance Inicial (fecha):" y sin las filas de totales del final:
+   quedó solo el importe suelto en la primera fila. Sin esa cifra no corre el cuadre del Paso 0, que es
+   justo el control que avisa si el resumen en tránsito trae partidas de más o de menos. */
+test("recupera el saldo de apertura aunque falte su etiqueta", () => {
+  const rows = [
+    [null, null, null, null, null, null, null, null, null, null, null, null, "B/ 18,134.77", null, null],
+    [null, "Account", "Fecha", "Referencia", "Ref. Sec", "Fuente", "Descripción"],
+    [null, "[1.1.8] Caja General", "2026-02-02", "ME-1", null, "MAN-ENTRY", "DEPOSITO", null, null, null, null, null, null, "B/ 0.00", "B/ 265.00"]
+  ];
+  const s = parseSaldoCajaGeneral(rows);
+  cerca(s.inicial, 18134.77);
+  eq(s.inicialInferido, true, "queda marcado como inferido, no leído de su etiqueta");
+});
+
+test("la etiqueta real gana sobre la inferencia", () => {
+  const s = parseSaldoCajaGeneral([["Balance Inicial (2026-01-01):", null, "-B/ 2,469.06"]]);
+  cerca(s.inicial, -2469.06);
+  eq(!!s.inicialInferido, false);
+});
+
+test("no se inventa un saldo donde no lo hay", () => {
+  // Una fila de encabezado con varias celdas de texto no es un saldo.
+  eq(parseSaldoCajaGeneral([[null, "Account", "Fecha", "Referencia"], [null, "[1.1.8] Caja General"]]), null);
+  eq(parseSaldoCajaGeneral([["Reporte de Caja General"]]), null);
+  eq(parseSaldoCajaGeneral([]), null);
+});
+
 /* ---- Diferencias que se cancelan entre sí ----
    Caso real de febrero: los cheques del 11 (255.60+164.08+292.62+273.49 = 985.79) se depositaron el 12,
    el diario los registró ese día en dos asientos y el reporte solo puso 273.49 en su columna Cheque.
