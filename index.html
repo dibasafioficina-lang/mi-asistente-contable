@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.15b";
+var APP_VERSION="2026.08.16";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4139,17 +4139,49 @@ function exportarChecklist(){
 //    depósitos de fin de mes). Es la vista "lo que depositamos que no clareó".
 // NO se toma de Paso 3 (diario bancario vs estado): duplicaría los ítems de fin de mes de Paso 2 y
 // además incluye compensaciones de ENTRADA del mes anterior (primer día), que no se arrastran.
+// ¿La partida del Paso 3 ya está en lo recolectado? Se compara por banco y día contra una COMBINACIÓN,
+// no partida por partida: el mismo depósito puede venir partido en el Paso 2 (detalle de cheques,
+// 181.13 + 336.18) y entero en el Paso 3 (un solo asiento del diario, 517.31). Lo que se usa para cubrir
+// queda marcado, para que dos partidas distintas del Paso 3 no se tapen con las mismas del Paso 2.
+function yaCubiertoEnTransito(recolectado, it){
+  var pool = [];
+  recolectado.forEach(function(x){
+    if(String(x.banco||"")!==String(it.banco||"") || String(x.fecha||"")!==String(it.fecha||"")) return;
+    if(x._cubrio) return;
+    pool.push({fecha:x.fecha, monto:x.monto, usado:false, ref:x});
+  });
+  if(!pool.length) return false;
+  var combo = buscarSubsetSuma(pool, it.fecha, it.monto, 0, 0.01, 8);
+  if(!combo) return false;
+  combo.forEach(function(i){ pool[i].ref._cubrio = true; });
+  return true;
+}
 function recolectarEnTransito(){
-  var out = [];
-  // Del Paso 0 solo se arrastra lo que sigue PENDIENTE: las partidas que ya compensaron se listan en el
-  // reporte como tránsito entrante (para dejar la traza), pero están cerradas y no van al próximo mes.
+  var r = STATE.results || {};
   var entrante = function(it){ return /mes anterior/i.test(it.motivo||""); };
-  var p0 = STATE.results && STATE.results.paso0;
-  if(Array.isArray(p0)) p0.forEach(function(it){ if(esEnTransito(it) && !entrante(it)) out.push(it); });
-  var p2 = STATE.results && STATE.results.paso2;
-  if(Array.isArray(p2)) p2.forEach(function(it){ if(esEnTransito(it)) out.push(it); });
+  // Se recorren TODOS los pasos: cada uno ve una parte distinta del tránsito y ninguno lo ve entero.
+  // El Paso 2 rutea desde Caja General por banco, así que no ve el efectivo (Brinks y ventanilla no
+  // llevan etiqueta de banco); ese solo aparece en el Paso 3, cotejando el diario del banco contra su
+  // estado. En enero eran 1,354.25 en cinco partidas del 28 al 31 que quedaban fuera del resumen.
+  var pasos = ["paso0","paso1","paso2","paso3"];
+  pasos.forEach(function(k){ if(Array.isArray(r[k])) r[k].forEach(function(x){ delete x._cubrio; }); });
+  var out = [];
+  pasos.forEach(function(k){
+    if(!Array.isArray(r[k])) return;
+    // La deduplicación se hace SOLO contra los pasos anteriores. Dentro de un mismo paso no: dos cheques
+    // del mismo importe y del mismo día son dos partidas reales, y se taparían entre sí.
+    var previos = out.slice();
+    var nuevos = [];
+    r[k].forEach(function(it){
+      if(!esEnTransito(it) || entrante(it)) return;   // lo entrante ya compensó: no se arrastra
+      if(yaCubiertoEnTransito(previos, it)) return;   // el mismo depósito que ya vio otro paso
+      nuevos.push(it);
+    });
+    out = out.concat(nuevos);
+  });
   return out;
 }
+
 // Un ítem en tránsito es cheque si su concepto/texto lo dice (Paso 0 y detalle de cheques); el resto
 // (tarjetas VISA/CLAVE, Yappy de fin de mes) son "otros depósitos".
 function esChequeEnTransito(it){
@@ -4199,14 +4231,24 @@ function transitoPorMetodo(){
 function desgloseSaldoCaja(){
   var s = STATE.saldoCajaGeneral;
   if(!s || s.final==null) return null;
-  var tm = transitoPorMetodo();
   var p0 = (STATE.results && STATE.results.paso0) || [];
-  var compenso = Array.isArray(p0) ? p0.filter(function(x){
-    return esEnTransito(x) && /mes anterior/i.test(x.motivo||"");
-  }).reduce(function(a,b){ return a + b.monto; }, 0) : 0;
-  compenso = Math.round(compenso*100)/100;
-  var resto = Math.round((s.final - tm.total - compenso)*100)/100;
-  return { final:s.final, fecha:s.fechaFinal, transito:tm.total, n:tm.count, compenso:compenso, resto:resto };
+  var p2 = (STATE.results && STATE.results.paso2) || [];
+  var entrante = function(x){ return /mes anterior/i.test(x.motivo||""); };
+  function suma(arr, f){
+    return Math.round((Array.isArray(arr)?arr:[]).filter(f).reduce(function(a,b){ return a+b.monto; },0)*100)/100;
+  }
+  // Solo el tránsito que sigue DENTRO de Caja General: lo que quedó pendiente del Paso 0 y lo que el
+  // Paso 2 no vio compensar. El efectivo que detecta el Paso 3 (Brinks, ventanilla) ya está acreditado en
+  // Caja General —su tránsito es del lado del BANCO—, así que va al resumen del Paso 0 pero no compone
+  // este saldo. Sin la distinción el renglón de retenciones salía negativo.
+  var transitoCaja = Math.round((suma(p0, function(x){ return esEnTransito(x) && !entrante(x); }) +
+                                 suma(p2, esEnTransito))*100)/100;
+  var compenso = suma(p0, function(x){ return esEnTransito(x) && entrante(x); });
+  var resto = Math.round((s.final - transitoCaja - compenso)*100)/100;
+  var tm = transitoPorMetodo();
+  return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto,
+           totalResumen:tm.total, n:tm.count,
+           soloBanco: Math.round((tm.total - transitoCaja)*100)/100 };
 }
 function desgloseSaldoCajaHtml(){
   var d = desgloseSaldoCaja();
@@ -4216,11 +4258,23 @@ function desgloseSaldoCajaHtml(){
   }
   return '<div class="cg-box"><div class="cg-h">De qué está hecho el saldo de Caja General</div>' +
     '<div class="cg-row cg-tot"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':'')+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
-    fila("En tránsito al cierre", d.transito, "sale al próximo mes · "+d.n+" partida(s)") +
+    fila("En tránsito dentro de Caja General", d.transito, "sale al próximo mes") +
     fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga") +
-    fila("Retenciones y comisiones de tarjeta", d.resto, "la venta entra bruta y el depósito sale neto") +
-    '<div class="cg-note">El saldo contable no es el tránsito: arrastra lo que ya compensó en el banco pero nadie dio de baja en la cuenta, ' +
-    'más lo que el banco descuenta de cada tarjeta. Solo el primer renglón pasa al Paso 0 del mes siguiente.</div>' +
+    (d.resto >= 0
+      ? fila("Retenciones y comisiones de tarjeta", d.resto, "la venta entra bruta y el depósito sale neto")
+      : fila("Falta para cubrir lo que ya compensó", d.resto, "el saldo de apertura no traía esas partidas")) +
+    (d.resto >= 0
+      ? '<div class="cg-note">El saldo contable no es el tránsito: arrastra lo que ya compensó en el banco pero nadie dio de baja en la cuenta, ' +
+        'más lo que el banco descuenta de cada tarjeta.</div>'
+      // Sin el asiento de apertura, el saldo nunca contuvo las partidas del Paso 0 y la resta se va abajo
+      // de cero. No es un error de cálculo: es la señal de que falta ese ajuste.
+      : '<div class="cg-note">El renglón sale en negativo porque el saldo de apertura no incluía las partidas del Paso 0: ' +
+        'el mes arrancó sin el asiento de ajuste que las incorpora. Revisá el cuadre del Paso 0 contra el saldo inicial.</div>') +
+    (d.soloBanco > 0.005
+      ? '<div class="cg-note">El resumen para el Paso 0 lleva además <b>B/ '+fmt(d.soloBanco)+'</b> de efectivo depositado que el banco todavía no reflejó. ' +
+        'Ese ya está acreditado en Caja General —su tránsito es del lado del banco— así que no compone este saldo. ' +
+        '<b>Total del resumen: B/ '+fmt(d.totalResumen)+'</b> en '+d.n+' partida(s).</div>'
+      : '<div class="cg-note">Solo el primer renglón pasa al Paso 0 del mes siguiente ('+d.n+' partida(s), B/ '+fmt(d.totalResumen)+').</div>') +
   '</div>';
 }
 function cierreCajaHtml(){

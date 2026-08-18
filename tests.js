@@ -1140,6 +1140,58 @@ test("sin saldo final no hay desglose que mostrar", () => {
   eq(desgloseSaldoCaja(), null);
 });
 
+
+/* ---- El resumen en tránsito toma TODOS los pasos ----
+   Cada paso ve una parte distinta y ninguno lo ve entero. El Paso 2 rutea desde Caja General por banco,
+   así que no ve el efectivo (Brinks y ventanilla no llevan etiqueta de banco): eso solo aparece en el
+   Paso 3. En enero quedaban fuera 1,354.25 en cinco partidas del 28 al 31 (ME-1850/52/53/54). */
+test("el efectivo que solo ve el Paso 3 entra al resumen", () => {
+  STATE.results = {
+    paso0: [{ clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2025-12-22", monto: 435.71, concepto: "cheque", texto: "x" }],
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 246.20, concepto: "DEPOSITO POR TARJETA CLAVE STG", texto: "x" }],
+    paso3: [
+      { clase: "en_transito", motivo: "depósito de fin de mes", banco: "STG", fecha: "2026-01-28", monto: 405.00, concepto: "DEPOSITO BRINKS DEL 28/01/2026", texto: "x" },
+      { clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 1.95, concepto: "DEPOSITO DEL 31/01/2026", texto: "x" }
+    ]
+  };
+  const it = recolectarEnTransito();
+  eq(it.length, 4, "las dos del Paso 3 se suman");
+  cerca(it.reduce((a, b) => a + b.monto, 0), 1088.86);
+  // El 1.95 es del mismo día y banco que el 246.20 pero es otra partida: no se debe tapar.
+  if (!it.some(x => Math.abs(x.monto - 1.95) < 0.001)) throw new Error("el 1.95 tiene que estar");
+});
+
+test("una partida que dos pasos ven no se cuenta dos veces", () => {
+  // El Paso 2 la ve partida (detalle de cheques) y el Paso 3 entera (un asiento del diario).
+  STATE.results = {
+    paso2: [
+      { clase: "en_transito", motivo: "último día del mes", banco: "Banistmo", fecha: "2026-01-31", monto: 181.13, concepto: "Cheque", texto: "x" },
+      { clase: "en_transito", motivo: "último día del mes", banco: "Banistmo", fecha: "2026-01-31", monto: 336.18, concepto: "Cheque", texto: "x" }
+    ],
+    paso3: [{ clase: "en_transito", motivo: "último día del mes", banco: "Banistmo", fecha: "2026-01-31", monto: 517.31, concepto: "DEPOSITO DE BANISTMO CK", texto: "x" }]
+  };
+  const it = recolectarEnTransito();
+  eq(it.length, 2, "el 517.31 ya está cubierto por 181.13 + 336.18");
+  cerca(it.reduce((a, b) => a + b.monto, 0), 517.31);
+});
+
+test("dos partidas iguales del MISMO paso no se tapan entre sí", () => {
+  STATE.results = { paso2: [
+    { clase: "en_transito", motivo: "cheque pendiente por cambiar", banco: "Banistmo", fecha: "2026-02-27", monto: 90.00, concepto: "Cheque", texto: "x" },
+    { clase: "en_transito", motivo: "cheque pendiente por cambiar", banco: "Banistmo", fecha: "2026-02-27", monto: 90.00, concepto: "Cheque", texto: "x" }
+  ]};
+  const it = recolectarEnTransito();
+  eq(it.length, 2, "son dos cheques reales");
+  cerca(it.reduce((a, b) => a + b.monto, 0), 180.00);
+});
+
+test("recolectar dos veces seguidas da lo mismo", () => {
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-01-31", monto: 100, concepto: "y", texto: "x" }],
+                    paso3: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-01-31", monto: 100, concepto: "y", texto: "x" }] };
+  const a = recolectarEnTransito().length, b = recolectarEnTransito().length;
+  eq(a, 1); eq(b, 1, "el marcador de dedupe no se arrastra entre llamadas");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
