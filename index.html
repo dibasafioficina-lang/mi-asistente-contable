@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.16";
+var APP_VERSION="2026.08.17";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2418,6 +2418,25 @@ function contarRojas(items){ return Array.isArray(items) ? items.filter(function
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
 function contarEfectivo(items){ return Array.isArray(items) ? items.filter(esEfectivo).length : 0; }
+/* ---- Identidad de un hallazgo ----
+   El tilde de "corregido" se guardaba con la POSICIÓN del hallazgo en la lista ("paso0_3"). Al recalcular
+   un paso la lista cambia de orden y de tamaño, así que los tildes quedaban aplicados a otras partidas y
+   el Excel exportaba "Corregido: Sí" sobre una que nadie revisó. Ahora la clave es el CONTENIDO, así que
+   sigue a su partida aunque la lista se reordene, y sobrevive a volver a ejecutar el paso.
+   Dos partidas realmente idénticas (dos cheques de 90.00 el mismo día) se numeran por orden de aparición:
+   sin ese sufijo un tilde marcaría las dos. */
+function clavesDeHallazgos(pasoKey, items){
+  var vistos = {}, out = [];
+  (items||[]).forEach(function(it){
+    var base = pasoKey + "|" + (it.fecha||"") + "|" + (it.banco||"") + "|" +
+               Math.round((Number(it.monto)||0)*100) + "|" +
+               normTxt(it.concepto || it.motivo || it.texto || "").slice(0,48);
+    var n = vistos[base] || 0;
+    vistos[base] = n + 1;
+    out.push(base + "#" + n);
+  });
+  return out;
+}
 function contarAvisos(items){ return Array.isArray(items) ? items.filter(esAviso).length : 0; }
 
 // Cuadre limpio para el confetti: cero diferencias ROJAS en todo lo evaluado
@@ -2492,7 +2511,9 @@ function ejecutarPaso(pasoKey){
         return;
       }
       var result = computePasoResult(pasoKey, raws, opts);
-      Object.keys(STATE.checks).forEach(function(k){ if(k.indexOf(pasoKey+"_")===0) delete STATE.checks[k]; });
+      // No se borran los tildes al re-ejecutar: la clave es el contenido del hallazgo, así que cada uno
+      // vuelve a su partida. Los que ya no existan quedan huérfanos en STATE.checks sin mostrarse, y si la
+      // partida reaparece el tilde vuelve con ella — que es lo que se espera de un checklist.
       STATE.results[pasoKey] = result;
       propagarBloqueo();
       var cuadro = Array.isArray(result) && contarRojas(result)===0;
@@ -3906,13 +3927,18 @@ function renderResultados(){
   var totalRojas = keysRender.reduce(function(sum,k){ return sum + contarRojas(r[k]); }, 0);
   var totalSinConf = keysRender.reduce(function(sum,k){ return sum + contarSinConfirmar(r[k]); }, 0);
 
+  // Las claves se calculan una vez por paso (clavesPaso) y findingHtml las consulta por índice: así el
+  // tilde depende del contenido del hallazgo, no de dónde quedó en la lista.
+  var clavesPaso = {};
   function findingHtml(p, item, idx){
-    var ckKey = p.key+"_"+idx;
+    var ckKey = (clavesPaso[p.key] && clavesPaso[p.key][idx]) || (p.key+"_"+idx);
     var checked = STATE.checks[ckKey] ? "checked" : "";
     var montoTxt = (item.monto<0?"-":"")+"B/ "+fmt(Math.abs(item.monto));
     return '<div class="finding'+(STATE.checks[ckKey]?" done":"")+'">' +
       '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
-      '<div class="ftxt">'+item.texto+'<span class="src">'+item.fuente+'</span></div>' +
+      // esc(): el texto lleva descripciones tomadas del Excel. Sin escapar, una celda con HTML se ejecuta
+      // al renderizar y puede ocultar una diferencia de la pantalla.
+      '<div class="ftxt">'+esc(item.texto)+'<span class="src">'+esc(item.fuente)+'</span></div>' +
       '<div class="famt">'+montoTxt+'</div></div>';
   }
   // Fila de subtotal (alineada con la columna de montos, con espaciador de la casilla).
@@ -4004,6 +4030,7 @@ function renderResultados(){
     var informativos = esArray ? items.filter(esInformativo) : [];
     var countTxt = items===undefined ? "sin ejecutar" : items===null ? "omitido" : bloqueado ? "bloqueado"
       : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : '') + (avisos.length? ' · '+avisos.length+' aviso(s)' : ''));
+    if(esArray) clavesPaso[p.key] = clavesDeHallazgos(p.key, items);
     var idxPaso = PASO_ORDEN.indexOf(p.key);
     html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
@@ -4118,8 +4145,9 @@ function exportarChecklist(){
         : "Paso omitido: faltan archivos de este paso.", "", ""]);
       return;
     }
+    var clavesExp = clavesDeHallazgos(key, items);
     items.forEach(function(item, idx){
-      var ckKey = key+"_"+idx;
+      var ckKey = clavesExp[idx];
       var estado = esSinConfirmar(item) ? "Sin confirmar banco" : esEnTransito(item) ? "En tránsito" : esEfectivo(item) ? "Efectivo (Brinks)" : esAviso(item) ? "Corregir archivo de origen" : esInformativo(item) ? "Fuera del alcance" : "Diferencia";
       rows.push([label, item.fecha, item.banco, item.monto, estado, item.texto, item.fuente, STATE.checks[ckKey] ? "Sí" : "No"]);
     });

@@ -1192,6 +1192,48 @@ test("recolectar dos veces seguidas da lo mismo", () => {
   eq(a, 1); eq(b, 1, "el marcador de dedupe no se arrastra entre llamadas");
 });
 
+
+/* ---- El tilde de "corregido" sigue a su partida ----
+   Se guardaba con la POSICIÓN del hallazgo ("paso0_3"). Al recalcular un paso la lista cambia de orden y
+   de tamaño, así que los tildes quedaban aplicados a otras partidas y el Excel exportaba "Corregido: Sí"
+   sobre una que nadie revisó. La clave ahora es el contenido. */
+const H = (fecha, banco, monto, concepto) => ({ fecha, banco, monto, concepto, texto: "x", clase: "en_transito" });
+
+test("la clave de un hallazgo no depende de su posición", () => {
+  const lista1 = [H("2025-12-22", "Banistmo", 435.71, "cheque en transito"), H("2025-12-30", "Banistmo", 80, "cheque en transito")];
+  const lista2 = [H("2026-01-05", "STG", 92.97, "deposito"), H("2025-12-30", "Banistmo", 80, "cheque en transito"), H("2025-12-22", "Banistmo", 435.71, "cheque en transito")];
+  const k1 = clavesDeHallazgos("paso0", lista1), k2 = clavesDeHallazgos("paso0", lista2);
+  eq(k1[0], k2[2], "el 435.71 conserva su clave aunque se mueva de la posición 0 a la 2");
+  eq(k1[1], k2[1], "y el 80.00 también");
+});
+
+test("dos partidas idénticas reciben claves distintas", () => {
+  // Dos cheques de 90.00 el mismo día son dos partidas reales: marcar una no debe marcar la otra.
+  const k = clavesDeHallazgos("paso2", [H("2026-02-27", "Banistmo", 90, "Cheque"), H("2026-02-27", "Banistmo", 90, "Cheque")]);
+  eq(k.length, 2);
+  if (k[0] === k[1]) throw new Error("las claves no pueden repetirse");
+  // ...pero el orden entre ellas es estable, así que el tilde no salta de una a otra al recalcular.
+  const k2 = clavesDeHallazgos("paso2", [H("2026-02-27", "Banistmo", 90, "Cheque"), H("2026-02-27", "Banistmo", 90, "Cheque")]);
+  eq(k[0], k2[0]); eq(k[1], k2[1]);
+});
+
+test("la clave distingue paso, fecha, banco, monto y concepto", () => {
+  const base = H("2026-01-31", "STG", 246.20, "tarjeta clave");
+  const k = clavesDeHallazgos("paso2", [base])[0];
+  [["paso3", base], ["paso2", H("2026-01-30", "STG", 246.20, "tarjeta clave")],
+   ["paso2", H("2026-01-31", "Banistmo", 246.20, "tarjeta clave")],
+   ["paso2", H("2026-01-31", "STG", 246.21, "tarjeta clave")],
+   ["paso2", H("2026-01-31", "STG", 246.20, "otra cosa")]].forEach(function(p){
+    if (clavesDeHallazgos(p[0], [p[1]])[0] === k) throw new Error("debería ser otra clave: " + JSON.stringify(p));
+  });
+});
+
+test("un hallazgo sin banco ni concepto igual recibe clave", () => {
+  const k = clavesDeHallazgos("paso1", [{ fecha: "", banco: "", monto: 0, clase: "aviso", texto: "sin estados de cuenta" }]);
+  eq(k.length, 1);
+  if (!k[0]) throw new Error("no puede quedar vacía");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
