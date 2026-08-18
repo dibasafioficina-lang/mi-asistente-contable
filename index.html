@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.17";
+var APP_VERSION="2026.08.18";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -694,11 +694,17 @@ function parseReporteConsolidado(rows){
   var subRow = rows[subIdx];
   var cFecha = colIdx(subRow,"Fecha");
   var cCajera = colIdx(subRow,"Cajera");
+  // Etiqueta legible de una columna: el encabezado del informe parte los títulos en dos renglones.
+  function etiquetaCol(v){ return String(v||"").replace(/\s+/g," ").trim(); }
   var mapCols = [];
+  var colsFuera = [];   // columnas con venta que no entran al cotejo por banco (se reportan en el Paso 1)
 
   // Intento (a): dos filas de encabezado, con rellenado hacia adelante de la fila de grupo (celdas combinadas)
   var groupRow = rows[subIdx-1] || [];
-  var metodosValidos = ["VISA","CLAVE","ACH","CHEQUE"];
+  // Caja General acá NO es solo efectivo: es la cuenta puente de TODA la venta, así que hay que mapear
+  // cada método que el informe reporte. Faltaban YAPPY (925.47 en junio) y el ACH de Banco General
+  // (161.07): sin banco reconocido, esas columnas se descartaban en silencio y su venta nunca se cotejaba.
+  var metodosValidos = ["VISA","CLAVE","ACH","CHEQUE","YAPPY"];
   var filledGroup = [];
   var last = "";
   for(var i=0;i<subRow.length;i++){
@@ -709,6 +715,9 @@ function parseReporteConsolidado(rows){
   for(var i=0;i<subRow.length;i++){
     var sub = normTxt(subRow[i]);
     if(sub==="TOTAL" || sub==="") continue; // evitar subtotal por grupo
+    // El informe cierra con un bloque "Totales" (TOTAL Efectivo, Tot. Tarjetas, total yappy, …). Esas
+    // columnas repiten lo ya contado: "total yappy" se colaba como venta y duplicaba el Yappy del mes.
+    if(filledGroup[i].indexOf("TOTALES")!==-1) continue;
     // El método puede estar en la fila de grupo (ej. "VISA") o en el sub-encabezado (ej. "Visa\nSr.George").
     // Algunos reportes agrupan Visa+Clave bajo "TARJETA", así que combinamos ambos textos para detectarlo.
     var textoCol = filledGroup[i] + " " + sub;
@@ -716,11 +725,22 @@ function parseReporteConsolidado(rows){
     for(var m=0;m<metodosValidos.length;m++){
       if(textoCol.indexOf(metodosValidos[m])!==-1){ metodo = metodosValidos[m]; break; }
     }
-    if(!metodo) continue;
+    if(!metodo){
+      // Sin método reconocido tampoco se descarta en silencio: Caja General es la cuenta puente de TODA
+      // la venta, así que una columna con monto que nadie mira es un hueco. Se anota para reportarla.
+      if(!/FALTANTE|SOBRANTE|FECHA|EMPRESA|CAJERA/.test(sub)) colsFuera.push({col:i, etiqueta:etiquetaCol(subRow[i])});
+      continue;
+    }
+    // "clb(+)" y "clb(-)" son columnas de ajuste entre efectivo y Yappy, no venta cobrada: se saltan.
+    if(sub.indexOf("CLB")!==-1) continue;
     var banco = null;
     if(sub.indexOf("GEORGE")!==-1) banco="STG";
     else if(sub.indexOf("BANISTMO")!==-1) banco="Banistmo";
+    // Yappy compensa siempre en Banco General, igual que lo resuelve clasificarBancoPorTexto para el
+    // diario; y "ACH B. GENERAL" nombra el banco sin decir "Banistmo" ni "George".
+    else if(sub.indexOf("GENERAL")!==-1 || metodo==="YAPPY") banco="Banco General";
     if(banco) mapCols.push({metodo:metodo, banco:banco, col:i});
+    else colsFuera.push({col:i, etiqueta:etiquetaCol(subRow[i])});
   }
 
   // Intento (b, fallback): formato anterior con metodo+banco en la misma celda
@@ -770,7 +790,11 @@ function parseReporteConsolidado(rows){
         out.push({fecha:iso, cajera:cajera, banco:m.banco, metodo:m.metodo, monto:val, fila:r+1});
       }
     });
+    colsFuera.forEach(function(c){ c.total = Math.round(((c.total||0) + money(row[c.col]))*100)/100; });
   }
+  // Se adjunta al resultado (como .hojas en readWorkbook) para que el Paso 1 las reporte sin cambiar la
+  // firma de la función ni el resto de los llamadores.
+  out.sinMapear = colsFuera.filter(function(c){ return Math.abs(c.total||0) > 0.005; });
   return out;
 }
 
@@ -1423,6 +1447,21 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
       fuente: "Diario Caja General (fila " + a.fila + ")"
     });
   });
+  /* ---- Métodos del informe que no entran al cotejo por banco ----
+     Caja General acá NO es solo efectivo: es la cuenta puente de TODA la venta. Si una columna del
+     informe trae monto y ningún paso la mira, es un hueco — así se perdieron el Yappy y el ACH de Banco
+     General hasta que se mapearon. Lo que queda fuera se informa con su total para que se vea completo. */
+  if(reporte && reporte.sinMapear && reporte.sinMapear.length){
+    var totFuera = Math.round(reporte.sinMapear.reduce(function(a,c){ return a + (c.total||0); },0)*100)/100;
+    hallazgos.push({
+      fecha:"", banco:"", monto:totFuera, clase:"informativo",
+      concepto:"Métodos sin cotejar por banco", comprobante:"",
+      texto: "El informe de caja trae B/ " + fmt(totFuera) + " en columnas que no se cotejan banco por banco: " +
+             reporte.sinMapear.map(function(c){ return c.etiqueta + " B/ " + fmt(c.total); }).join(" · ") +
+             ". El efectivo sí se rastrea, pero por el diario del banco en el Paso 3; lo demás (crédito, vales, certificados) no entra al banco.",
+      fuente:"Reporte consolidado de caja"
+    });
+  }
   // Último: las diferencias que se cancelan entre sí no son plata faltante, son plata mal ubicada.
   return colapsarCompensados(hallazgos, tolerancia);
 }

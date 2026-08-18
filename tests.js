@@ -1234,6 +1234,50 @@ test("un hallazgo sin banco ni concepto igual recibe clave", () => {
   if (!k[0]) throw new Error("no puede quedar vacía");
 });
 
+
+/* ---- Caja General es la cuenta puente de TODA la venta ----
+   No es solo efectivo: cada método que el informe reporte tiene que quedar cotejado o reportado. Faltaban
+   YAPPY (925.47 en junio) y el ACH de Banco General (161.07): sin banco reconocido, esas columnas se
+   descartaban en silencio y su venta nunca se cotejaba contra nada. */
+// El parser reconoce el encabezado por Fecha/Cajera/Sr.George/Banistmo, así que el fixture siempre
+// arranca con ese par de columnas de Visa; lo que se prueba se agrega después.
+const INFORME = (cols, fila) => [
+  [null, null, "TARJETA", null].concat(cols.map(function(c){ return /total/i.test(c) ? "Totales" : null; })),
+  ["Fecha", "Cajera", "Visa Sr.George", "Visa Banistmo"].concat(cols),
+  ["2026-06-11", "ANA", 0, 0].concat(fila)
+];
+
+test("mapea Yappy y el ACH de Banco General", () => {
+  const r = parseReporteConsolidado(INFORME(
+    ["ACH Banistmo", "ACH B. GENERAL ", "Yappy Yappy", "total yappy"],
+    [44.89, 161.07, 925.47, 925.47]));
+  const m = {}; r.forEach(x => { const k = x.metodo + "|" + x.banco; m[k] = (m[k] || 0) + x.monto; });
+  cerca(m["YAPPY|Banco General"], 925.47, "Yappy compensa en Banco General");
+  cerca(m["ACH|Banco General"], 161.07, "B. GENERAL nombra el banco sin decir Banistmo ni George");
+  cerca(m["ACH|Banistmo"], 44.89);
+});
+
+// "total yappy" contiene YAPPY y se colaba: duplicaba el Yappy del mes (1,850.94 en vez de 925.47).
+test("las columnas de Totales no se cuentan como venta", () => {
+  const r = parseReporteConsolidado(INFORME(["Yappy Yappy", "total yappy"], [925.47, 925.47]));
+  cerca(r.filter(x => x.metodo === "YAPPY").reduce((a, b) => a + b.monto, 0), 925.47);
+});
+
+test("las columnas de ajuste clb no son venta cobrada", () => {
+  const r = parseReporteConsolidado(INFORME(["Yappy Yappy", "Yappy clb(+)"], [925.47, 50]));
+  cerca(r.filter(x => x.metodo === "YAPPY").reduce((a, b) => a + b.monto, 0), 925.47);
+});
+
+test("lo que queda fuera del cotejo se informa, no se descarta", () => {
+  const r = parseReporteConsolidado(INFORME(["Efectivo Brink", "Crédito", "Faltante"], [9997, 896.75, 0.75]));
+  const et = (r.sinMapear || []).map(c => c.etiqueta);
+  if (et.indexOf("Efectivo Brink") < 0) throw new Error("el efectivo tiene que reportarse");
+  if (et.indexOf("Crédito") < 0) throw new Error("el crédito también");
+  if (et.some(x => /Faltante/i.test(x))) throw new Error("faltante y sobrante se cotejan aparte");
+  if (et.some(x => /Fecha|Cajera/i.test(x))) throw new Error("Fecha y Cajera no son métodos de pago");
+  cerca(r.sinMapear.find(c => c.etiqueta === "Efectivo Brink").total, 9997);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
