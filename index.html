@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.18";
+var APP_VERSION="2026.08.19";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4140,6 +4140,7 @@ function renderResultados(){
     }
     html += '</div></div>';
   });
+  html += pieModulo1Html();   // trazabilidad: con qué archivos y con qué versión salió esto
   area.innerHTML = html;
 
   area.querySelectorAll('input[type=checkbox]').forEach(function(cb){
@@ -4157,9 +4158,65 @@ function renderResultados(){
   bindSaldoIniDetalle(); // Paso 0: detalle editable del saldo inicial (manual o por Excel)
 }
 
+/* ---- Trazabilidad de los reportes del Módulo 1 ----
+   Un papel de trabajo sin período, sin fecha de emisión y sin versión de la herramienta no se puede
+   auditar: nadie puede reconstruir con qué se hizo. Además fue lo que impidió distinguir un resumen en
+   tránsito viejo de uno nuevo cuando arrastraba partidas que ya habían compensado. El Módulo 2 ya lo
+   resuelve en pantalla con pieReporteHtml; acá va en los dos Excel y también en pantalla. */
+function ahoraTexto(){
+  var a = new Date();
+  function dd(n){ return String(n).padStart(2,"0"); }
+  return a.getFullYear()+"-"+dd(a.getMonth()+1)+"-"+dd(a.getDate())+" "+dd(a.getHours())+":"+dd(a.getMinutes());
+}
+// Período de trabajo: el mes que la validación de períodos determinó por mayoría de archivos; si no está,
+// el rango que declara el navegador de Caja General.
+function periodoTrabajo(){
+  if(STATE.periodos && STATE.periodos.mesTrabajo) return mesLargo(STATE.periodos.mesTrabajo);
+  var s = STATE.saldoCajaGeneral;
+  if(s && (s.fechaInicial || s.fechaFinal)) return (s.fechaInicial||"?")+" al "+(s.fechaFinal||"?");
+  return "—";
+}
+// Los archivos que se usaron, con su nombre real: sin esto no se sabe si el reporte salió del navegador
+// correcto (pasó con "BANISTMO ENERO 2026.xlsx", que traía movimientos de julio).
+function archivosUsados(){
+  return Object.keys(FILE_LABELS).filter(function(k){ return STATE.files[k]; }).map(function(k){
+    var f = STATE.files[k];
+    return { rol: FILE_LABELS[k], nombre: f.name || "—" };
+  });
+}
+function filasTraza(titulo){
+  var o = STATE.options || {};
+  var filas = [
+    [titulo],
+    ["Período de trabajo", periodoTrabajo()],
+    ["Generado", ahoraTexto()],
+    ["Versión de la herramienta", APP_VERSION],
+    ["Ventana de días / tolerancia", (o.ventanaDias!=null?o.ventanaDias:"—")+" días / B/ "+fmt(o.tolerancia!=null?o.tolerancia:0)],
+    ["Archivos usados", ""]
+  ];
+  archivosUsados().forEach(function(a){ filas.push(["   "+a.rol, a.nombre]); });
+  filas.push([]);
+  return filas;
+}
+// El mismo pie, en pantalla, al cierre del reporte.
+function pieModulo1Html(){
+  var o = STATE.options || {};
+  var arch = archivosUsados();
+  return '<div class="pie-rep">' +
+    '<div class="pie-fila"><span>Reporte</span><b>Conciliación de Caja General y bancos</b></div>' +
+    '<div class="pie-fila"><span>Período de trabajo</span><b>'+esc(periodoTrabajo())+'</b></div>' +
+    '<div class="pie-fila"><span>Archivos usados</span><b>'+arch.length+'</b></div>' +
+    arch.map(function(a){ return '<div class="pie-fila"><span>   '+esc(a.rol)+'</span><b>'+esc(a.nombre)+'</b></div>'; }).join("") +
+    '<div class="pie-fila"><span>Ventana de días / tolerancia</span><b>'+(o.ventanaDias!=null?o.ventanaDias:"—")+' días / B/ '+fmt(o.tolerancia!=null?o.tolerancia:0)+'</b></div>' +
+    '<div class="pie-fila"><span>Generado</span><b>'+ahoraTexto()+'</b></div>' +
+    '<div class="pie-fila"><span>Versión de la herramienta</span><b>'+APP_VERSION+'</b></div>' +
+    '<div class="pie-firmas"><div><span>Preparado por</span><i></i></div><div><span>Revisado por</span><i></i></div></div>' +
+  '</div>';
+}
 function exportarChecklist(){
   var r = STATE.results;
-  var rows = [["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]];
+  var rows = filasTraza("Checklist de conciliación — Caja General y bancos");
+  rows.push(["Paso","Fecha","Banco","Monto","Estado","Hallazgo","Fuente","Corregido"]);
   var cP0 = cuadreSaldoInicialPaso0(STATE.transitoPrevio, STATE.saldoCajaGeneral, STATE.diarioCaja);
   if(cP0 && !cP0.ok){
     rows.push(["Paso 0", cP0.fecha||"", "", cP0.dif, "Corregir archivo de origen",
@@ -4502,7 +4559,8 @@ function exportarEnTransito(){
               "el resumen va a arrastrar al mes siguiente partidas que ya cerraron.\n\n" +
               "Subí los estados de cuenta y volvé a ejecutar.\n\n¿Descargar igual?")) return;
   var items = recolectarEnTransito();
-  var rows = [["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]];
+  var rows = filasTraza("Partidas en tránsito al cierre — insumo del Paso 0 del mes siguiente");
+  rows.push(["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]);
   items.forEach(function(it){
     rows.push([it.fecha, it.banco, it.monto, it.concepto||"", it.comprobante||"", it.motivo||"en tránsito"]);
   });

@@ -1278,6 +1278,49 @@ test("lo que queda fuera del cotejo se informa, no se descarta", () => {
   cerca(r.sinMapear.find(c => c.etiqueta === "Efectivo Brink").total, 9997);
 });
 
+/* ---- Trazabilidad de los reportes ----
+   Un papel de trabajo sin período, fecha de emisión ni versión de la herramienta no se puede auditar. Y
+   fue lo que impidió distinguir un resumen en tránsito viejo de uno nuevo cuando arrastraba partidas ya
+   compensadas. Lo delicado: el resumen es el INSUMO del Paso 0 del mes siguiente, así que la cabecera no
+   puede romper su relectura. */
+test("la cabecera de trazabilidad trae período, fecha, versión y archivos", () => {
+  STATE.periodos = { mesTrabajo: "2026-01", alertas: [] };
+  STATE.options = { ventanaDias: 3, tolerancia: 0.01 };
+  STATE.files = { diarioCaja: { name: "navegador CAJA GENERAL enero.xlsx" },
+                  estStg: { name: "STG estado de cuenta.xls" } };
+  const f = filasTraza("Checklist de prueba");
+  const plano = f.map(r => (r || []).join(" | ")).join(" ~ ");
+  ["Checklist de prueba", "enero 2026", APP_VERSION, "navegador CAJA GENERAL enero.xlsx",
+   "STG estado de cuenta.xls", "3 días / B/ 0.01"].forEach(function(t){
+    if (plano.indexOf(t) < 0) throw new Error("falta en la cabecera: " + t);
+  });
+  if (!/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}/.test(plano)) throw new Error("falta la fecha y hora de emisión");
+});
+
+test("la cabecera no rompe la relectura del resumen en tránsito", () => {
+  // El Paso 0 del mes siguiente lee este mismo archivo: si la cabecera lo tapara, se rompe el ciclo.
+  STATE.periodos = { mesTrabajo: "2026-01", alertas: [] };
+  STATE.options = { ventanaDias: 3, tolerancia: 0.01 };
+  STATE.files = { diarioCaja: { name: "x.xlsx" } };
+  const rows = filasTraza("Partidas en tránsito al cierre");
+  rows.push(["Fecha", "Banco", "Monto", "Concepto", "Comprobante", "Motivo"]);
+  rows.push(["2025-12-22", "Banistmo", 435.71, "cheque en transito", "ME-00000001817", "pendiente"]);
+  rows.push(["2026-01-31", "STG", 246.20, "tarjeta clave", "ME-00000001854", "último día del mes"]);
+  const tp = parseTransitoPrevio(rows);
+  eq(tp.length, 2, "las dos partidas se releen");
+  cerca(tp.reduce((a, b) => a + b.monto, 0), 681.91);
+  eq(identificarArchivo(rows), "transitoPrevio", "y se sigue reconociendo el archivo");
+  eq(validarArchivoParaCasilla("transitoPrevio", rows), null);
+});
+
+test("sin período detectado cae al rango del navegador de Caja General", () => {
+  STATE.periodos = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 0, fechaInicial: "2026-02-01", fechaFinal: "2026-02-28" };
+  eq(periodoTrabajo(), "2026-02-01 al 2026-02-28");
+  STATE.saldoCajaGeneral = null;
+  eq(periodoTrabajo(), "—", "y si no hay nada, no se inventa");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
