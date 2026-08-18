@@ -1321,6 +1321,57 @@ test("sin período detectado cae al rango del navegador de Caja General", () => 
   eq(periodoTrabajo(), "—", "y si no hay nada, no se inventa");
 });
 
+/* ---- La búsqueda de combinaciones no puede colgar la pestaña ----
+   buscarSubsetSuma es exponencial y cuando el objetivo NO se puede alcanzar recorre todo el espacio.
+   Medido antes del tope: 28 partidas con maxN 60 = 268 millones de nodos y 3,7 s, y crece de ahí. Una
+   corrida real completa de los 4 pasos consume entre 2.500 y 10.000 nodos. */
+test("una búsqueda imposible se corta en vez de colgarse", () => {
+  const pool = [];
+  for (let i = 0; i < 34; i++) pool.push({ fecha: "2026-01-15", monto: Math.round((10 + i * 0.37) * 100) / 100, usado: false });
+  const suma = pool.reduce((a, b) => a + b.monto, 0);
+  subsetTruncado = 0;
+  const t = Date.now();
+  const r = buscarSubsetSuma(pool, "2026-01-15", suma + 0.5, 366, 0.01, 60);
+  const ms = Date.now() - t;
+  eq(r, null, "no hay combinación posible");
+  if (ms > 1000) throw new Error("tardó " + ms + " ms: el tope no está actuando");
+  eq(subsetTruncado, 1, "y queda registrado que se cortó");
+});
+
+test("una búsqueda que sí cuadra no se ve afectada por el tope", () => {
+  const pool = [{ fecha: "2026-01-02", monto: 60.41, usado: false },
+                { fecha: "2026-01-02", monto: 32.56, usado: false },
+                { fecha: "2026-01-05", monto: 40.00, usado: false }];
+  subsetTruncado = 0;
+  const r = buscarSubsetSuma(pool, "2025-12-29", 92.97, 366, 0.01, 3);
+  eq(r.length, 2);
+  eq(subsetTruncado, 0, "no se cortó nada");
+});
+
+// Un corte silencioso se leería como "no compensa" y mandaría al mes siguiente una partida que sí
+// cuadraba. El aviso lo agrega computePasoResult leyendo la señal que deja la búsqueda.
+test("un paso que corta una búsqueda deja la señal para el aviso", () => {
+  const est = [];
+  for (let i = 0; i < 34; i++) est.push({ fecha: "2026-01-15", debito: 0, credito: Math.round((10 + i * 0.37) * 100) / 100, descripcion: "Remisión V/Mc", fila: i });
+  const diario = [{ fecha: "2026-01-31", debito: 99999.99, credito: 0, descripcion: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026.", referencia: "ME-1", fila: 90 }];
+  subsetTruncado = 0;
+  const t = Date.now();
+  paso3(diario, [], est, [], null, null, 3, 0.01, null, null);
+  if (Date.now() - t > 2000) throw new Error("el paso tardó demasiado: el tope no actuó");
+  if (!subsetTruncado) throw new Error("tiene que quedar registrado que la búsqueda se cortó");
+});
+
+test("poolDelMetodo lee el campo de ambos pasos", () => {
+  // El Paso 2 arma su pool con "desc" y el Paso 3 con "descripcion".
+  const p2 = [{ desc: "Remisión V/Mc 016005605", monto: 100 }, { desc: "DEPOSITO", monto: 50 }];
+  const p3 = [{ descripcion: "Remisión V/Mc 016005605", monto: 100 }, { descripcion: "DEPOSITO", monto: 50 }];
+  eq(poolDelMetodo(p2, "DEPOSITOS POR TARJETA VISA STG").length, 1);
+  eq(poolDelMetodo(p3, "DEPOSITOS POR TARJETA VISA STG").length, 1);
+  eq(poolDelMetodo(p3, "DEPOSITO BRINKS"), null, "sin método reconocido no se restringe");
+  eq(poolDelMetodo([{ descripcion: "DEPOSITO", monto: 5 }], "TARJETA VISA"), null,
+     "si el método no deja ninguna línea, mejor buscar en todo que no buscar");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.19";
+var APP_VERSION="2026.08.20";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1554,9 +1554,14 @@ function compatibleConRemision(descEstado, descDiario){
 // `usado` en el subconjunto marca también el pool original.
 function poolDelMetodo(poolEstado, desc){
   var n = normTxt(desc);
-  if(n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1) return poolEstado.filter(function(e){ return esRemisionVisa(e.descripcion); });
-  if(n.indexOf("CLAVE")!==-1) return poolEstado.filter(function(e){ return esRemisionClave(e.descripcion); });
-  return null;
+  // El Paso 2 arma su pool con el campo "desc" y el Paso 3 con "descripcion": se aceptan los dos, si no
+  // el filtro no encuentra nada y el acumulado del mes deja de cuadrar.
+  function d(e){ return e.descripcion || e.desc || ""; }
+  var sub = null;
+  if(n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1) sub = poolEstado.filter(function(e){ return esRemisionVisa(d(e)); });
+  else if(n.indexOf("CLAVE")!==-1) sub = poolEstado.filter(function(e){ return esRemisionClave(d(e)); });
+  // Si el método no deja ninguna línea, no se restringe: mejor buscar en todo que no buscar.
+  return (sub && sub.length) ? sub : null;
 }
 // Retención VISA acumulada de un rango de días del mes (para los asientos que cubren todo el período).
 function retencionDelRango(retVisaPorDia, rg){
@@ -1615,6 +1620,8 @@ function esChequeDesc(desc){
 // direccion (opcional): "adelante" = el pool debe ser de fecha >= ref (un depósito clarea en/después del
 // cheque); "atras" = el pool debe ser de fecha <= ref (los cheques de un depósito son de fecha anterior).
 // Sin dirección, ventana absoluta (compatibilidad). Evita el "viaje en el tiempo" (cheque que clarea antes de emitirse).
+var SUBSET_TOPE = 300000;   // nodos de recursión por búsqueda
+var subsetTruncado = 0;     // búsquedas cortadas por el tope; se lee al cerrar cada paso
 function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, direccion){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
@@ -1624,9 +1631,14 @@ function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, 
     if(direccion==="atras" && pool[i].fecha > fecha) continue;    // el cheque no puede ser posterior al depósito
     idxs.push(i);
   }
-  var res = null;
+  var res = null, nodos = 0, cortado = false;
   function rec(start, restante, acc){
-    if(res) return;
+    if(res || cortado) return;
+    // Tope de exploración: la búsqueda es exponencial y cuando el objetivo NO se puede alcanzar recorre
+    // todo el espacio. Medido con 28 partidas y maxN 60: 268 millones de nodos y 3,7 s — la pestaña se
+    // congela sin decir nada. Una corrida real completa de los 4 pasos consume entre 2.500 y 10.000
+    // nodos, así que 300.000 deja 30x de margen y corta el caso patológico en 6 ms.
+    if(++nodos > SUBSET_TOPE){ cortado = true; subsetTruncado++; return; }
     if(Math.abs(restante) <= tolerancia && acc.length>0){ res = acc.slice(); return; }
     if(acc.length >= maxN) return;
     for(var j=start;j<idxs.length;j++){
@@ -1837,7 +1849,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           });
           var netoPeriodo = Math.round((objetivo - retPeriodo)*100)/100;
           // Ventana sin límite práctico y varias partidas: el asiento es del último día pero cubre todo el mes.
-          combo = buscarSubsetSuma(pool, dep.fecha, netoPeriodo, 366, tolerancia, 60, "atras");
+          // El pool se restringe a las remisiones DEL MISMO MÉTODO (como en conciliarAcumuladoPeriodo):
+          // es lo correcto —un acumulado de VISA compensa en remisiones V/Mc— y de paso baja el pool de
+          // 87 créditos a ~15, que es lo que hacía de esta búsqueda la más cara de la app.
+          var poolMet = poolDelMetodo(pool, dep.descripcion) || pool;
+          combo = buscarSubsetSuma(poolMet, dep.fecha, netoPeriodo, 366, tolerancia, 60, "atras");
+          if(combo) combo = combo.map(function(i){ return pool.indexOf(poolMet[i]); }).filter(function(i){ return i>=0; });
         }
       }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
@@ -2225,7 +2242,25 @@ function archivosDePaso(pasoKey){
   return PASO_REQS[pasoKey].concat((PASO_OPCIONALES[pasoKey]||[]).filter(function(k){ return !!STATE.files[k]; }));
 }
 
+/* Envoltura del cálculo de un paso: si alguna búsqueda de combinaciones se cortó por el tope, hay que
+   decirlo. Un corte silencioso se leería como "no compensa" y mandaría al resumen del mes siguiente una
+   partida que en realidad sí cuadraba. */
 function computePasoResult(pasoKey, raws, opts){
+  subsetTruncado = 0;
+  var res = computaPaso(pasoKey, raws, opts);
+  if(subsetTruncado && Array.isArray(res)){
+    res.push({
+      fecha:"", banco:"", monto:0, clase:"aviso",
+      concepto:"Búsqueda de combinaciones incompleta", comprobante:"", motivo:"demasiadas combinaciones",
+      texto:"En este paso " + subsetTruncado + " búsqueda(s) de combinaciones se cortaron por tamaño: había " +
+            "demasiadas partidas para probarlas todas. Puede que alguna diferencia sí cuadre con una " +
+            "combinación que no se alcanzó a evaluar — revisala a mano antes de darla por buena.",
+      fuente:"Motor de conciliación"
+    });
+  }
+  return res;
+}
+function computaPaso(pasoKey, raws, opts){
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
   // mostrarlo como contexto de partidas en tránsito entre meses.
   if(raws.diarioCaja){
