@@ -1417,6 +1417,44 @@ test("la tolerancia máxima es 0.03", () => {
   eq(TOLERANCIA_MAX, 0.03);
 });
 
+/* ---- El saldo de Caja General tiene que SER el tránsito ----
+   Decisión de Diba: el crédito a la cuenta se registra cuando el banco compensa, no el día del depósito.
+   Con eso el saldo al cierre es exactamente lo que queda por compensar. El control lo verifica. */
+test("cuando el saldo iguala al tránsito, el control da verde", () => {
+  STATE.saldoCajaGeneral = { inicial: 0, final: 4221.14, fechaFinal: "2026-01-31" };
+  STATE.results = {
+    paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "Banistmo", fecha: "2025-12-22", monto: 2650.04, concepto: "cheque", texto: "x" }],
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 1571.10, concepto: "tarjeta", texto: "x" }]
+  };
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Coincide") < 0) throw new Error("debería dar verde");
+  if (h.indexOf("Qué falta para que cuadre") >= 0) throw new Error("no debería pedir asientos");
+});
+
+test("cuando no coincide, dice de qué se compone la diferencia", () => {
+  STATE.saldoCajaGeneral = { inicial: -2469.06, final: 18191.26, fechaFinal: "2026-01-31" };
+  STATE.results = {
+    paso0: [
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-01-02", monto: 13003.97, concepto: "deposito", texto: "x" },
+      { clase: "en_transito", motivo: "aún pendiente", banco: "Banistmo", fecha: "2025-12-22", monto: 2650.04, concepto: "cheque", texto: "x" }
+    ],
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 1571.10, concepto: "tarjeta", texto: "x" }],
+    paso3: [{ clase: "en_transito", motivo: "depósito de fin de mes", banco: "STG", fecha: "2026-01-28", monto: 1354.25, concepto: "DEPOSITO BRINKS", texto: "x" }]
+  };
+  const d = desgloseSaldoCaja();
+  cerca(d.totalResumen, 5575.39, "el tránsito completo");
+  cerca(d.compenso, 13003.97);
+  cerca(d.soloBanco, 1354.25, "lo que ya salió de Caja General pero el banco no reflejó");
+  cerca(d.resto, 966.15, "retenciones de tarjeta");
+  // Los tres componentes explican la diferencia al centavo.
+  cerca(d.final - d.compenso + d.soloBanco - d.resto, d.totalResumen, "el puente cierra");
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Coincide") >= 0) throw new Error("no debería dar verde");
+  ["13,003.97", "-1,354.25", "966.15", "Qué falta para que cuadre"].forEach(function(t){
+    if (h.indexOf(t) < 0) throw new Error("falta en el desglose: " + t);
+  });
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

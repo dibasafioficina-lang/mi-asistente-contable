@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.21";
+var APP_VERSION="2026.08.22";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4458,32 +4458,37 @@ function desgloseSaldoCaja(){
            totalResumen:tm.total, n:tm.count,
            soloBanco: Math.round((tm.total - transitoCaja)*100)/100 };
 }
+/* ---- Control: el saldo de Caja General TIENE que ser el tránsito ----
+   Regla de Diba: en Caja General solo deben quedar los métodos de pago en tránsito por compensar al
+   banco. Para que se cumpla, el crédito a la cuenta se registra cuando el BANCO COMPENSA, no el día del
+   depósito. Mientras la mecánica sea la vieja —acreditar al depositar— este control queda en rojo, y el
+   desglose dice qué asiento falta en cada caso. */
 function desgloseSaldoCajaHtml(){
   var d = desgloseSaldoCaja();
   if(!d) return "";
+  var dif = Math.round((d.final - d.totalResumen)*100)/100;
+  var ok = Math.abs(dif) < 0.01;
   function fila(lbl, val, nota){
-    return '<div class="cg-row"><span>'+lbl+(nota?' <i class="cg-src">'+nota+'</i>':'')+'</span><b>B/ '+fmt(val)+'</b></div>';
+    return '<div class="cg-row"><span>'+lbl+(nota?' <i class="cg-src">'+nota+'</i>':"")+'</span><b>B/ '+fmt(val)+'</b></div>';
   }
-  return '<div class="cg-box"><div class="cg-h">De qué está hecho el saldo de Caja General</div>' +
-    '<div class="cg-row cg-tot"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':'')+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
-    fila("En tránsito dentro de Caja General", d.transito, "sale al próximo mes") +
-    fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga") +
-    (d.resto >= 0
-      ? fila("Retenciones y comisiones de tarjeta", d.resto, "la venta entra bruta y el depósito sale neto")
-      : fila("Falta para cubrir lo que ya compensó", d.resto, "el saldo de apertura no traía esas partidas")) +
-    (d.resto >= 0
-      ? '<div class="cg-note">El saldo contable no es el tránsito: arrastra lo que ya compensó en el banco pero nadie dio de baja en la cuenta, ' +
-        'más lo que el banco descuenta de cada tarjeta.</div>'
-      // Sin el asiento de apertura, el saldo nunca contuvo las partidas del Paso 0 y la resta se va abajo
-      // de cero. No es un error de cálculo: es la señal de que falta ese ajuste.
-      : '<div class="cg-note">El renglón sale en negativo porque el saldo de apertura no incluía las partidas del Paso 0: ' +
-        'el mes arrancó sin el asiento de ajuste que las incorpora. Revisá el cuadre del Paso 0 contra el saldo inicial.</div>') +
-    (d.soloBanco > 0.005
-      ? '<div class="cg-note">El resumen para el Paso 0 lleva además <b>B/ '+fmt(d.soloBanco)+'</b> de efectivo depositado que el banco todavía no reflejó. ' +
-        'Ese ya está acreditado en Caja General —su tránsito es del lado del banco— así que no compone este saldo. ' +
-        '<b>Total del resumen: B/ '+fmt(d.totalResumen)+'</b> en '+d.n+' partida(s).</div>'
-      : '<div class="cg-note">Solo el primer renglón pasa al Paso 0 del mes siguiente ('+d.n+' partida(s), B/ '+fmt(d.totalResumen)+').</div>') +
-  '</div>';
+  var h = '<div class="cg-box"><div class="cg-h">Saldo de Caja General vs. tránsito al cierre</div>' +
+    '<div class="cg-row"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':"")+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
+    '<div class="cg-row"><span>En tránsito al cierre <i class="cg-src">'+d.n+' partida(s)</i></span><b>B/ '+fmt(d.totalResumen)+'</b></div>' +
+    '<div class="cg-row cg-dif"><span>Diferencia</span><b style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>';
+  if(ok){
+    return h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
+      'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div></div>';
+  }
+  h += '<div class="cg-h" style="margin-top:14px">La diferencia se compone de</div>';
+  if(Math.abs(d.compenso) > 0.005) h += fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga");
+  if(d.soloBanco > 0.005) h += fila("Depositado que el banco no reflejó", -d.soloBanco, "ya salió de Caja General el día del depósito");
+  if(Math.abs(d.resto) > 0.005) h += fila(d.resto >= 0 ? "Retenciones y comisiones de tarjeta" : "Falta para cubrir lo que ya compensó",
+    d.resto, d.resto >= 0 ? "la venta entra bruta y el depósito sale neto" : "el mes arrancó sin el asiento de apertura");
+  h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> descargar de Caja General lo que el banco ya compensó; ' +
+    'revertir el crédito de lo depositado que el banco todavía no reflejó, para que vuelva a la cuenta; y saldar las ' +
+    'retenciones de tarjeta contra gastos bancarios, porque el banco nunca las va a acreditar. De ahí en adelante, ' +
+    'acreditar Caja General el día que el banco compensa —no el día del depósito— y el saldo queda igual al tránsito solo.</div>';
+  return h + '</div>';
 }
 function cierreCajaHtml(){
   var tm = transitoPorMetodo();
