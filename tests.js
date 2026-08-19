@@ -1372,6 +1372,57 @@ test("poolDelMetodo lee el campo de ambos pasos", () => {
      "si el método no deja ninguna línea, mejor buscar en todo que no buscar");
 });
 
+/* ---- Celdas de importe que no se pueden leer ----
+   money() devolvía 0 ante cualquier cosa que no entendiera. Probado sobre enero: corromper la celda del
+   crédito de 1,341.20 dejaba el cierre en CERO diferencias y mandaba esa partida al resumen del mes
+   siguiente como si nunca hubiera compensado — sin una sola señal. */
+test("los formatos válidos se siguen leyendo igual", () => {
+  ilegiblesN = 0;
+  [["B/ 1,234.56", 1234.56], ["(500.00)", -500], ["-500", -500], ["20,00", 20], ["1,234", 1234],
+   ["$100", 100], ["0", 0], ["", 0], ["   ", 0], [null, 0], [42, 42], [".5", 0.5], ["5.", 5],
+   ["-B/ 2,469.06", -2469.06], ["B/ 0.00", 0]].forEach(function(p){
+    cerca(money(p[0]), p[1], "money(" + JSON.stringify(p[0]) + ")");
+  });
+  eq(ilegiblesN, 0, "ninguno de estos es ilegible");
+});
+
+test("el texto que no es un importe se registra en vez de valer cero en silencio", () => {
+  ["#REF!", "N/A", "12ABC", "sin dato", "-", "500 USD", "1.2.3"].forEach(function(v){
+    ilegiblesN = 0;
+    eq(money(v), 0, "devuelve 0 para no romper las sumas");
+    eq(ilegiblesN, 1, "pero queda registrado: " + v);
+  });
+});
+
+test("una celda ilegible queda registrada al leer el archivo", () => {
+  ilegiblesN = 0; ilegiblesVals = [];
+  const movs = parseEstadoCuenta([["Fecha", "Descripción", "Débito", "Crédito", "Saldo"],
+                                  ["2026-01-02", "CR REMISION - V/MC", "0", "#REF!", "100"]], "banistmo");
+  eq(movs.length, 1);
+  cerca(movs[0].credito, 0, "se toma como cero para no romper las sumas");
+  eq(ilegiblesN, 1, "pero queda la señal para que el paso lo avise");
+  eq(ilegiblesVals[0], "#REF!", "con el valor, para poder buscarlo en el Excel");
+});
+  ilegiblesN = 0; ilegiblesVals = [];
+  parseEstadoCuenta([["Fecha", "Descripción", "Débito", "Crédito", "Saldo"],
+                     ["2026-01-02", "CR REMISION", "0", "#REF!", "100"]], "banistmo");
+  eq(ilegiblesN, 1);
+  eq(ilegiblesVals[0], "#REF!", "y se guarda el valor para poder buscarlo en el Excel");
+});
+
+// Caso real: el informe de febrero trae "273.49-255.60-164.08-292.62" escrito en la celda de Cheque del
+// 12-feb. Se leía como 0 y por eso el reporte no cuadraba contra el diario — era la causa de las tres
+// diferencias que se cancelaban entre sí.
+test("un desglose escrito a mano en la celda de importe se detecta", () => {
+  ilegiblesN = 0; ilegiblesVals = [];
+  eq(money("273.49-255.60-164.08-292.62"), 0);
+  eq(ilegiblesN, 1);
+});
+
+test("la tolerancia máxima es 0.03", () => {
+  eq(TOLERANCIA_MAX, 0.03);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.20";
+var APP_VERSION="2026.08.21";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -462,10 +462,24 @@ function normTxt(s){
   s = s.normalize("NFD").replace(/[\u0300-\u036f]/g,"");
   return s.toUpperCase().replace(/\s+/g," ").trim();
 }
+/* ---- Celdas que no se pueden leer como número ----
+   money() devolvía 0 ante cualquier cosa que no entendiera, así que "#REF!", "N/A" o una celda con texto
+   se leían como cero y la partida desaparecía del cotejo SIN AVISAR. Probado sobre enero: corromper la
+   celda del crédito de 1,341.20 dejaba el cierre en cero diferencias y mandaba esa partida al resumen del
+   mes siguiente como si nunca hubiera compensado. Y "12ABC" devolvía 12: la partida quedaba con el
+   importe equivocado. Ahora esos casos se registran y cada paso los reporta. */
+var ilegiblesN = 0;      // cuántas celdas no se pudieron leer durante el paso
+var ilegiblesVals = [];  // los valores distintos, para poder buscarlos en el Excel
+function registrarIlegible(v){
+  ilegiblesN++;
+  var t = String(v).replace(/\s+/g," ").trim().slice(0,24);
+  if(ilegiblesVals.length < 12 && ilegiblesVals.indexOf(t) === -1) ilegiblesVals.push(t);
+}
 function money(v){
   if(v===null||v===undefined||v==="") return 0;
   if(typeof v==="number") return v;
   var s = String(v).replace(/B\/\.?/gi,"").replace(/\$/g,"").trim();
+  if(s==="") return 0;   // solo espacios o el símbolo de moneda: celda vacía, no ilegible
   // Coma DECIMAL (se digita así a veces: "20,00"): una sola coma seguida de 1-2 dígitos al final y sin punto
   // decimal → se convierte en punto. Si hay punto, o el grupo tras la coma es de 3 dígitos, la coma es
   // separador de miles ("1,234.56", "1,234") y se elimina.
@@ -474,8 +488,15 @@ function money(v){
   var neg = false;
   if(s.indexOf("(")===0){ neg=true; s=s.replace(/[()]/g,""); }
   if(s.indexOf("-")===0){ neg=true; s=s.replace("-",""); }
+  s = s.trim();
+  // Lo que queda tiene que ser un número y nada más. Si sobra texto ("12ABC", "#REF!", "N/A", "500 USD")
+  // no se adivina: se devuelve 0, pero queda registrado — un cero inventado descuadra en silencio.
+  if(!/^\d+(\.\d*)?$/.test(s) && !/^\.\d+$/.test(s)){
+    registrarIlegible(v);
+    return 0;
+  }
   var n = parseFloat(s);
-  if(isNaN(n)) return 0;
+  if(isNaN(n)){ registrarIlegible(v); return 0; }
   return neg ? -n : n;
 }
 function toISODate(v, mdY){
@@ -1620,6 +1641,10 @@ function esChequeDesc(desc){
 // direccion (opcional): "adelante" = el pool debe ser de fecha >= ref (un depósito clarea en/después del
 // cheque); "atras" = el pool debe ser de fecha <= ref (los cheques de un depósito son de fecha anterior).
 // Sin dirección, ventana absoluta (compatibilidad). Evita el "viaje en el tiempo" (cheque que clarea antes de emitirse).
+// Tolerancia máxima admitida. Subirla "para que cuadre" borra partidas del cotejo sin decirlo: con 1.00,
+// enero pasaba de 10 partidas en tránsito por 4,221.14 a 8 por 3,969.09 — desaparecían un depósito de
+// 5.85 y una tarjeta de 246.20. Tres centavos cubren los redondeos reales y no se comen nada.
+var TOLERANCIA_MAX = 0.03;
 var SUBSET_TOPE = 300000;   // nodos de recursión por búsqueda
 var subsetTruncado = 0;     // búsquedas cortadas por el tope; se lee al cerrar cada paso
 function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, direccion){
@@ -2246,7 +2271,7 @@ function archivosDePaso(pasoKey){
    decirlo. Un corte silencioso se leería como "no compensa" y mandaría al resumen del mes siguiente una
    partida que en realidad sí cuadraba. */
 function computePasoResult(pasoKey, raws, opts){
-  subsetTruncado = 0;
+  subsetTruncado = 0; ilegiblesN = 0; ilegiblesVals = [];
   var res = computaPaso(pasoKey, raws, opts);
   if(subsetTruncado && Array.isArray(res)){
     res.push({
@@ -2256,6 +2281,19 @@ function computePasoResult(pasoKey, raws, opts){
             "demasiadas partidas para probarlas todas. Puede que alguna diferencia sí cuadre con una " +
             "combinación que no se alcanzó a evaluar — revisala a mano antes de darla por buena.",
       fuente:"Motor de conciliación"
+    });
+  }
+  // Una celda de importe ilegible se tomó como cero, así que su partida no entró al cotejo. Sin este
+  // aviso el paso saldría "sin diferencias" con plata faltando, que es la peor forma de fallar.
+  if(ilegiblesN && Array.isArray(res)){
+    res.push({
+      fecha:"", banco:"", monto:0, clase:"aviso",
+      concepto:"Celdas que no se pudieron leer", comprobante:"", motivo:"dato ilegible en el archivo",
+      texto:"En este paso hubo " + ilegiblesN + " celda(s) de importe que no se pudieron leer como número" +
+            (ilegiblesVals.length ? " (" + ilegiblesVals.join(", ") + ")" : "") +
+            ". Se tomaron como cero, así que esas partidas NO entraron al cotejo y el resultado puede " +
+            "estar incompleto. Buscá esos valores en el Excel y volvé a exportarlo.",
+      fuente:"Lectura de los archivos"
     });
   }
   return res;
@@ -3912,7 +3950,7 @@ function renderModulo1(){
 
     '<div class="opts">' +
       '<label>Ventana de días para emparejar <input type="number" id="ventana" value="'+STATE.options.ventanaDias+'" min="0"></label>' +
-      '<label>Tolerancia B/ <input type="number" id="tolerancia" value="'+STATE.options.tolerancia+'" step="0.01" min="0"></label>' +
+      '<label>Tolerancia B/ <input type="number" id="tolerancia" value="'+STATE.options.tolerancia+'" step="0.01" min="0" max="'+TOLERANCIA_MAX+'" title="Máximo admitido: B/ '+fmt(TOLERANCIA_MAX)+'. Más que eso empieza a absorber partidas reales."></label>' +
     '</div>' +
 
     '<div class="run-bar"><button class="btn-run" id="runBtn">Ejecutar los 3 pasos</button>' +
@@ -3957,7 +3995,18 @@ function renderModulo1(){
   var ventInp = document.getElementById("ventana");
   var tolInp = document.getElementById("tolerancia");
   ventInp.addEventListener("change", function(){ STATE.options.ventanaDias = parseFloat(ventInp.value)||0; });
-  tolInp.addEventListener("change", function(){ STATE.options.tolerancia = parseFloat(tolInp.value)||0.01; });
+  tolInp.addEventListener("change", function(){
+    var v = parseFloat(tolInp.value);
+    if(isNaN(v) || v <= 0) v = 0.01;
+    if(v > TOLERANCIA_MAX){
+      v = TOLERANCIA_MAX;
+      alert("La tolerancia máxima es B/ " + fmt(TOLERANCIA_MAX) + "." + "\n\n" +
+            "Por encima de eso el cotejo empieza a dar por buenas diferencias reales y a dejar partidas " +
+            "fuera del resumen en tránsito, sin avisar.");
+    }
+    STATE.options.tolerancia = v;
+    tolInp.value = v;
+  });
 
   var runBtn = document.getElementById("runBtn");
   var algunoListo = ["paso0"].concat(PASO_ORDEN).some(function(k){ return pasoListo(k); });
