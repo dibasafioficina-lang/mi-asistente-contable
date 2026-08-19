@@ -236,6 +236,14 @@
   .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
     border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
   .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
+  .dif-sub{margin:14px 0 6px;font-size:13px;font-weight:700;color:var(--heading)}
+  .dif-sub b{font-family:"Mulish";font-weight:800;white-space:nowrap}
+  .dif-sub span{display:block;font-weight:400;font-size:11.5px;color:var(--slate);margin-top:3px;line-height:1.45}
+  .dif-tabla{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0 4px}
+  .dif-tabla th{background:#F3F8F5;color:var(--heading);font-weight:700;text-align:left;padding:5px 7px;border-bottom:1px solid #DCEAE2}
+  .dif-tabla td{padding:4px 7px;border-bottom:1px solid #EEF4F0;color:var(--slate)}
+  .dif-tabla .num{text-align:right;font-family:"Mulish";white-space:nowrap}
+  .dif-tabla tr.tot td{font-weight:800;color:var(--heading);border-top:1px solid #CDE7D6;border-bottom:none}
   .sidet-panel{background:#EEF3FA;border-color:#D5E1F0}
   .sidet-panel .cierre-title{color:#3C5670}
   .sidet-tabla{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;background:#fff;border-radius:10px;overflow:hidden}
@@ -427,6 +435,8 @@ var STATE = {
   saldoCajaGeneral:null,
   transitoPrevio:null,
   diarioCaja:null,
+  estados:null,
+  retVisaDetalle:null,
   saldoIniDetalle:[],
   checks:{}
 };
@@ -439,7 +449,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.23";
+var APP_VERSION="2026.08.24";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2330,6 +2340,11 @@ function computaPaso(pasoKey, raws, opts){
     var estBanistmo = parseEstadoCuenta(raws.estBanistmo,"banistmo");
     var estStg = parseEstadoCuenta(raws.estStg,"stg");
     var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
+    // Se guardan para el desglose de la diferencia entre el saldo de Caja General y el tránsito: sin
+    // ellos ese panel solo podría mostrar totales, no de dónde sale cada cifra.
+    STATE.estados = { "Banistmo": estBanistmo, "STG": estStg };
+    if(estBG) STATE.estados["Banco General"] = estBG;
+    try{ STATE.retVisaDetalle = raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null; }catch(e){ STATE.retVisaDetalle = null; }
     // Retención VISA por día (magnitud positiva) para cuadrar el neto en STG: bruto − retención = neto del banco.
     var retVisaDia = null;
     if(raws.retVisa){
@@ -4466,6 +4481,54 @@ function desgloseSaldoCaja(){
            totalResumen:tm.total, n:tm.count,
            soloBanco: Math.round((tm.total - transitoCaja)*100)/100 };
 }
+/* ---- Detalle de los dos componentes de la diferencia ----
+   Los dos van en sentidos opuestos y conviene poder verlos partida por partida, no solo el total. */
+// Lo que está en el tránsito pero YA salió de Caja General: el efectivo cuyo asiento se hizo el día del
+// depósito. Son las partidas que aporta el Paso 3 y que el Paso 2 no ve (no llevan etiqueta de banco).
+function partidasYaAcreditadas(){
+  var r = STATE.results || {};
+  var entrante = function(x){ return /mes anterior/i.test(x.motivo||""); };
+  var enCG = [];
+  (Array.isArray(r.paso0)?r.paso0:[]).forEach(function(x){ if(esEnTransito(x) && !entrante(x)) enCG.push(x); });
+  (Array.isArray(r.paso2)?r.paso2:[]).forEach(function(x){ if(esEnTransito(x)) enCG.push(x); });
+  var cuenta = {};
+  function k(x){ return (x.banco||"")+"|"+(x.fecha||"")+"|"+Math.round((x.monto||0)*100); }
+  enCG.forEach(function(x){ cuenta[k(x)] = (cuenta[k(x)]||0) + 1; });
+  return recolectarEnTransito().filter(function(x){
+    var c = k(x);
+    if(cuenta[c]){ cuenta[c]--; return false; }
+    return true;
+  });
+}
+// Cargos de tarjeta del estado de cuenta, agrupados por concepto. Es lo que el banco se quedó y nunca va
+// a acreditar, así que queda en Caja General porque la venta entró bruta.
+function cargosTarjetaPorBanco(){
+  var est = STATE.estados;
+  if(!est) return null;
+  var hasta = STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.fechaFinal;
+  var out = [];
+  Object.keys(est).forEach(function(b){
+    var xs = (est[b]||[]).filter(function(x){
+      if(!(x.debito > 0)) return false;
+      if(hasta && x.fecha > hasta) return false;   // el estado suele traer días del mes siguiente
+      var n = normTxt(x.descripcion);
+      if(!/RETENCI|COMISI|ITBMS|DEVOLUCION COMISION/.test(n)) return false;
+      return /V\/MC|VISA|CLAVE|REMISION|ESTABLECIMIENTO AFILIADO/.test(n);
+    });
+    if(!xs.length) return;
+    var porTipo = {};
+    xs.forEach(function(x){
+      var n = normTxt(x.descripcion);
+      var t = /RETENCI/.test(n) ? "Retención ITBMS"
+            : /DEVOLUCION COMISION/.test(n) ? "Devolución comisión"
+            : /ITBMS/.test(n) ? "ITBMS" : "Comisión";   // "ITBMS sobre comisión" es ITBMS, no comisión
+      porTipo[t] = Math.round(((porTipo[t]||0) + x.debito)*100)/100;
+    });
+    out.push({ banco:b, n:xs.length, total:Math.round(xs.reduce(function(a,x){ return a+x.debito; },0)*100)/100, porTipo:porTipo });
+  });
+  return out.length ? out : null;
+}
+
 /* ---- Control: el saldo de Caja General TIENE que ser el tránsito ----
    Regla de Diba: en Caja General solo deben quedar los métodos de pago en tránsito por compensar al
    banco. Para que se cumpla, el crédito a la cuenta se registra cuando el BANCO COMPENSA, no el día del
@@ -4487,15 +4550,62 @@ function desgloseSaldoCajaHtml(){
     return h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
       'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div></div>';
   }
-  h += '<div class="cg-h" style="margin-top:14px">La diferencia se compone de</div>';
-  if(Math.abs(d.compenso) > 0.005) h += fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga");
-  if(d.soloBanco > 0.005) h += fila("Depositado que el banco no reflejó", -d.soloBanco, "ya salió de Caja General el día del depósito");
-  if(Math.abs(d.resto) > 0.005) h += fila(d.resto >= 0 ? "Retenciones y comisiones de tarjeta" : "Falta para cubrir lo que ya compensó",
-    d.resto, d.resto >= 0 ? "la venta entra bruta y el depósito sale neto" : "el mes arrancó sin el asiento de apertura");
-  h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> descargar de Caja General lo que el banco ya compensó; ' +
-    'revertir el crédito de lo depositado que el banco todavía no reflejó, para que vuelva a la cuenta; y saldar las ' +
-    'retenciones de tarjeta contra gastos bancarios, porque el banco nunca las va a acreditar. De ahí en adelante, ' +
-    'acreditar Caja General el día que el banco compensa —no el día del depósito— y el saldo queda igual al tránsito solo.</div>';
+  h += '<div class="cg-h" style="margin-top:16px">La diferencia se compone de dos cosas que van en sentido opuesto</div>';
+  if(Math.abs(d.compenso) > 0.005){
+    h += fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga");
+  }
+
+  // (1) Efectivo que sigue en tránsito pero cuyo asiento ya salió de Caja General.
+  var ya = partidasYaAcreditadas();
+  if(Math.abs(d.soloBanco) > 0.005){
+    h += '<div class="dif-sub">1 · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
+      '<span>El asiento del depósito se hizo el día que se entregó al banco, así que ya no está en la cuenta. ' +
+      'Se corrige solo cuando el crédito se registre al compensar.</span></div>';
+    if(ya.length){ h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
+    ya.forEach(function(x){
+      h += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+esc(String(x.concepto||"").slice(0,44))+
+           '</td><td class="num">'+fmt(x.monto)+'</td></tr>';
+    });
+      h += '<tr class="tot"><td colspan="3">Total</td><td class="num">'+fmt(d.soloBanco)+'</td></tr></tbody></table>'; }
+  }
+
+  // (2) Retenciones y comisiones de tarjeta: lo que el banco se quedó y nunca va a acreditar.
+  if(Math.abs(d.resto) > 0.005){
+    h += '<div class="dif-sub">2 · Retenciones y comisiones de tarjeta <b>+ B/ '+fmt(d.resto)+'</b>' +
+      '<span>La venta entra BRUTA a Caja General y el depósito sale NETO: la diferencia se queda en la cuenta. ' +
+      'El banco nunca la va a acreditar, se la descontó.</span></div>';
+    var rv = STATE.retVisaDetalle;
+    if(rv && rv.length){
+      var totB=0, totR=0, totN=0;
+      h += '<table class="dif-tabla"><thead><tr><th colspan="4">VISA St. Georges — informe de retenciones</th></tr>' +
+        '<tr><th>Fecha de venta</th><th class="num">Bruto</th><th class="num">Retenido</th><th class="num">Neto</th></tr></thead><tbody>';
+      rv.forEach(function(x){
+        if(Math.abs(x.bruto) < 0.005 && Math.abs(x.neto) < 0.005) return;
+        totB += x.bruto; totR += Math.abs(x.retenciones); totN += x.neto;
+        h += '<tr><td>'+esc(x.fecha)+'</td><td class="num">'+fmt(x.bruto)+'</td><td class="num">'+fmt(Math.abs(x.retenciones))+
+             '</td><td class="num">'+fmt(x.neto)+'</td></tr>';
+      });
+      h += '<tr class="tot"><td>Total</td><td class="num">'+fmt(Math.round(totB*100)/100)+'</td><td class="num">' +
+        fmt(Math.round(totR*100)/100)+'</td><td class="num">'+fmt(Math.round(totN*100)/100)+'</td></tr></tbody></table>';
+    }
+    var cg = cargosTarjetaPorBanco();
+    if(cg){
+      cg.forEach(function(b){
+        h += '<table class="dif-tabla"><thead><tr><th colspan="2">'+esc(b.banco)+' — cargos de tarjeta del estado de cuenta ('+b.n+' partidas)</th></tr></thead><tbody>';
+        Object.keys(b.porTipo).sort().forEach(function(t){
+          h += '<tr><td>'+esc(t)+'</td><td class="num">'+fmt(b.porTipo[t])+'</td></tr>';
+        });
+        h += '<tr class="tot"><td>Total</td><td class="num">'+fmt(b.total)+'</td></tr></tbody></table>';
+      });
+      var tc = cg.reduce(function(a,b){ return a+b.total; },0);
+      var tv = rv ? Math.round(rv.reduce(function(a,x){ return a+Math.abs(x.retenciones); },0)*100)/100 : 0;
+      h += '<div class="cg-note">Los cargos del mes suman B/ '+fmt(Math.round((tc+tv)*100)/100)+' y en la cuenta quedaron B/ '+fmt(d.resto)+
+        ': no coinciden porque el banco cobra en enero retenciones de ventas de fin de diciembre, y las de fin de enero las cobra en febrero. ' +
+        'Para el asiento vale la cifra que quedó en la cuenta.</div>';
+    }
+  }
+  h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> saldar las retenciones de tarjeta contra gastos bancarios; ' +
+    'lo demás se corrige solo al acreditar Caja General el día que el banco compensa, no el día del depósito.</div>';
   return h + '</div>';
 }
 function cierreCajaHtml(){

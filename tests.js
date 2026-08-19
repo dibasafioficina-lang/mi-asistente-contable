@@ -1461,6 +1461,31 @@ test("cuando no coincide, dice de qué se compone la diferencia", () => {
   });
 });
 
+test("el detalle lista las partidas que ya salieron de Caja General", () => {
+  // Mismo estado que la prueba anterior: el tránsito del Paso 3 no está en Caja General.
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  const ya = partidasYaAcreditadas();
+  if (ya.length !== 1) throw new Error("esperaba una partida, hubo " + ya.length);
+  cerca(ya[0].monto, 1354.25);
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("DEPOSITO BRINKS") < 0) throw new Error("la tabla no muestra el concepto");
+});
+
+test("un cargo de ITBMS sobre comisión no se cuenta como comisión", () => {
+  STATE.saldoCajaGeneral = { inicial: 0, final: 0, fechaFinal: "2026-01-31" };
+  STATE.estados = { Banistmo: [
+    { fecha: "2026-01-15", debito: 100, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
+    { fecha: "2026-01-15", debito: 7, credito: 0, descripcion: "ITBMS SOBRE COMISION V/MC" },
+    { fecha: "2026-01-20", debito: 50, credito: 0, descripcion: "RETENCION ITBMS V/MC" },
+    { fecha: "2026-02-02", debito: 999, credito: 0, descripcion: "COMISION V/MC" }   // fuera del mes
+  ] };
+  const cg = cargosTarjetaPorBanco();
+  cerca(cg[0].porTipo["Comisión"], 100);
+  cerca(cg[0].porTipo["ITBMS"], 7);
+  cerca(cg[0].total, 157, "no arrastra los días del mes siguiente");
+  STATE.estados = null;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
