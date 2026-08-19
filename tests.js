@@ -1486,6 +1486,30 @@ test("un cargo de ITBMS sobre comisión no se cuenta como comisión", () => {
   STATE.estados = null;
 });
 
+test("el reporte de Caja General se puede imprimir solo", () => {
+  STATE.saldoCajaGeneral = { inicial: 0, final: 100, fechaFinal: "2026-01-31" };
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-01-31", monto: 100, concepto: "t", texto: "x" }] };
+  const h = desgloseSaldoCajaHtml();
+  // El botón necesita el id del recuadro: sin él, el CSS de impresión no sabe qué dejar visible.
+  if (h.indexOf("id=\"cgReporte\"") < 0) throw new Error("falta el id del recuadro");
+  if (h.indexOf("id=\"btnPrintCG\"") < 0) throw new Error("falta el botón de imprimir");
+  // En el papel el reporte va solo, así que lleva su propio encabezado y su pie de trazabilidad.
+  if (h.indexOf("cg-solo-head") < 0) throw new Error("falta el encabezado de la hoja");
+  if (h.indexOf("cg-solo-pie") < 0) throw new Error("falta el pie de trazabilidad");
+});
+
+test("el panel de períodos cierra su propio recuadro", () => {
+  // Comparte el nombre de variable con otros armadores de HTML: si se le cuela el cierre de otro panel,
+  // el aviso de archivos de otro mes se rompe justo cuando más importa.
+  const h = periodosHtml({ mesTrabajo: "2026-01", archivos: 3, alertas: [
+    { clase: "ajeno", nombre: "Estado Banistmo", archivo: "BANISTMO.xlsx", periodo: { desde: "2025-07-01", hasta: "2025-07-31" } }
+  ]});
+  if (h.indexOf("per-panel") < 0) throw new Error("no armó el panel");
+  if (h.indexOf("cg-solo-pie") >= 0) throw new Error("se le coló el pie del reporte de Caja General");
+  const abre = (h.match(/<div/g)||[]).length, cierra = (h.match(/<\/div>/g)||[]).length;
+  if (abre !== cierra) throw new Error("quedan " + (abre-cierra) + " div sin cerrar");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

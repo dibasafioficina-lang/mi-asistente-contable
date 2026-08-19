@@ -68,7 +68,7 @@
   .crumb .print-btn:hover{background:var(--brand);color:#fff;border-color:var(--brand);text-decoration:none}
   @page{ size: A4 portrait; margin: 8mm; }
   @media print{
-    header, .crumb, .dropzones, .run-bar, .desc, .btn-run, .btn-export, input[type=file], .dz{display:none !important}
+    header, .crumb, .dropzones, .run-bar, .desc, .btn-run, .btn-export, .cg-print, input[type=file], .dz{display:none !important}
     .app{padding:0 !important;max-width:100% !important;width:100% !important;zoom:.75}
     body, .app{background:#fff !important}
     .step-block{box-shadow:none !important}
@@ -81,6 +81,18 @@
     /* Los botones de acción no se imprimen; el aviso de cifras incompletas SÍ debe quedar en el papel */
     .bloq-btn, .bloq-relink, .sd-copy{display:none !important}
     .sd-panel, .bloq-panel, .bloq-aviso, .sd-item, .per-panel{break-inside:avoid}
+    /* Impresion exclusiva del reporte de Caja General: se apaga todo lo demas sin desmontarlo, para no
+       perder el estado de la pantalla. visibility (no display) mantiene el alto de la pagina estable. */
+    body.solo-cg *{visibility:hidden !important}
+    body.solo-cg #cgReporte, body.solo-cg #cgReporte *{visibility:visible !important}
+    body.solo-cg #cgReporte{position:absolute;left:0;top:0;width:100%;border:none !important;padding:0 !important}
+    body.solo-cg #cgReporte > .cg-h-btn{display:none}   /* en el papel manda el encabezado de la hoja */
+    body.solo-cg #cgReporte .cg-solo-head{display:block;margin-bottom:12px;border-bottom:2px solid var(--brand);padding-bottom:8px}
+    body.solo-cg #cgReporte .cg-solo-head b{display:block;font-size:15px;color:var(--heading)}
+    body.solo-cg #cgReporte .cg-solo-head span{font-size:11px;color:var(--slate)}
+    body.solo-cg #cgReporte .cg-solo-pie{display:block}
+    #cgReporte .dif-tabla, #cgReporte .dif-sub, #cgReporte .cg-row{break-inside:avoid}
+    #cgReporte .dif-tabla thead{display:table-header-group}   /* la cabecera se repite en cada hoja */
   }
 
   /* Menu de modulos */
@@ -236,6 +248,11 @@
   .cg-inp{width:130px;text-align:right;font-family:"Mulish";font-weight:800;font-size:14px;color:var(--heading);
     border:1.5px solid var(--brand);border-radius:8px;padding:5px 8px;background:#FFF8FB}
   .cg-note{font-size:12px;color:#3F6E56;margin-top:8px;line-height:1.4}
+  .cg-h-btn{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .cg-print{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-weight:800;font-size:11px;
+    letter-spacing:.3px;padding:5px 13px;border-radius:999px;cursor:pointer;text-transform:none;flex-shrink:0}
+  .cg-print:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .cg-solo-head, .cg-solo-pie{display:none}   /* solo salen en el papel */
   .dif-sub{margin:14px 0 6px;font-size:13px;font-weight:700;color:var(--heading)}
   .dif-sub b{font-family:"Mulish";font-weight:800;white-space:nowrap}
   .dif-sub span{display:block;font-weight:400;font-size:11.5px;color:var(--slate);margin-top:3px;line-height:1.45}
@@ -449,7 +466,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.24";
+var APP_VERSION="2026.08.25";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4254,6 +4271,7 @@ function renderResultados(){
   if(btnT) btnT.onclick = exportarEnTransito;
   bindAjusteCopy(cuadreP0);       // botón "copiar el asiento" del ajuste sugerido
   if(cajaLista) bindCajaInputs(); // campos editables del cierre de Caja General (saldo inicial / sistema)
+  bindPrintCG();                  // boton "Imprimir" propio del reporte de Caja General
   bindSaldoIniDetalle(); // Paso 0: detalle editable del saldo inicial (manual o por Excel)
 }
 
@@ -4535,6 +4553,9 @@ function cargosTarjetaPorBanco(){
    depósito. Mientras la mecánica sea la vieja —acreditar al depositar— este control queda en rojo, y el
    desglose dice qué asiento falta en cada caso. */
 function desgloseSaldoCajaHtml(){
+  // El reporte se puede imprimir solo, sin el resto de la pantalla, así que en el papel tiene que llevar
+  // su propio encabezado y su pie de trazabilidad: de qué período es y con qué archivos se hizo.
+  function cerrar(x){ return x + '<div class="cg-solo-pie">'+pieModulo1Html()+'</div></div>'; }
   var d = desgloseSaldoCaja();
   if(!d) return "";
   var dif = Math.round((d.final - d.totalResumen)*100)/100;
@@ -4542,13 +4563,17 @@ function desgloseSaldoCajaHtml(){
   function fila(lbl, val, nota){
     return '<div class="cg-row"><span>'+lbl+(nota?' <i class="cg-src">'+nota+'</i>':"")+'</span><b>B/ '+fmt(val)+'</b></div>';
   }
-  var h = '<div class="cg-box"><div class="cg-h">Saldo de Caja General vs. tránsito al cierre</div>' +
+  var h = '<div class="cg-box" id="cgReporte">' +
+    '<div class="cg-h cg-h-btn">Saldo de Caja General vs. tránsito al cierre' +
+      '<button class="cg-print" id="btnPrintCG" type="button" title="Imprimir solo este reporte">Imprimir</button></div>' +
+    '<div class="cg-solo-head"><b>Saldo de Caja General vs. tránsito al cierre</b>' +
+      '<span>Período: '+esc(periodoTrabajo())+' · Emitido '+ahoraTexto()+' · v'+APP_VERSION+'</span></div>' +
     '<div class="cg-row"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':"")+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
     '<div class="cg-row"><span>En tránsito al cierre <i class="cg-src">'+d.n+' partida(s)</i></span><b>B/ '+fmt(d.totalResumen)+'</b></div>' +
     '<div class="cg-row cg-dif"><span>Diferencia</span><b style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>';
   if(ok){
-    return h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
-      'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div></div>';
+    return cerrar(h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
+      'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div>');
   }
   h += '<div class="cg-h" style="margin-top:16px">La diferencia se compone de dos cosas que van en sentido opuesto</div>';
   if(Math.abs(d.compenso) > 0.005){
@@ -4606,7 +4631,7 @@ function desgloseSaldoCajaHtml(){
   }
   h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> saldar las retenciones de tarjeta contra gastos bancarios; ' +
     'lo demás se corrige solo al acreditar Caja General el día que el banco compensa, no el día del depósito.</div>';
-  return h + '</div>';
+  return cerrar(h);
 }
 function cierreCajaHtml(){
   var tm = transitoPorMetodo();
@@ -4649,6 +4674,23 @@ function cierreCajaHtml(){
   return h;
 }
 // Recalcula en vivo el saldo final esperado y la diferencia al editar los campos (sin re-render completo).
+// Imprime SOLO el reporte de Caja General. No abre una ventana nueva (los bloqueadores de pop-ups las
+// matan y ahi se pierde el reporte): marca el body y deja que el CSS de impresion apague el resto.
+function bindPrintCG(){
+  var b = document.getElementById("btnPrintCG");
+  if(!b) return;
+  b.onclick = function(){
+    var body = document.body;
+    body.classList.add("solo-cg");
+    // El navegador dispara afterprint tanto al imprimir como al cancelar; el timer es el respaldo por si
+    // el navegador no lo emite, para que la clase no se quede pegada y rompa la impresion normal.
+    var limpiar = function(){ body.classList.remove("solo-cg"); window.removeEventListener("afterprint", limpiar); };
+    window.addEventListener("afterprint", limpiar);
+    setTimeout(limpiar, 1500);
+    window.print();
+  };
+}
+
 function bindCajaInputs(){
   var ci = document.getElementById("cajaInicial");
   var cs = document.getElementById("cajaSistema");
