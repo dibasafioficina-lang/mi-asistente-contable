@@ -1117,7 +1117,10 @@ if (!fs.existsSync(ARCHIVO)) {
    El saldo contable al cierre NO es el tránsito: arrastra la apertura que ya compensó en el banco (nadie
    la da de baja de la cuenta) y las retenciones de tarjeta (la venta entra bruta, el depósito sale neto). */
 test("el desglose del saldo de Caja General suma el saldo final", () => {
-  STATE.saldoCajaGeneral = { inicial: -2469.06, movimiento: 20660.32, final: 18191.26, fechaFinal: "2026-01-31" };
+  // Apertura efectiva = Balance Inicial (−2,469.06) + ajuste ME-00000002023 (18,123.07) = 15,654.01.
+  // De ahí sale lo que compensó y todavía no se descargó: 15,654.01 − 2,650.04 pendientes.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null;
+  STATE.saldoCajaGeneral = { inicial: 15654.01, movimiento: 20660.32, final: 18191.26, fechaFinal: "2026-01-31" };
   STATE.results = {
     paso0: [
       { clase: "en_transito", motivo: "compensó — venía del mes anterior", monto: 13003.97, concepto: "x", texto: "x" },
@@ -1421,7 +1424,8 @@ test("la tolerancia máxima es 0.03", () => {
    Decisión de Diba: el crédito a la cuenta se registra cuando el banco compensa, no el día del depósito.
    Con eso el saldo al cierre es exactamente lo que queda por compensar. El control lo verifica. */
 test("cuando el saldo iguala al tránsito, el control da verde", () => {
-  STATE.saldoCajaGeneral = { inicial: 0, final: 4221.14, fechaFinal: "2026-01-31" };
+  STATE.transitoPrevio = null; STATE.diarioCaja = null;
+  STATE.saldoCajaGeneral = { inicial: 2650.04, final: 4221.14, fechaFinal: "2026-01-31" };
   STATE.results = {
     paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "Banistmo", fecha: "2025-12-22", monto: 2650.04, concepto: "cheque", texto: "x" }],
     paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 1571.10, concepto: "tarjeta", texto: "x" }]
@@ -1432,7 +1436,9 @@ test("cuando el saldo iguala al tránsito, el control da verde", () => {
 });
 
 test("cuando no coincide, dice de qué se compone la diferencia", () => {
-  STATE.saldoCajaGeneral = { inicial: -2469.06, final: 18191.26, fechaFinal: "2026-01-31" };
+  // apertura efectiva = Balance Inicial (−2,469.06) + ajuste ME-00000002023 (18,123.07) = 15,654.01
+  STATE.transitoPrevio = null; STATE.diarioCaja = null;
+  STATE.saldoCajaGeneral = { inicial: 15654.01, final: 18191.26, fechaFinal: "2026-01-31" };
   STATE.results = {
     paso0: [
       { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-01-02", monto: 13003.97, concepto: "deposito", texto: "x" },

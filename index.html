@@ -439,7 +439,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.22";
+var APP_VERSION="2026.08.23";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4451,7 +4451,15 @@ function desgloseSaldoCaja(){
   // este saldo. Sin la distinción el renglón de retenciones salía negativo.
   var transitoCaja = Math.round((suma(p0, function(x){ return esEnTransito(x) && !entrante(x); }) +
                                  suma(p2, esEnTransito))*100)/100;
-  var compenso = suma(p0, function(x){ return esEnTransito(x) && entrante(x); });
+  // De lo que compensó durante el mes, cuánto sigue DENTRO del saldo. No se puede asumir que está todo:
+  // si el descargo ya se hizo, restarlo otra vez deja el renglón de retenciones en un número absurdo
+  // (pasó al registrar el descargo de enero: daba −12,037.82). Se deduce del propio saldo de apertura —
+  // lo que el navegador abre menos lo que el Paso 0 dice que sigue pendiente es lo que compensó y no se
+  // descargó todavía.
+  var pendientePaso0 = suma(p0, function(x){ return esEnTransito(x) && !entrante(x); });
+  var cuadre = cuadreSaldoInicialPaso0(STATE.transitoPrevio, s, STATE.diarioCaja);
+  var apertura = cuadre ? cuadre.apertura : (s.inicial || 0);
+  var compenso = Math.round(Math.max(0, apertura - pendientePaso0)*100)/100;
   var resto = Math.round((s.final - transitoCaja - compenso)*100)/100;
   var tm = transitoPorMetodo();
   return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto,
