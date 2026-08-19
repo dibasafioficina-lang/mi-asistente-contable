@@ -1403,12 +1403,6 @@ test("una celda ilegible queda registrada al leer el archivo", () => {
   eq(ilegiblesN, 1, "pero queda la señal para que el paso lo avise");
   eq(ilegiblesVals[0], "#REF!", "con el valor, para poder buscarlo en el Excel");
 });
-  ilegiblesN = 0; ilegiblesVals = [];
-  parseEstadoCuenta([["Fecha", "Descripción", "Débito", "Crédito", "Saldo"],
-                     ["2026-01-02", "CR REMISION", "0", "#REF!", "100"]], "banistmo");
-  eq(ilegiblesN, 1);
-  eq(ilegiblesVals[0], "#REF!", "y se guarda el valor para poder buscarlo en el Excel");
-});
 
 // Caso real: el informe de febrero trae "273.49-255.60-164.08-292.62" escrito en la celda de Cheque del
 // 12-feb. Se leía como 0 y por eso el reporte no cuadraba contra el diario — era la causa de las tres
