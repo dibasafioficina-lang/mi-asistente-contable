@@ -466,7 +466,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.25";
+var APP_VERSION="2026.08.26";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1140,6 +1140,14 @@ function parseEstadoCuenta(rows, tipo){
     : tipo==="stg" ? ["Fecha","Descripcion","Debitos","Creditos","Balance"]
     : ["Fecha","Descripcion","Debito","Credito"]; // bancogeneral (tolerante)
   var hIdx = findHeaderRow(rows, tokens);
+  // Banco General cambió el formato de exportación entre enero y febrero de 2026: donde antes traía dos
+  // columnas (Débito / Crédito) ahora trae una sola, "Monto", con el signo adentro. Sin este respaldo el
+  // archivo de febrero ni siquiera se lee y se cae la conciliación entera.
+  var cMonto = -1;
+  if(hIdx===-1 && tipo!=="banistmo" && tipo!=="stg"){
+    hIdx = findHeaderRow(rows, ["Fecha","Descripcion","Monto","Saldo"]);
+    if(hIdx>=0) cMonto = colIdx(rows[hIdx],"Monto");
+  }
   if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el estado de cuenta.");
   var cFecha = colIdx(rows[hIdx],"Fecha");
   var cDesc = colIdx(rows[hIdx],"Descripcion");
@@ -1149,6 +1157,8 @@ function parseEstadoCuenta(rows, tipo){
   else { // bancogeneral: probar plural y luego singular
     cDeb = colIdx(rows[hIdx],"Debitos"); if(cDeb<0) cDeb = colIdx(rows[hIdx],"Debito");
     cCred = colIdx(rows[hIdx],"Creditos"); if(cCred<0) cCred = colIdx(rows[hIdx],"Credito");
+    // Columna única con signo: negativo es lo que sale de la cuenta (débito), positivo lo que entra.
+    if(cDeb<0 && cCred<0 && cMonto<0) cMonto = colIdx(rows[hIdx],"Monto");
   }
   var out = [];
   for(var r=hIdx+1;r<rows.length;r++){
@@ -1157,7 +1167,12 @@ function parseEstadoCuenta(rows, tipo){
     var iso = toISODate(cFecha>=0?row[cFecha]:null, false);
     if(!iso) continue;
     var desc = cDesc>=0 ? String(row[cDesc]||"") : "";
-    out.push({fecha:iso, descripcion:desc, debito:money(row[cDeb]), credito:money(row[cCred]), fila:r+1});
+    var deb, cre;
+    if(cMonto>=0 && cDeb<0 && cCred<0){
+      var m = money(row[cMonto]);
+      deb = m<0 ? -m : 0; cre = m>0 ? m : 0;
+    } else { deb = money(row[cDeb]); cre = money(row[cCred]); }
+    out.push({fecha:iso, descripcion:desc, debito:deb, credito:cre, fila:r+1});
   }
   return out;
 }
@@ -1255,7 +1270,7 @@ function metodoDeposito(desc){
   if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
   return null;
 }
-function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte, aperturaCaja){
+function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte, aperturaCaja, transitoPrevio){
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
@@ -1316,6 +1331,42 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   });
   var repPorBancoDia = sumBy(repParaDia, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
 
+  /* ---- Descargo del tránsito del mes anterior ----
+     Con el crédito a Caja General registrado el día que el banco COMPENSA (y no el día del depósito), cada
+     mes arranca descargando lo que quedó en tránsito del mes pasado. Esa venta la reportó la cajera el mes
+     ANTERIOR, así que compararla contra el reporte de ESTE mes siempre da diferencia: en febrero de 2026
+     salían B/ 1,354.25 de depósitos a STG contra un reporte de cajeras en cero. El crédito se saca del
+     cotejo diario y se lista aparte, para que la exclusión quede a la vista y no parezca un olvido.
+     Dos condiciones, las dos necesarias: que el importe salga de las partidas en tránsito de ESE banco (una
+     sola o varias juntas, como acá que son cinco depósitos de Brinks), y que ese día el diario tenga un
+     excedente sobre el reporte que alcance para cubrirlo. Sin la segunda, un depósito legítimo del mes que
+     por casualidad coincida en monto con una partida en tránsito se borraría del cotejo sin decir nada. */
+  var descargos = [];
+  if(transitoPrevio && transitoPrevio.length){
+    var poolPrev = transitoPrevio.filter(pasaPorCajaGeneral).map(function(t){
+      return { fecha:t.fecha, monto:t.monto, banco:t.banco, concepto:t.concepto, usado:false };
+    });
+    var quedan = [];
+    cajaFiltrada.forEach(function(x){
+      var bk = clasificarBancoPorTexto(x.descripcion);
+      var exceso = Math.round(((cajaPorBancoDia[bk+"|"+x.fecha]||0) - (repPorBancoDia[bk+"|"+x.fecha]||0))*100)/100;
+      if(exceso < x.credito - tolerancia){ quedan.push(x); return; }   // el reporte de cajeras sí lo respalda
+      var pool = poolPrev.filter(function(p){ return p.banco===bk; });
+      // Ventana amplia a propósito: el tránsito puede venir de hace dos o tres meses (un cheque de
+      // diciembre que recién clarea). "atras" impide tomar partidas posteriores al crédito.
+      var idx = buscarSubsetSuma(pool, x.fecha, x.credito, 400, tolerancia, 12, "atras");
+      if(!idx){ quedan.push(x); return; }
+      var usadas = idx.map(function(k){ return pool[k]; });
+      usadas.forEach(function(p){ p.usado = true; });   // ningún crédito descarga dos veces la misma partida
+      descargos.push({ fecha:x.fecha, banco:bk, monto:x.credito, ref:x.referencia, partidas:usadas });
+    });
+    if(descargos.length){
+      cajaFiltrada = quedan;
+      cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
+        function(x){ return x.credito; });
+    }
+  }
+
   // Depósitos ACH/cheque que el sistema NO etiquetó con banco, por día (para explicar diferencias
   // "positivas" donde el reporte asigna a un banco pero el sistema registró el depósito sin banco).
   var sinBancoPorDia = {};
@@ -1346,6 +1397,17 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   Object.keys(cajaPorBancoDia).forEach(function(k){ dias[k.split("|")[1]] = true; });
 
   var hallazgos = [];
+  descargos.forEach(function(dg){
+    hallazgos.push({
+      fecha:dg.fecha, banco:dg.banco, monto:dg.monto, clase:"informativo", concepto:"Descargo de tránsito",
+      texto: "Descargo del tránsito del mes anterior: el crédito a Caja General de B/ " + fmt(dg.monto) + " del " +
+             dg.fecha + " (" + dg.banco + ") descarga " + dg.partidas.length + " partida(s) que venían en tránsito y " +
+             "compensaron en el banco este mes, así que NO se compara contra el reporte de cajeras — esa venta la " +
+             "reportaron el mes pasado: " + dg.partidas.map(function(p){ return p.fecha + " B/ " + fmt(p.monto); }).join(", ") +
+             "." + comprobanteTxt(dg.fecha, dg.ref),
+      fuente: "Resumen en tránsito del mes anterior / Diario Caja General"
+    });
+  });
   Object.keys(dias).sort().forEach(function(fecha){
     // diferencia por banco ese día (reporte de cajeras vs crédito del sistema)
     var d = {};
@@ -2349,7 +2411,8 @@ function computaPaso(pasoKey, raws, opts){
     // General sin ser un depósito (los ajustes de apertura los cuenta el Paso 0, no el Paso 1).
     var apertura = STATE.saldoCajaGeneral ? STATE.saldoCajaGeneral.fechaInicial : null;
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"),
-                 parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura);
+                 parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura,
+                 raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null);
   }
   if(pasoKey==="paso2"){
     if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;

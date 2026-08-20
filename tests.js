@@ -1510,6 +1510,57 @@ test("el panel de períodos cierra su propio recuadro", () => {
   if (abre !== cierra) throw new Error("quedan " + (abre-cierra) + " div sin cerrar");
 });
 
+test("el descargo del tránsito del mes anterior no se cuenta como diferencia", () => {
+  // Febrero 2026: un solo crédito de 1,354.25 a STG el 28-feb descarga los cinco depósitos que quedaron
+  // en tránsito de enero. La cajera reportó esa venta en ENERO, así que el reporte de febrero no la trae.
+  const diario = [{ fecha: "2026-02-28", debito: 0, credito: 1354.25, descripcion: "DESCARGO DEL DEPOSITO STG EN TRANSITO DE ENERO", referencia: "ME-00000001896", fila: 90 }];
+  const transito = [
+    { fecha: "2026-01-28", banco: "STG", monto: 405.00, concepto: "DEPOSITO BRINKS DEL 28/01/2026", sentido: "credito" },
+    { fecha: "2026-01-29", banco: "STG", monto: 195.00, concepto: "DEPOSITO BRINKS DEL 29/01/2026", sentido: "credito" },
+    { fecha: "2026-01-30", banco: "STG", monto: 751.00, concepto: "DEPOSITO BRINKS DEL 30/01/2026", sentido: "credito" },
+    { fecha: "2026-01-30", banco: "STG", monto: 1.30, concepto: "DEPOSITO DEL 30/01/2026", sentido: "credito" },
+    { fecha: "2026-01-31", banco: "STG", monto: 1.95, concepto: "DEPOSITO DEL 31/01/2026", sentido: "credito" }
+  ];
+  const sin = paso1([], diario, null, 0.01, [], "2026-02-01", null);
+  eq(contarRojas(sin), 1, "sin el tránsito previo sale como diferencia");
+  const con = paso1([], diario, null, 0.01, [], "2026-02-01", transito);
+  eq(contarRojas(con), 0, "con el tránsito previo deja de ser diferencia");
+  // La exclusión se lista: sacarla en silencio haría parecer que ese crédito nunca existió.
+  const inf = con.filter(x => x.clase === "informativo" && /Descargo del tránsito/.test(x.texto));
+  eq(inf.length, 1, "falta el informativo del descargo");
+  if (inf[0].texto.indexOf("5 partida(s)") < 0) throw new Error("no dice cuántas partidas descarga");
+  if (inf[0].texto.indexOf("ME-00000001896") < 0) throw new Error("no cita el comprobante");
+});
+
+test("un depósito que el reporte de cajeras sí respalda no se toma por descargo", () => {
+  // Mismo importe que una partida en tránsito, pero la cajera lo reportó ESTE mes: es venta del mes y
+  // tiene que seguir cotejándose. Sin esta condición el cotejo se borraría solo por coincidir el monto.
+  const reporte = [{ fecha: "2026-02-10", banco: "STG", metodo: "CLAVE", monto: 405.00, cajera: "A" }];
+  const diario = [{ fecha: "2026-02-10", debito: 0, credito: 405.00, descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 10/02/2026", referencia: "ME-2", fila: 5 }];
+  const transito = [{ fecha: "2026-01-28", banco: "STG", monto: 405.00, concepto: "DEPOSITO BRINKS DEL 28/01/2026", sentido: "credito" }];
+  const h = paso1(reporte, diario, null, 0.01, [], "2026-02-01", transito);
+  eq(contarRojas(h), 0, "el día cuadra");
+  eq(h.filter(x => /Descargo del tránsito/.test(x.texto || "")).length, 0, "no debía tomarlo por descargo");
+});
+
+test("el estado de Banco General se lee con una sola columna Monto con signo", () => {
+  // Banco General cambió el formato entre enero y febrero de 2026: antes Débito/Crédito, ahora un solo
+  // "Monto" firmado. Sin esto el archivo de febrero no se leía y se caía la conciliación entera.
+  const rows = [
+    ["Numero de Cuenta:03-30-00-000067-9"],
+    ["Movimientos desde 01-feb-2026 hasta 28-feb-2026"],
+    ["Fecha", "Referencia", "Descripción", "Monto", "Saldo total"],
+    ["2026-02-28", "305", "COMISION MENSUAL POR SERVICIO BANCA EN LINEA", -5.35, 978.60],
+    ["2026-02-20", "410", "DEPOSITO YAPPY", 120.50, 983.95]
+  ];
+  const e = parseEstadoCuenta(rows, "bancogeneral");
+  eq(e.length, 2);
+  cerca(e[0].debito, 5.35, "el monto negativo es un débito");
+  cerca(e[0].credito, 0);
+  cerca(e[1].credito, 120.50, "el positivo es un crédito");
+  cerca(e[1].debito, 0);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
