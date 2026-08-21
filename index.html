@@ -447,7 +447,10 @@ var STATE = {
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
   parsed:{},
-  options:{ ventanaDias:3, tolerancia:0.01 },
+  // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
+  // acredita sin que un feriado largo lo distorsione. Medido contra enero y febrero de 2026, subirla de 3
+  // a 7 no movió ni un hallazgo ni una partida en tránsito: no afloja el cotejo, solo deja de cortarlo.
+  options:{ ventanaDias:7, tolerancia:0.01 },
   results:null,
   saldoCajaGeneral:null,
   transitoPrevio:null,
@@ -466,7 +469,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.28";
+var APP_VERSION="2026.08.29";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){

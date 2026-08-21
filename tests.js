@@ -1606,6 +1606,15 @@ test("un estado de cuenta de pocas líneas no arma calendario bancario", () => {
   eq(distanciaBancaria("2026-02-13", "2026-02-18"), 5, "sin calendario, días de calendario");
 });
 
+test("la ventana por defecto es de 7 dias habiles", () => {
+  // 7 dias habiles del banco cubren el rezago real de acreditacion. Bajarla vuelve a cortar cotejos
+  // legitimos cuando cae un feriado largo; subirla sin medir arriesga emparejar partidas ajenas.
+  // Se lee del fuente y no de STATE: otras pruebas le cambian las opciones al vuelo.
+  const m = html.match(/options:\{ ventanaDias:(\d+)/);
+  if (!m) throw new Error("no se encontró el valor por defecto en el fuente");
+  eq(parseInt(m[1], 10), 7);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
