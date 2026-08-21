@@ -1615,6 +1615,41 @@ test("la ventana por defecto es de 7 dias habiles", () => {
   eq(parseInt(m[1], 10), 7);
 });
 
+test("el aviso de celda ilegible dice archivo, hoja, celda, fila y columna", () => {
+  // Caso real: en el informe de febrero alguien escribió los cuatro cheques del día seguidos en la celda
+  // del método. "Buscalo en el Excel" no alcanza: el informe tiene 30 columnas y dos filas de encabezado.
+  const filas = [];
+  filas[5] = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"CHEQUE"];
+  filas[6] = ["Fecha","Empresa","Cajera",null,null,null,null,null,null,null,null,null,null,null,null,"Cheque\nSr.George","Cheque\nBanistmo"];
+  filas[18] = ["2026-02-12","PETTY SHOP","DARITZA",80,null,null,null,null,null,null,null,null,null,null,null,0,"273.49-255.60-164.08-292.62"];
+  const libro = filas; libro.hojas = { "FEBRERO ": filas };
+  STATE.files = { reporte: { name: "resumen de caja febrero petty.xlsx" } };
+  const u = ubicarIlegible({ reporte: libro }, "273.49-255.60-164.08-292.62");
+  if (!u) throw new Error("no encontró la celda");
+  eq(u.celda, "Q19", "columna 17 = Q, fila 19");
+  eq(u.hoja, "FEBRERO ");
+  eq(u.fecha, "2026-02-12");
+  eq(u.columna, "Cheque / Banistmo", "el encabezado viene en dos renglones");
+  eq(u.quien, "Cajera DARITZA");
+  const t = textoUbicacion(u);
+  ["resumen de caja febrero petty.xlsx", "hoja FEBRERO", "celda Q19", "Cheque / Banistmo"].forEach(function(x){
+    if (t.indexOf(x) < 0) throw new Error("falta en el texto: " + x);
+  });
+  // Un valor que no está en ningún libro no revienta: el aviso sale igual, sin ubicación.
+  eq(ubicarIlegible({ reporte: libro }, "no existe"), null);
+  eq(textoUbicacion(null), "");
+  STATE.files = {};
+});
+
+test("el valor ilegible se guarda completo, no recortado", () => {
+  // Se recortaba a 24 caracteres y así no se podía volver a buscar la celda en el libro.
+  ilegiblesN = 0; ilegiblesVals = [];
+  money("273.49-255.60-164.08-292.62");
+  eq(ilegiblesN, 1);
+  eq(ilegiblesVals[0], "273.49-255.60-164.08-292.62");
+  ilegiblesN = 0; ilegiblesVals = [];
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

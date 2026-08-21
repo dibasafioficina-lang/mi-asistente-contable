@@ -469,7 +469,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.29";
+var APP_VERSION="2026.08.30";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -502,8 +502,78 @@ var ilegiblesN = 0;      // cuántas celdas no se pudieron leer durante el paso
 var ilegiblesVals = [];  // los valores distintos, para poder buscarlos en el Excel
 function registrarIlegible(v){
   ilegiblesN++;
-  var t = String(v).replace(/\s+/g," ").trim().slice(0,24);
+  var t = String(v).replace(/\s+/g," ").trim();   // completo: ubicarIlegible lo busca tal cual en el libro
   if(ilegiblesVals.length < 12 && ilegiblesVals.indexOf(t) === -1) ilegiblesVals.push(t);
+}
+/* ---- Donde esta la celda ilegible ----
+   Decirle a alguien "hay una celda con texto, buscala" es dejarle el trabajo entero: el informe de
+   cajeras tiene 30 columnas y dos filas de encabezado. Como el valor ilegible se guarda tal cual, se
+   puede volver a buscar en los libros ya cargados y devolver archivo, hoja, celda, fila y columna.
+   La busqueda es a posteriori, asi que ningun parser tiene que arrastrar coordenadas. */
+function letraCol(n){
+  var s = "";
+  do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n/26) - 1; } while(n >= 0);
+  return s;
+}
+function etiquetaEncabezado(v){ return String(v).replace(/\s*\n\s*/g, " / ").replace(/\s+/g, " ").trim(); }
+function ubicarIlegible(raws, valor){
+  if(!raws) return null;
+  var buscado = String(valor).replace(/\s+/g," ").trim();
+  var claves = Object.keys(raws);
+  for(var q=0;q<claves.length;q++){
+    var libro = raws[claves[q]]; if(!libro) continue;
+    var hojas = libro.hojas || {"": libro};
+    var nombres = Object.keys(hojas);
+    for(var s=0;s<nombres.length;s++){
+      var rows = hojas[nombres[s]]; if(!rows || !rows.length) continue;
+      for(var r=0;r<rows.length;r++){
+        var row = rows[r]; if(!row) continue;
+        for(var c=0;c<row.length;c++){
+          if(typeof row[c] !== "string") continue;
+          if(row[c].replace(/\s+/g," ").trim() !== buscado) continue;
+          return detalleCelda(claves[q], nombres[s], rows, r, c);
+        }
+      }
+    }
+  }
+  return null;
+}
+// Encabezado de la columna y datos que identifican la fila. El encabezado es la celda no vacia mas
+// cercana hacia arriba en esa misma columna; desde esa fila se leen las columnas de identificacion
+// (Fecha, Cajera, Concepto, Referencia) que esten a la izquierda.
+function detalleCelda(clave, hoja, rows, r, c){
+  var hr = -1;
+  for(var k=r-1;k>=0 && k>=r-40;k--){
+    var v = rows[k] && rows[k][c];
+    if(v!==null && v!==undefined && String(v).trim()!=="" && isNaN(Number(v))){ hr = k; break; }
+  }
+  var columna = hr>=0 ? etiquetaEncabezado(rows[hr][c]) : "";
+  var fecha = "", quien = "";
+  var fila = rows[r] || [];
+  for(var j=0;j<c;j++){
+    if(!fecha){ var iso = toISODate(fila[j], false); if(iso) fecha = iso; }
+    if(hr>=0){
+      var etq = normTxt(rows[hr][j]);
+      if(/CAJERA|CONCEPTO|DESCRIPCION|REFERENCIA/.test(etq) && fila[j]!==null && fila[j]!==undefined &&
+         String(fila[j]).trim()!==""){
+        quien = etiquetaEncabezado(rows[hr][j]) + " " + String(fila[j]).trim();
+      }
+    }
+  }
+  return { clave:clave, hoja:hoja, celda:letraCol(c)+(r+1), fecha:fecha, quien:quien, columna:columna };
+}
+function textoUbicacion(u){
+  if(!u) return "";
+  var arch = (STATE.files[u.clave] && STATE.files[u.clave].name) || NOMBRE_TIPO[u.clave] || u.clave;
+  var t = "Archivo: " + arch + (u.hoja ? " · hoja " + u.hoja.trim() : "") + " · celda " + u.celda;
+  var det = [];
+  if(u.fecha) det.push("la fila del " + u.fecha);
+  if(u.quien) det.push("(" + u.quien + ")");
+  if(u.columna) det.push("columna " + u.columna);
+  if(!det.length) return t;
+  var cola = det[0] + (det.length>1 && u.quien ? " " + det[1] : "");
+  if(u.columna) cola += ", columna " + u.columna;
+  return t + " — " + cola;
 }
 function money(v){
   if(v===null||v===undefined||v==="") return 0;
@@ -2430,10 +2500,16 @@ function computePasoResult(pasoKey, raws, opts){
     res.push({
       fecha:"", banco:"", monto:0, clase:"aviso",
       concepto:"Celdas que no se pudieron leer", comprobante:"", motivo:"dato ilegible en el archivo",
-      texto:"En este paso hubo " + ilegiblesN + " celda(s) de importe que no se pudieron leer como número" +
-            (ilegiblesVals.length ? " (" + ilegiblesVals.join(", ") + ")" : "") +
-            ". Se tomaron como cero, así que esas partidas NO entraron al cotejo y el resultado puede " +
-            "estar incompleto. Buscá esos valores en el Excel y volvé a exportarlo.",
+      // Cada valor ilegible se vuelve a buscar en los libros cargados para decir en qué archivo, hoja y
+      // celda está. Sin eso el aviso obliga a rastrear a mano un informe de 30 columnas.
+      texto:"En este paso hubo " + ilegiblesN + " celda(s) de importe que no se pudieron leer como número. " +
+            "Se tomaron como cero, así que esas partidas NO entraron al cotejo y el resultado puede estar " +
+            "incompleto. Corregilas en el Excel y volvé a exportarlo." +
+            ilegiblesVals.map(function(v){
+              var u = textoUbicacion(ubicarIlegible(raws, v));
+              return "\n" + "· «" + v.slice(0,60) + "»" +
+                     (u ? " — " + u : " (no se encontró la celda en los archivos cargados)");
+            }).join(""),
       fuente:"Lectura de los archivos"
     });
   }
