@@ -1650,6 +1650,18 @@ test("el valor ilegible se guarda completo, no recortado", () => {
   ilegiblesN = 0; ilegiblesVals = [];
 });
 
+test("los pasos recogidos se recuerdan entre sesiones", () => {
+  // La lista se vuelve a dibujar entera con cada tilde de "corregido": sin guardar el estado, cada clic
+  // desplegaria de nuevo todo lo que se habia recogido.
+  Object.keys(PLEGADOS).forEach(function(k){ delete PLEGADOS[k]; });
+  plegarPaso("paso2", true);
+  eq(PLEGADOS.paso2, true);
+  eq(leerPrefs().plegados.paso2, true, "tiene que quedar en las preferencias");
+  plegarPaso("paso2", false);
+  eq(PLEGADOS.paso2, undefined, "al desplegar se borra la clave, no queda en false");
+  eq(leerPrefs().plegados.paso2, undefined);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

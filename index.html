@@ -185,6 +185,13 @@
   .step-head h4{font-family:"DM Serif Display",serif;font-weight:400;font-size:16px;color:var(--heading)}
   .step-head .count{font-family:"Mulish";font-size:12.5px;font-weight:700;color:var(--brand-dark)}
   .step-body{padding:6px 20px 16px}
+  .step-head .lado{display:flex;align-items:center;gap:10px;min-width:0}
+  .step-head .chev{font-size:11px;color:var(--brand-dark);flex-shrink:0;transition:transform .18s ease}
+  .step-block.plegado .step-head .chev{transform:rotate(-90deg)}
+  .step-block.plegado .step-body{display:none}
+  .step-block.plegado{box-shadow:0 3px 10px rgba(158,104,126,.05)}
+  .btn-plegar{background:none;border:none;color:var(--brand);font-weight:800;font-size:12.5px;cursor:pointer;padding:0}
+  .btn-plegar:hover{color:var(--brand-dark);text-decoration:underline}
   .finding{display:flex;gap:14px;align-items:flex-start;padding:14px 4px;border-bottom:1px solid var(--line)}
   .finding:last-child{border-bottom:none}
   .finding input[type=checkbox]{margin-top:3px;width:18px;height:18px;accent-color:var(--brand);flex-shrink:0}
@@ -467,9 +474,16 @@ var STATE = {
 var PREF_KEY="miAsistenteContable.prefs";
 function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}")||{}; }catch(e){ return {}; } }
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
+// Pasos recogidos, por clave de paso. Se lee una sola vez al cargar y se guarda en cada clic.
+var PLEGADOS = leerPrefs().plegados || {};
+function guardarPlegados(){ guardarPref("plegados", PLEGADOS); }
+function plegarPaso(key, valor){
+  if(valor) PLEGADOS[key] = true; else delete PLEGADOS[key];
+  guardarPlegados();
+}
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.30";
+var APP_VERSION="2026.08.31";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4298,8 +4312,9 @@ function renderResultados(){
   // el resto SALE al próximo mes (fin de mes o cheque pendiente por cambiar).
   function esTransitoEntrante(item){ return /mes anterior/i.test(item.motivo||""); }
 
-  var html = '<div class="results-head"><h2>Hallazgos</h2>' +
-    '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></div>';
+  var html = '<div class="results-head"><h2>Hallazgos</h2><span style="display:flex;gap:14px;align-items:center">' +
+    '<button class="btn-plegar" id="btnPlegarTodos" type="button"></button>' +
+    '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></span></div>';
   html += periodosHtml(STATE.periodos); // primero: si un archivo es de otro mes, nada de lo demás es confiable
   // El total del resumen del Paso 0 tiene que ser el saldo inicial de Caja General. Va ACÁ ARRIBA y no
   // dentro del bloque del Paso 0: cuando la caja cuadra, los pasos sin diferencias no se dibujan y la
@@ -4380,7 +4395,13 @@ function renderResultados(){
       : (rojas.length+' diferencia(s)' + (sinConf.length? ' · '+sinConf.length+' sin confirmar' : '') + (enTransito.length? ' · '+enTransito.length+' en tránsito' : '') + (efectivo.length? ' · '+efectivo.length+' efectivo' : '') + (avisos.length? ' · '+avisos.length+' aviso(s)' : ''));
     if(esArray) clavesPaso[p.key] = clavesDeHallazgos(p.key, items);
     var idxPaso = PASO_ORDEN.indexOf(p.key);
-    html += '<div class="step-block'+(cuadrado?' cuadrado':'')+'"><div class="step-head"><h4>'+p.titulo+'</h4>' +
+    // Cada paso se puede recoger para sacarlo de la vista una vez revisado. El estado vive en las
+    // preferencias, así que sobrevive a los re-render (cada tilde vuelve a dibujar la lista entera) y a
+    // recargar la página. Al imprimir salen todos desplegados: el @media print lo fuerza con !important.
+    var plegado = !!PLEGADOS[p.key];
+    html += '<div class="step-block'+(cuadrado?' cuadrado':'')+(plegado?' plegado':'')+'">' +
+      '<div class="step-head" data-plegar="'+p.key+'" role="button" tabindex="0" aria-expanded="'+(plegado?"false":"true")+'">' +
+      '<span class="lado"><span class="chev">&#9662;</span><h4>'+p.titulo+'</h4></span>' +
       '<span class="count">'+countTxt+'</span></div><div class="step-body">';
     // Contexto del saldo inicial de Caja General (Pasos 2 y 3): dinero en tránsito arrastrado del mes anterior.
     if((p.key==="paso2" || p.key==="paso3") && esArray && STATE.saldoCajaGeneral){
@@ -4459,6 +4480,7 @@ function renderResultados(){
       renderResultados();
     });
   });
+  bindPlegado(area);              // recoger / desplegar cada paso
   document.getElementById("exportBtn").onclick = exportarChecklist;
   var btnT = document.getElementById("btnTransito");
   if(btnT) btnT.onclick = exportarEnTransito;
@@ -4884,6 +4906,54 @@ function bindPrintCG(){
   };
 }
 
+/* ---- Recoger y desplegar cada paso ----
+   Con cuatro pasos abiertos hay que hacer mucho scroll para llegar a lo que falta; recoger los que ya se
+   revisaron deja a la vista solo lo pendiente. Se cambia la clase en el bloque en vez de volver a
+   dibujar todo: un re-render completo perdería la posición del scroll justo cuando se está revisando. */
+function bindPlegado(area){
+  if(!area) return;
+  area.querySelectorAll(".step-head[data-plegar]").forEach(function(h){
+    function alternar(){
+      var bloque = h.parentNode;
+      var plegado = !bloque.classList.contains("plegado");
+      bloque.classList.toggle("plegado", plegado);
+      h.setAttribute("aria-expanded", plegado ? "false" : "true");
+      plegarPaso(h.getAttribute("data-plegar"), plegado);
+      pintarBotonPlegarTodos(area);
+    }
+    h.addEventListener("click", alternar);
+    h.addEventListener("keydown", function(e){
+      if(e.key === "Enter" || e.key === " " || e.key === "Spacebar"){ e.preventDefault(); alternar(); }
+    });
+  });
+  var todos = document.getElementById("btnPlegarTodos");
+  if(todos){
+    todos.onclick = function(){
+      var bloques = area.querySelectorAll(".step-head[data-plegar]");
+      var plegar = !todosPlegados(area);   // si ya están todos recogidos, el botón despliega
+      bloques.forEach(function(h){
+        h.parentNode.classList.toggle("plegado", plegar);
+        h.setAttribute("aria-expanded", plegar ? "false" : "true");
+        plegarPaso(h.getAttribute("data-plegar"), plegar);
+      });
+      pintarBotonPlegarTodos(area);
+    };
+  }
+  pintarBotonPlegarTodos(area);
+}
+function todosPlegados(area){
+  var hs = area.querySelectorAll(".step-head[data-plegar]");
+  if(!hs.length) return false;
+  for(var i=0;i<hs.length;i++){ if(!hs[i].parentNode.classList.contains("plegado")) return false; }
+  return true;
+}
+function pintarBotonPlegarTodos(area){
+  var b = document.getElementById("btnPlegarTodos");
+  if(!b) return;
+  var hay = area.querySelectorAll(".step-head[data-plegar]").length;
+  b.style.display = hay ? "" : "none";
+  b.textContent = todosPlegados(area) ? "Desplegar todos" : "Recoger todos";
+}
 function bindCajaInputs(){
   var ci = document.getElementById("cajaInicial");
   var cs = document.getElementById("cajaSistema");
