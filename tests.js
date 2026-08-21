@@ -1576,6 +1576,36 @@ test("el estado de Banco General con columna Monto se acepta al subirlo", () => 
   if (!validarArchivoParaCasilla("estStg", rows)) throw new Error("debería alertar en la casilla de STG");
 });
 
+test("la ventana de días se mide en días hábiles del banco, no de calendario", () => {
+  // Febrero 2026: el banco no tuvo un solo movimiento el 15, 16 ni 17 (domingo y los dos días de
+  // carnaval). Los depósitos CLAVE de STG del 13 y el 14 compensaron el 18 y con la ventana de 3 días de
+  // calendario salían como diferencia aunque estuvieran cotejados.
+  const filas = [["Fecha", "Descripcion", "Debitos", "Creditos", "Balance"]];
+  ["02","03","04","05","06","09","10","11","12","13","14","18","19","20","23"].forEach(function(d){
+    filas.push(["2026-02-" + d, "MOVIMIENTO", 0, 10, 100]);
+  });
+  fijarCalendarioBancario({ estStg: filas });
+  eq(distanciaBancaria("2026-02-13", "2026-02-18"), 2, "del 13 al 18 hay 2 días hábiles");
+  eq(distanciaBancaria("2026-02-14", "2026-02-18"), 1);
+  eq(distanciaBancaria("2026-02-12", "2026-02-13"), 1, "días seguidos siguen a distancia 1");
+  eq(daysBetween("2026-02-13", "2026-02-18"), 5, "el calendario no cambia");
+  // Fuera del período que cubren los estados no se descuenta nada: ahí no sabemos si el banco cerró o
+  // si el archivo simplemente no llega hasta esa fecha.
+  eq(distanciaBancaria("2026-03-10", "2026-03-15"), 5, "fuera del rango, días de calendario");
+  CAL_BANCARIO = null;
+});
+
+test("un estado de cuenta de pocas líneas no arma calendario bancario", () => {
+  // El de Banco General trae una sola línea al mes. Si eso definiera los días hábiles, todo el resto del
+  // mes contaría como inhábil y la ventana se volvería infinita.
+  fijarCalendarioBancario({ estBancoGeneral: [
+    ["Fecha", "Referencia", "Descripción", "Monto", "Saldo total"],
+    ["2026-02-28", "305", "COMISION MENSUAL", -5.35, 978.60]
+  ]});
+  eq(CAL_BANCARIO, null, "no debería armarlo con tan pocos días");
+  eq(distanciaBancaria("2026-02-13", "2026-02-18"), 5, "sin calendario, días de calendario");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

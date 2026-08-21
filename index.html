@@ -466,7 +466,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.27";
+var APP_VERSION="2026.08.28";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1709,10 +1709,57 @@ function conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolera
     }
   });
 }
+/* ---- Calendario bancario ----
+   El banco no acredita sábados, domingos ni feriados, así que una ventana de 3 días de CALENDARIO se
+   come un fin de semana largo y da por no cotejado algo que sí compensó: los depósitos CLAVE de STG del
+   13 y el 14 de febrero de 2026 compensaron el 18 —el estado no tiene una sola línea el 15, 16 ni 17,
+   que fueron domingo y los dos días de carnaval— y salían como diferencia. La ventana se mide en días
+   CON movimiento bancario: del 13 al 18 hay 2, no 5.
+   El calendario es la UNIÓN de los tres estados de cuenta: un día en que operó un banco es día hábil
+   aunque otro no tenga movimientos. Tomarlo banco por banco descontaría días que sí fueron hábiles y
+   aflojaría el cotejo. */
+var CAL_BANCARIO = null;   // {dias:{iso:true}, min:iso, max:iso}
+function fijarCalendarioBancario(raws){
+  CAL_BANCARIO = null;
+  if(!raws) return;
+  var dias = {}, n = 0;
+  [["estBanistmo","banistmo"],["estStg","stg"],["estBancoGeneral","bancogeneral"]].forEach(function(p){
+    if(!raws[p[0]]) return;
+    try{
+      parseEstadoCuenta(raws[p[0]], p[1]).forEach(function(x){
+        if(x.fecha && !dias[x.fecha]){ dias[x.fecha] = true; n++; }
+      });
+    }catch(e){}
+  });
+  // Con muy pocos días no se puede afirmar qué día el banco no operó (un estado de una sola línea
+  // marcaría todo el resto del mes como inhábil y el cotejo se volvería un colador).
+  if(n < 8) return;
+  var ks = Object.keys(dias).sort();
+  CAL_BANCARIO = { dias:dias, min:ks[0], max:ks[ks.length-1] };
+}
+function diaSiguiente(iso){
+  var d = new Date(iso+"T00:00:00"); d.setDate(d.getDate()+1);
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+// Días de calendario menos los que caen DENTRO del período que cubren los estados y no tienen ni un
+// movimiento. Fuera de ese período no se descuenta nada: ahí no sabemos si el banco cerró o si el
+// archivo simplemente no llega hasta esa fecha.
+function distanciaBancaria(iso1, iso2){
+  var d = daysBetween(iso1, iso2);
+  if(!CAL_BANCARIO || !(d > 1) || d === Infinity) return d;
+  var a = iso1 < iso2 ? iso1 : iso2;
+  var muertos = 0, cur = a;
+  for(var k=1;k<d;k++){
+    cur = diaSiguiente(cur);
+    if(cur < CAL_BANCARIO.min || cur > CAL_BANCARIO.max) continue;
+    if(!CAL_BANCARIO.dias[cur]) muertos++;
+  }
+  return d - muertos;
+}
 function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
-  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && daysBetween(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
+  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && distanciaBancaria(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
   var a, b, c;
   for(a=0;a<idxs.length;a++){ if(Math.abs(montoConc(pool[idxs[a]]) - objetivo) <= tolerancia) return [idxs[a]]; }
   for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++){
@@ -1742,7 +1789,7 @@ function buscarSubsetSuma(pool, fecha, objetivo, ventanaDias, tolerancia, maxN, 
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
   for(var i=0;i<pool.length;i++){
-    if(pool[i].usado || daysBetween(fecha, pool[i].fecha) > ventanaDias) continue;
+    if(pool[i].usado || distanciaBancaria(fecha, pool[i].fecha) > ventanaDias) continue;
     if(direccion==="adelante" && pool[i].fecha < fecha) continue; // el depósito no puede ser anterior al cheque
     if(direccion==="atras" && pool[i].fecha > fecha) continue;    // el cheque no puede ser posterior al depósito
     idxs.push(i);
@@ -1790,7 +1837,7 @@ function buscarBrinks(pool, fecha, objetivo, ventanaDias, tolerancia){
   for(var i=0;i<pool.length;i++){
     if(pool[i].usado || !esBrinks(pool[i].descripcion)) continue;
     if(Math.abs(pool[i].monto - objetivo) > tolerancia) continue;
-    var dist = daysBetween(fecha, pool[i].fecha);
+    var dist = distanciaBancaria(fecha, pool[i].fecha);
     if(dist <= ventanaDias && dist < mejorDist){ mejor = i; mejorDist = dist; }
   }
   return mejor>=0 ? [mejor] : null;
@@ -2112,7 +2159,7 @@ function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia)
       if(normTxt(b.descripcion).indexOf("ABORTED")!==-1) return;
       var montoB = b[campoB];
       if(Math.abs(montoA-montoB) <= tolerancia){
-        var dist = daysBetween(a.fecha, b.fecha);
+        var dist = distanciaBancaria(a.fecha, b.fecha);
         if(dist <= ventanaDias && dist < mejorDist){ mejor = idxB; mejorDist = dist; }
       }
     });
@@ -2300,7 +2347,7 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
       if(Math.abs(r.credito - d.neto) <= tolerancia){
         // El deposito bancario ocurre el mismo dia del cierre o hasta N dias despues, nunca antes.
         if(r.fecha < d.fecha) return;
-        var dist = daysBetween(d.fecha, r.fecha);
+        var dist = distanciaBancaria(d.fecha, r.fecha);
         if(dist<=ventanaDias && dist<mejorDist){ mejor=idx; mejorDist=dist; }
       }
     });
@@ -2390,6 +2437,8 @@ function computePasoResult(pasoKey, raws, opts){
   return res;
 }
 function computaPaso(pasoKey, raws, opts){
+  // La ventana de días se mide sobre los días con movimiento bancario, no sobre el calendario.
+  fijarCalendarioBancario(raws);
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
   // mostrarlo como contexto de partidas en tránsito entre meses.
   if(raws.diarioCaja){
