@@ -259,6 +259,7 @@
   .cg-print{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-weight:800;font-size:11px;
     letter-spacing:.3px;padding:5px 13px;border-radius:999px;cursor:pointer;text-transform:none;flex-shrink:0}
   .cg-print:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .cg-prov{background:#FDF3E7;border:1px solid #F0DCC2;border-radius:8px;padding:8px 10px;color:#8A6534}
   .cg-solo-head, .cg-solo-pie{display:none}   /* solo salen en el papel */
   .dif-sub{margin:14px 0 6px;font-size:13px;font-weight:700;color:var(--heading)}
   .dif-sub b{font-family:"Mulish";font-weight:800;white-space:nowrap}
@@ -483,7 +484,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.31";
+var APP_VERSION="2026.09.01";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4373,6 +4374,10 @@ function renderResultados(){
       (bancosTxt ? '<br>'+bancosTxt : '') +
       '<br>Aún quedan diferencias por resolver; el resumen ya está listo (sale del Paso 0 y del Paso 2).</div>' +
       '</div><button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button></div>';
+    // El reporte de Caja General va SIEMPRE que haya saldo, cuadre o no: es el resumen final que se
+    // imprime como papel de trabajo, y antes solo existía si los Pasos 1 y 2 cerraban — justo cuando
+    // menos falta hace. Adentro avisa cuántas diferencias quedaban abiertas al emitirlo.
+    html += desgloseSaldoCajaHtml();
   }
 
   pasosMeta.forEach(function(p){
@@ -4767,12 +4772,31 @@ function cargosTarjetaPorBanco(){
    banco. Para que se cumpla, el crédito a la cuenta se registra cuando el BANCO COMPENSA, no el día del
    depósito. Mientras la mecánica sea la vieja —acreditar al depositar— este control queda en rojo, y el
    desglose dice qué asiento falta en cada caso. */
+// Diferencias rojas sin resolver en toda la conciliación. Si el reporte se imprime con alguna abierta,
+// el papel tiene que decirlo: si no, se archiva un cuadre que en realidad no cerró.
+function rojasAbiertas(){
+  var n = 0;
+  ["paso0"].concat(PASO_ORDEN).forEach(function(k){
+    var r = STATE.results && STATE.results[k];
+    if(Array.isArray(r)) n += contarRojas(r);
+  });
+  return n;
+}
 function desgloseSaldoCajaHtml(){
   // El reporte se puede imprimir solo, sin el resto de la pantalla, así que en el papel tiene que llevar
   // su propio encabezado y su pie de trazabilidad: de qué período es y con qué archivos se hizo.
   function cerrar(x){ return x + '<div class="cg-solo-pie">'+pieModulo1Html()+'</div></div>'; }
   var d = desgloseSaldoCaja();
+  if(!d){
+    var s0 = STATE.saldoCajaGeneral;
+    if(!s0) return "";   // no hay navegador de Caja General: no hay nada que comparar
+    return '<div class="cg-box"><div class="cg-h">Saldo de Caja General vs. tránsito al cierre</div>' +
+      '<div class="cg-note">No se pudo leer el <b>Balance Final</b> del navegador de Caja General, así que ' +
+      'este control no se puede calcular. Suele pasar cuando el archivo se editó a mano y se borraron las ' +
+      'filas de totales — volvé a exportarlo sin tocarlo.</div></div>';
+  }
   if(!d) return "";
+  var abiertas = rojasAbiertas();
   var dif = Math.round((d.final - d.totalResumen)*100)/100;
   var ok = Math.abs(dif) < 0.01;
   function fila(lbl, val, nota){
@@ -4782,7 +4806,10 @@ function desgloseSaldoCajaHtml(){
     '<div class="cg-h cg-h-btn">Saldo de Caja General vs. tránsito al cierre' +
       '<button class="cg-print" id="btnPrintCG" type="button" title="Imprimir solo este reporte">Imprimir</button></div>' +
     '<div class="cg-solo-head"><b>Saldo de Caja General vs. tránsito al cierre</b>' +
-      '<span>Período: '+esc(periodoTrabajo())+' · Emitido '+ahoraTexto()+' · v'+APP_VERSION+'</span></div>' +
+      '<span>Período: '+esc(periodoTrabajo())+' · Emitido '+ahoraTexto()+' · v'+APP_VERSION +
+        (abiertas ? ' · ' + abiertas + ' diferencia(s) sin resolver al emitir' : '')+'</span></div>' +
+    (abiertas ? '<div class="cg-note cg-prov">Todavía hay '+abiertas+' diferencia(s) sin resolver en la conciliación: ' +
+      'estas cifras son provisionales hasta que cierren.</div>' : '') +
     '<div class="cg-row"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':"")+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
     '<div class="cg-row"><span>En tránsito al cierre <i class="cg-src">'+d.n+' partida(s)</i></span><b>B/ '+fmt(d.totalResumen)+'</b></div>' +
     '<div class="cg-row cg-dif"><span>Diferencia</span><b style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>';

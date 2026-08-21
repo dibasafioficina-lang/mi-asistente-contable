@@ -1662,6 +1662,33 @@ test("los pasos recogidos se recuerdan entre sesiones", () => {
   eq(leerPrefs().plegados.paso2, undefined);
 });
 
+test("el reporte de Caja General se puede imprimir aunque la conciliación no cierre", () => {
+  // El botón Imprimir vivía dentro del bloque de cierre, que solo se dibuja cuando los Pasos 1 y 2
+  // cuadran: justo cuando el papel de trabajo hace más falta, no había con qué sacarlo.
+  STATE.saldoCajaGeneral = { inicial: 0, final: 100, fechaFinal: "2026-02-28" };
+  STATE.results = {
+    paso2: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-02-28", monto: 100, concepto: "t", texto: "x" }],
+    paso3: [{ clase: "diff", banco: "Banistmo", fecha: "2026-02-02", monto: 230.31, texto: "una diferencia abierta" }]
+  };
+  eq(rojasAbiertas(), 1);
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("btnPrintCG") < 0) throw new Error("falta el botón de imprimir");
+  // Y el papel tiene que decir que salió con diferencias abiertas: si no, se archiva un cuadre que no cerró.
+  if (h.indexOf("cg-prov") < 0) throw new Error("no avisa que las cifras son provisionales");
+  if (h.indexOf("1 diferencia(s) sin resolver al emitir") < 0) throw new Error("el encabezado de la hoja no lo dice");
+});
+
+test("si no se puede leer el Balance Final, el panel lo dice en vez de desaparecer", () => {
+  // Desaparecía sin explicación y parecía que el botón de imprimir se había roto.
+  STATE.saldoCajaGeneral = { inicial: 5575.39, final: null, fechaFinal: null };
+  STATE.results = {};
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Balance Final") < 0) throw new Error("debería explicar por qué no se puede calcular");
+  // Sin navegador de Caja General no hay nada que comparar: ahí sí va vacío.
+  STATE.saldoCajaGeneral = null;
+  eq(desgloseSaldoCajaHtml(), "");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
