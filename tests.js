@@ -1561,6 +1561,21 @@ test("el estado de Banco General se lee con una sola columna Monto con signo", (
   cerca(e[1].debito, 0);
 });
 
+test("el estado de Banco General con columna Monto se acepta al subirlo", () => {
+  // El parser ya leía el formato nuevo, pero el validador de subida no lo reconocía y lo rechazaba con
+  // "Archivo equivocado" antes de llegar a leerlo. Las dos puertas tienen que conocer el mismo formato.
+  const rows = [
+    ["Numero de Cuenta:03-30-00-000067-9"],
+    ["Fecha", "Referencia", "Descripción", "Monto", "Saldo total"],
+    ["2026-02-28", "305", "COMISION MENSUAL POR SERVICIO BANCA EN LINEA", -5.35, 978.60]
+  ];
+  eq(identificarArchivo(rows), "estado");
+  eq(bancoDeEstado(rows), "bancogeneral");
+  eq(validarArchivoParaCasilla("estBancoGeneral", rows), null, "no debería alertar");
+  // Y en la casilla que no le toca sigue alertando.
+  if (!validarArchivoParaCasilla("estStg", rows)) throw new Error("debería alertar en la casilla de STG");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

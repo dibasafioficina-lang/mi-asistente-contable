@@ -466,7 +466,7 @@ function leerPrefs(){ try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}
 function guardarPref(clave, valor){ try{ var p=leerPrefs(); p[clave]=valor; localStorage.setItem(PREF_KEY, JSON.stringify(p)); }catch(e){} }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.08.26";
+var APP_VERSION="2026.08.27";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -605,6 +605,8 @@ function identificarArchivo(rows){
   if(findHeaderRow(rows,["Fecha","Cajera"])!==-1) return "reporte";
   if(findHeaderRow(rows,["Fecha","Descripcion","Debitos","Creditos"])!==-1) return "estado";
   if(findHeaderRow(rows,["Fecha","Descripcion","Debito","Credito"])!==-1) return "estado";
+  // Banco General desde febrero de 2026: una sola columna "Monto" con signo en vez de Débito/Crédito.
+  if(findHeaderRow(rows,["Fecha","Descripcion","Monto","Saldo"])!==-1) return "estado";
   try{ if(parseRetencionesVisa(rows).length) return "retVisa"; }catch(e){}
   return null;
 }
