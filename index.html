@@ -484,7 +484,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.01";
+var APP_VERSION="2026.09.02";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2110,7 +2110,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
       // Se consulta el INFORME DE CAJA —la referencia del desglose— y se busca cada partida en el estado.
-      var desglose = null, partesHalladas = null;
+      var desglose = null, partesHalladas = null, halladasN = 0;
       if(!combo){
         desglose = desgloseDelInforme(reporte, dep.fecha, banco, objetivo, tolerancia);
         if(desglose){
@@ -2119,9 +2119,10 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           // partidas se buscan con una ventana más amplia que la del match directo.
           var ventDesglose = Math.max(ventanaDias, 10);
           desglose.forEach(function(p){
-            if(!todas) return;
+            // Se prueban TODAS, no se corta en la primera que falla: saber si no compensó ninguna o solo
+            // algunas es lo que distingue un depósito en tránsito de un problema real.
             var c = buscarCombinacion(pool, dep.fecha, p.monto, ventDesglose, tolerancia);
-            if(c){ c.forEach(function(i){ pool[i].usado = true; idxs.push(i); }); }
+            if(c){ c.forEach(function(i){ pool[i].usado = true; idxs.push(i); }); halladasN++; }
             else todas = false;
           });
           if(todas){ partesHalladas = desglose; }
@@ -2174,6 +2175,26 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             fuente: "Diario Caja General / Estados de cuenta"
           });
         }
+        return;
+      }
+
+      // 3c) DEPÓSITO CONSOLIDADO QUE TODAVÍA NO COMPENSA. El asiento registra la suma del día —varios
+      // métodos en una sola línea, con la etiqueta de uno solo— y el informe de caja confirma que el
+      // importe es exactamente esa suma. Si el banco no acreditó NINGUNA de esas partidas, no hay nada
+      // mal registrado: es dinero en tránsito que compensa el mes siguiente. Pasó en febrero de 2026 con
+      // los 2,108.52 del 27-feb (VISA 1,124.69 + CLAVE 983.83), que el banco acreditó recién en marzo.
+      // Si compensaron ALGUNAS pero no todas, no se toca: media compensación no es un corte de mes
+      // limpio y hay que mirarla.
+      if(desglose && halladasN === 0){
+        hallazgos.push({
+          fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+          concepto:concepto, comprobante:refRaw, motivo:"depósito consolidado — aún no compensa",
+          texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " (\"" + concepto + "\") es el total del día " +
+                 "registrado en un solo asiento." + textoDesglose +
+                 " Ninguna de esas partidas aparece todavía en el estado de cuenta, así que queda en tránsito " +
+                 "para el mes siguiente." + ref,
+          fuente: "Diario Caja General / Estado de cuenta " + banco
+        });
         return;
       }
 

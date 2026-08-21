@@ -1689,6 +1689,31 @@ test("si no se puede leer el Balance Final, el panel lo dice en vez de desaparec
   eq(desgloseSaldoCajaHtml(), "");
 });
 
+test("un depósito consolidado que aún no compensa queda en tránsito, no en rojo", () => {
+  // Febrero 2026: el asiento del 27-feb registra 2,108.52 bajo la etiqueta VISA, pero es el total del día
+  // (VISA 1,124.69 + CLAVE 983.83). El banco lo acreditó en marzo. Registrar el total sumado no es un
+  // error: mientras el informe respalde el importe y el banco no haya acreditado nada, es tránsito.
+  const cg = [{ fecha: "2026-02-27", debito: 0, credito: 2108.52, referencia: "ME-00000001876",
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 27/02/2026", fila: 80 }];
+  const reporte = [
+    { fecha: "2026-02-27", banco: "Banistmo", metodo: "VISA", monto: 1124.69, cajera: "A" },
+    { fecha: "2026-02-27", banco: "Banistmo", metodo: "CLAVE", monto: 983.83, cajera: "A" }
+  ];
+  const estVacio = [{ fecha: "2026-02-20", descripcion: "DEPOSITO", debito: 0, credito: 50, fila: 2 }];
+  const h = paso2(cg, estVacio, [], null, null, null, 7, 0.01, reporte, null);
+  eq(contarRojas(h), 0, "no es una diferencia");
+  const t = h.filter(function(x){ return x.clase === "en_transito"; });
+  eq(t.length, 1);
+  cerca(t[0].monto, 2108.52);
+  if (t[0].texto.indexOf("VISA B/ 1,124.69 + CLAVE B/ 983.83") < 0) throw new Error("no muestra el desglose");
+
+  // Pero si el banco YA acreditó una de las dos partidas y la otra no, media compensación no es un corte
+  // de mes limpio: eso sigue siendo una diferencia que hay que mirar.
+  const estMitad = [{ fecha: "2026-02-27", descripcion: "CR REMISION - V/MC", debito: 0, credito: 1124.69, fila: 2 }];
+  const h2 = paso2(cg, estMitad, [], null, null, null, 7, 0.01, reporte, null);
+  eq(contarRojas(h2), 1, "compensó solo una parte: hay que revisarla");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
