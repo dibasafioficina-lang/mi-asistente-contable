@@ -90,7 +90,7 @@
     body.solo-cg #cgReporte .cg-solo-head{display:block;margin-bottom:12px;border-bottom:2px solid var(--brand);padding-bottom:8px}
     body.solo-cg #cgReporte .cg-solo-head b{display:block;font-size:15px;color:var(--heading)}
     body.solo-cg #cgReporte .cg-solo-head span{font-size:11px;color:var(--slate)}
-    body.solo-cg #cgReporte .cg-solo-pie{display:block}
+    body.solo-cg #cgReporte .cg-pie-as{display:block}
     #cgReporte .dif-tabla, #cgReporte .dif-sub, #cgReporte .cg-row{break-inside:avoid}
     #cgReporte .dif-tabla thead{display:table-header-group}   /* la cabecera se repite en cada hoja */
   }
@@ -261,6 +261,15 @@
   .cg-print:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
   .cg-prov{background:#FDF3E7;border:1px solid #F0DCC2;border-radius:8px;padding:8px 10px;color:#8A6534}
   .cg-solo-head, .cg-solo-pie{display:none}   /* solo salen en el papel */
+  .cg-pie-as{margin-top:18px;border-top:2px solid var(--line);padding-top:12px}
+  .cg-asientos .cg-h{margin-bottom:8px}
+  .as-item{background:#F7F4F9;border:1px solid #E2D9EA;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+  .as-tit{font-size:13px;font-weight:800;color:#4A3C63;margin-bottom:6px}
+  .as-tit b{font-family:"Mulish";white-space:nowrap}
+  .as-linea{display:flex;gap:10px;font-size:12px;padding:2px 0;color:var(--slate)}
+  .as-linea span{min-width:64px;flex-shrink:0}
+  .as-linea b{color:var(--heading);font-weight:700}
+  .as-item .dif-tabla{margin-top:8px}
   .tr-viejo{font-style:normal;font-size:10.5px;color:#8A6534;background:#FDF3E7;border-radius:6px;padding:1px 6px;white-space:nowrap}
   .tr-venc{font-style:normal;font-size:10.5px;color:#B54B4B;background:#FBEDED;border-radius:6px;padding:1px 6px;font-weight:700;white-space:nowrap}
   tr.tr-mal td{background:#FDF6F6}
@@ -488,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.05";
+var APP_VERSION="2026.09.06";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1207,7 +1216,11 @@ function parseSaldoCajaGeneral(rows){
   for(var r=0;r<rows.length;r++){
     var row = rows[r]; if(!row) continue;
     var etq = normTxt(row[0]); if(!etq) continue;
-    var fecha = (String(row[0]).match(/(\d{4}-\d{2}-\d{2})/)||[])[1] || null;
+    // El navegador exporta "Balance Final al 2026-2-28:" — mes y dia SIN cero a la izquierda. Exigir dos
+    // digitos dejaba el periodo en null, y con eso se caian los ajustes de apertura del cuadre del Paso 0
+    // y la fecha de los asientos sugeridos.
+    var mf = String(row[0]).match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    var fecha = mf ? mf[1]+"-"+String(mf[2]).padStart(2,"0")+"-"+String(mf[3]).padStart(2,"0") : null;
     if(etq.indexOf("BALANCE INICIAL")!==-1){ res.inicial = valorFila(row); res.fechaInicial = fecha; }
     else if(etq.indexOf("MOVIMIENTO MOSTRADO")!==-1){ res.movimiento = valorFila(row); }
     else if(etq.indexOf("BALANCE FINAL")!==-1){ res.final = valorFila(row); res.fechaFinal = fecha; }
@@ -5015,10 +5028,79 @@ function rojasAbiertas(){
   });
   return n;
 }
+/* ---- Asientos por registrar ----
+   Al pie del reporte de Caja General iba la lista de archivos usados, que ya no aporta: el encabezado de
+   la hoja lleva periodo, fecha de emision y version, y el checklist del modulo repite la traza completa.
+   Lo que hace falta ahi es lo accionable: que asientos quedan por hacer para que el saldo de la cuenta
+   sea exactamente el transito. Los cargos NO se deducen por diferencia — se leen del estado de cuenta y
+   del informe de retenciones, que es dato duro, y se desglosan por banco y concepto para que el asiento
+   se pueda digitar directo. */
+function asientosSugeridosHtml(){
+  var d = desgloseSaldoCaja();
+  if(!d) return "";
+  var fecha = d.fecha || "";
+  var bloques = [];
+
+  // (1) Cargos bancarios y de facturacion de tarjeta: la venta entra BRUTA y el deposito sale NETO, asi
+  // que lo que el banco se quedo se queda atrapado en Caja General y hay que saldarlo contra gastos.
+  var cg = cargosTarjetaPorBanco() || [];
+  var rv = STATE.retVisaDetalle || [];
+  var totRet = rv.length ? Math.round(rv.reduce(function(a,x){ return a+Math.abs(x.retenciones); },0)*100)/100 : 0;
+  var totCargos = Math.round((cg.reduce(function(a,b){ return a+b.total; },0) + totRet)*100)/100;
+  if(totCargos > 0.005){
+    var filas = "";
+    cg.forEach(function(b){
+      Object.keys(b.porTipo).sort().forEach(function(t){
+        filas += '<tr><td>'+esc(b.banco)+'</td><td>'+esc(t)+'</td><td class="num">'+fmt(b.porTipo[t])+'</td></tr>';
+      });
+    });
+    if(totRet > 0.005) filas += '<tr><td>STG</td><td>Retención VISA (informe de retenciones)</td><td class="num">'+fmt(totRet)+'</td></tr>';
+    bloques.push({
+      titulo: "Cargos bancarios y de facturación de tarjeta",
+      fecha: fecha, debito: "Gastos bancarios / Comisiones de tarjeta", credito: "[1.1.8] Caja General",
+      monto: totCargos,
+      concepto: "Retenciones, comisiones e ITBMS de tarjeta del período — la venta entra bruta a Caja General y el depósito sale neto",
+      tabla: '<table class="dif-tabla"><thead><tr><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>' +
+             filas + '<tr class="tot"><td colspan="2">Total</td><td class="num">'+fmt(totCargos)+'</td></tr></tbody></table>',
+      nota: Math.abs(totCargos - d.resto) > 0.03
+        ? "En la cuenta quedó un residuo de B/ " + fmt(d.resto) + ". La diferencia contra los B/ " + fmt(totCargos) +
+          " de cargos es corte de mes, o partidas que salieron de la cuenta y no se repusieron: revisalas antes de cerrar. " +
+          "Este asiento va por los cargos del estado de cuenta, no por el residuo."
+        : ""
+    });
+  }
+
+  // (2) Descargo del transito del mes anterior que ya compenso en el banco y nadie saco de la cuenta.
+  if(d.compenso > 0.005){
+    bloques.push({
+      titulo: "Descargo del tránsito del mes anterior",
+      fecha: fecha, debito: "Banco donde compensó", credito: "[1.1.8] Caja General",
+      monto: d.compenso,
+      concepto: "Descargo de partidas que venían en tránsito del mes anterior y ya compensaron en el banco",
+      tabla: "",
+      nota: "Fechá cada descargo el día que el banco compensó, no a fin de mes: así el saldo diario de la cuenta es siempre el tránsito."
+    });
+  }
+
+  if(!bloques.length){
+    return '<div class="cg-asientos"><div class="cg-h">Asientos por registrar</div>' +
+      '<div class="cg-note">No queda ninguno: el saldo de Caja General ya es exactamente el tránsito por compensar.</div></div>';
+  }
+  var h = '<div class="cg-asientos"><div class="cg-h">Asientos por registrar</div>';
+  bloques.forEach(function(b, k){
+    h += '<div class="as-item"><div class="as-tit">'+(k+1)+' · '+esc(b.titulo)+' <b>B/ '+fmt(b.monto)+'</b></div>' +
+      '<div class="as-linea"><span>Fecha</span><b>'+esc(b.fecha)+'</b></div>' +
+      '<div class="as-linea"><span>Débito</span><b>'+esc(b.debito)+' · B/ '+fmt(b.monto)+'</b></div>' +
+      '<div class="as-linea"><span>Crédito</span><b>'+esc(b.credito)+' · B/ '+fmt(b.monto)+'</b></div>' +
+      '<div class="as-linea"><span>Concepto</span><b>'+esc(b.concepto)+'</b></div>' +
+      b.tabla + (b.nota ? '<div class="cg-note">'+esc(b.nota)+'</div>' : "") + '</div>';
+  });
+  return h + '</div>';
+}
 function desgloseSaldoCajaHtml(){
   // El reporte se puede imprimir solo, sin el resto de la pantalla, así que en el papel tiene que llevar
   // su propio encabezado y su pie de trazabilidad: de qué período es y con qué archivos se hizo.
-  function cerrar(x){ return x + '<div class="cg-solo-pie">'+pieModulo1Html()+'</div></div>'; }
+  function cerrar(x){ return x + '<div class="cg-pie-as">'+asientosSugeridosHtml()+'</div></div>'; }
   var d = desgloseSaldoCaja();
   if(!d){
     var s0 = STATE.saldoCajaGeneral;
@@ -5099,9 +5181,16 @@ function desgloseSaldoCajaHtml(){
       });
       var tc = cg.reduce(function(a,b){ return a+b.total; },0);
       var tv = rv ? Math.round(rv.reduce(function(a,x){ return a+Math.abs(x.retenciones); },0)*100)/100 : 0;
-      h += '<div class="cg-note">Los cargos del mes suman B/ '+fmt(Math.round((tc+tv)*100)/100)+' y en la cuenta quedaron B/ '+fmt(d.resto)+
-        ': no coinciden porque el banco cobra en enero retenciones de ventas de fin de diciembre, y las de fin de enero las cobra en febrero. ' +
-        'Para el asiento vale la cifra que quedó en la cuenta.</div>';
+      // El residuo de la cuenta NO sirve como monto del asiento: si hay partidas que salieron y no se
+      // repusieron, arrastra ese descuadre a gastos bancarios. El asiento va por los cargos del estado.
+      var totCg = Math.round((tc+tv)*100)/100;
+      h += '<div class="cg-note">Los cargos del período suman <b>B/ '+fmt(totCg)+'</b> según los estados de cuenta, ' +
+        'y en la cuenta quedó un residuo de B/ '+fmt(d.resto)+'. ' +
+        (Math.abs(totCg - d.resto) <= 0.03
+          ? "Coinciden: el asiento sale por esa cifra."
+          : "Si no coinciden es por corte de mes (el banco cobra este mes retenciones de ventas del anterior) " +
+            "o porque quedan partidas que salieron de la cuenta y todavía no se repusieron. El asiento de gastos " +
+            "bancarios va por los cargos del estado, no por el residuo.") + '</div>';
     }
   }
   h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> saldar las retenciones de tarjeta contra gastos bancarios; ' +

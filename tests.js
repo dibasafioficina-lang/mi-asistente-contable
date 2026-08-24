@@ -1501,8 +1501,9 @@ test("el reporte de Caja General se puede imprimir solo", () => {
   if (h.indexOf("id=\"cgReporte\"") < 0) throw new Error("falta el id del recuadro");
   if (h.indexOf("id=\"btnPrintCG\"") < 0) throw new Error("falta el botón de imprimir");
   // En el papel el reporte va solo, así que lleva su propio encabezado y su pie de trazabilidad.
-  if (h.indexOf("cg-solo-head") < 0) throw new Error("falta el encabezado de la hoja");
-  if (h.indexOf("cg-solo-pie") < 0) throw new Error("falta el pie de trazabilidad");
+  // Al pie ya no van los archivos usados sino los asientos que quedan por registrar: la traza del
+  // periodo va en el encabezado de la hoja y el checklist del modulo la repite entera.
+  if (h.indexOf("cg-pie-as") < 0) throw new Error("falta el bloque de asientos por registrar");
 });
 
 test("el panel de períodos cierra su propio recuadro", () => {
@@ -1849,6 +1850,41 @@ test("el historial en transito muestra cada partida y marca el arrastre de meses
   if (h.indexOf("2 viene(n) arrastrándose") < 0) throw new Error("no cuenta el arrastre en la nota");
   // Y el motor los sigue arrastrando: los tres estan en el resumen, sin limite de antiguedad.
   eq(recolectarEnTransito().length, 3);
+});
+
+test("los asientos sugeridos salen del estado de cuenta, no de una diferencia", () => {
+  // Los cargos son dato duro: se leen del estado y del informe de retenciones, y se desglosan por banco
+  // y concepto para poder digitar el asiento directo. Deducirlos por diferencia arrastraria cualquier
+  // otro descuadre al renglon de gastos bancarios.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 1000, fechaFinal: "2026-02-28" };
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 1000, concepto: "Cheque (detalle individual)", texto: "x" }] };
+  STATE.estados = { Banistmo: [
+    { fecha: "2026-02-15", debito: 170.00, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
+    { fecha: "2026-02-15", debito: 22.76, credito: 0, descripcion: "ITBMS SOBRE COMISION V/MC" },
+    { fecha: "2026-02-20", debito: 503.11, credito: 0, descripcion: "RETENCION ITBMS V/MC" }
+  ]};
+  STATE.retVisaDetalle = [{ fecha: "2026-02-10", bruto: 500, retenciones: -198.45, neto: 301.55 }];
+  const h = asientosSugeridosHtml();
+  if (h.indexOf("Cargos bancarios y de facturación de tarjeta") < 0) throw new Error("falta el asiento de cargos");
+  // 170.00 + 22.76 + 503.11 + 198.45 = 894.32
+  if (h.indexOf("894.32") < 0) throw new Error("el total de los cargos no cuadra");
+  ["Retención ITBMS", "Comisión", "ITBMS", "Retención VISA"].forEach(function(t){
+    if (h.indexOf(t) < 0) throw new Error("falta el desglose de " + t);
+  });
+  if (h.indexOf("[1.1.8] Caja General") < 0) throw new Error("el asiento no nombra la cuenta a acreditar");
+  STATE.estados = null; STATE.retVisaDetalle = null;
+});
+
+test("si no queda ningun asiento por registrar, el bloque lo dice", () => {
+  // Sin cargos ni apertura sin descargar, el saldo YA es el transito: el pie tiene que decirlo en vez de
+  // quedar vacio y hacer dudar de si se calculo algo.
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 500, fechaFinal: "2026-02-28" };
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 500, concepto: "Cheque (detalle individual)", texto: "x" }] };
+  const h = asientosSugeridosHtml();
+  if (h.indexOf("No queda ninguno") < 0) throw new Error("deberia decir que no queda nada por registrar");
 });
 
 /* --- resumen --- */
