@@ -485,7 +485,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.03";
+var APP_VERSION="2026.09.04";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2501,13 +2501,24 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
         });
         return;
       }
-      // Primer día del mes → probablemente una compensación en tránsito del mes anterior.
-      if(primerDia && f.fecha===primerDia){
+      // Compensacion del mes anterior que entra al arranque del mes: su asiento vive en el diario del
+      // MES PASADO, asi que aca no hay nada que registrar. Dos afinamientos que eran fuente de falsos:
+      // - El limite no es el dia 1 del calendario sino el PRIMER DIA CON MOVIMIENTO del estado: en
+      //   febrero de 2026 el dia 1 fue domingo, el banco arranco el 02 y la regla no disparaba (la
+      //   remision V/MC de 230.31 del 02-feb salia como diferencia).
+      // - Las remisiones de tarjeta clarean con rezago: las ventas del 30/31 se acreditan hasta 3 dias
+      //   habiles despues del arranque, no solo el primer dia.
+      var iniMov = primeraFecha(cfg.estado);
+      var esRemTarjeta = esRemisionVisa(desc) || esRemisionClave(desc);
+      var margenEntrada = esRemTarjeta ? 3 : 0;   // dias habiles desde el arranque del estado
+      if(iniMov && f.fecha >= iniMov && distanciaBancaria(iniMov, f.fecha) <= margenEntrada){
         hallazgos.push({
           fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
           concepto:desc, comprobante:"", motivo:"compensación del mes anterior (confirmar)",
-          texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (\"" + desc +
-                 "\") aparece el primer día del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo).",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (" + desc + ") " +
+                 (esRemTarjeta
+                   ? "es una remisión de tarjeta de los primeros días del mes: corresponde a ventas de los últimos días del mes anterior, y su asiento está en el diario del mes pasado. No es una diferencia."
+                   : "aparece el primer día con movimiento del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo)."),
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
         });
         return;

@@ -467,9 +467,14 @@ test("el Paso 3 no reporta como diferencia lo que compensó del mes anterior", (
   eq(h.filter(x => (x.clase || "diff") === "diff").length, 0, "el 1,341.20 y el 1,285.05 ya tienen asiento en diciembre");
 });
 
-test("sin el Paso 0, esas mismas líneas SÍ son diferencia", () => {
+test("sin el Paso 0, las remisiones del arranque quedan a confirmar, no como rojas", () => {
+  // Antes salian como diferencia. Pero una remision de tarjeta en los primeros dias habiles del mes es
+  // casi siempre la compensacion de ventas del mes anterior (su asiento vive en el diario del mes
+  // pasado): se clasifica "a confirmar" con la indicacion de cargar el Paso 0, que es quien la valida.
   const h = paso3([], [], EST_VISA(), [], null, null, 3, 0.01, null, null);
-  eq(h.filter(x => (x.clase || "diff") === "diff").length, 2, "sin el resumen en tránsito no hay con qué cotejarlas");
+  eq(h.filter(x => (x.clase || "diff") === "diff").length, 0, "no son rojas");
+  const conf = h.filter(x => /mes anterior/i.test(x.motivo || ""));
+  eq(conf.length, 2, "quedan a confirmar como compensacion del mes anterior");
 });
 
 // El resumen del Paso 0 traía "31/12/2026" por "31/12/2025": el matching es hacia adelante, así que una
@@ -1796,6 +1801,30 @@ test("el desglose descuenta los descargos ya asentados, contando cada asiento un
   cerca(totalDescargado(), 350, "un solo asiento, aunque lo vean dos pasos");
   const d = desgloseSaldoCaja();
   cerca(d.compenso, 250, "apertura 1000 - pendiente 400 - descargado 350");
+});
+
+test("una remision de tarjeta al arranque del mes es compensacion del mes anterior, no diferencia", () => {
+  // Febrero 2026: el 01 fue domingo y el banco arranco el 02. La remision V/MC de 230.31 del 02-feb
+  // (ventas de fin de enero, asiento en el diario de enero) salia como roja porque la regla comparaba
+  // contra el dia 1 del calendario. Ahora el limite es el primer dia CON MOVIMIENTO, y las remisiones
+  // tienen 3 dias habiles de margen (clarean con rezago).
+  const est = [
+    { fecha: "2026-02-02", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 230.31, fila: 3 },
+    { fecha: "2026-02-03", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 359.71, fila: 4 },
+    { fecha: "2026-02-02", descripcion: "DEPOSITO", debito: 0, credito: 500.00, fila: 5 },
+    { fecha: "2026-02-10", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 777.77, fila: 6 },
+    { fecha: "2026-02-10", descripcion: "MOVIMIENTO RELLENO", debito: 5, credito: 0, fila: 7 }
+  ];
+  const h = paso3(est.length ? [] : null, [], est, [], null, null, 7, 0.01, null, null);
+  const porMonto = function(m){ return h.filter(function(x){ return Math.abs(x.monto - m) < 0.005; })[0]; };
+  eq(porMonto(230.31).clase, "en_transito", "remision del primer dia con movimiento");
+  eq(porMonto(359.71).clase, "en_transito", "remision al dia siguiente, dentro del margen de rezago");
+  if (!/mes anterior/i.test(porMonto(230.31).motivo)) throw new Error("debe contar como entrante del mes anterior");
+  eq(porMonto(500.00).clase, "en_transito", "un deposito comun del primer dia con movimiento tambien");
+  eq(porMonto(777.77).clase, "diff", "una remision a mitad de mes sigue siendo diferencia real");
+  // Y como son ENTRANTES (ya compensaron), no se arrastran al resumen en transito del proximo mes.
+  STATE.results = { paso3: h };
+  eq(recolectarEnTransito().filter(function(x){ return Math.abs(x.monto-230.31)<0.005; }).length, 0);
 });
 
 /* --- resumen --- */
