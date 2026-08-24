@@ -261,6 +261,9 @@
   .cg-print:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
   .cg-prov{background:#FDF3E7;border:1px solid #F0DCC2;border-radius:8px;padding:8px 10px;color:#8A6534}
   .cg-solo-head, .cg-solo-pie{display:none}   /* solo salen en el papel */
+  .tr-viejo{font-style:normal;font-size:10.5px;color:#8A6534;background:#FDF3E7;border-radius:6px;padding:1px 6px;white-space:nowrap}
+  .tr-venc{font-style:normal;font-size:10.5px;color:#B54B4B;background:#FBEDED;border-radius:6px;padding:1px 6px;font-weight:700;white-space:nowrap}
+  tr.tr-mal td{background:#FDF6F6}
   .dif-sub{margin:14px 0 6px;font-size:13px;font-weight:700;color:var(--heading)}
   .dif-sub b{font-family:"Mulish";font-weight:800;white-space:nowrap}
   .dif-sub span{display:block;font-weight:400;font-size:11.5px;color:var(--slate);margin-top:3px;line-height:1.45}
@@ -485,7 +488,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.04";
+var APP_VERSION="2026.09.05";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4509,6 +4512,7 @@ function renderResultados(){
     // imprime como papel de trabajo, y antes solo existía si los Pasos 1 y 2 cerraban — justo cuando
     // menos falta hace. Adentro avisa cuántas diferencias quedaban abiertas al emitirlo.
     html += desgloseSaldoCajaHtml();
+    html += tablaTransitoHtml();
   }
 
   pasosMeta.forEach(function(p){
@@ -4807,6 +4811,41 @@ function metodoTransito(it){
   if(t.indexOf("ACH")!==-1) return "ACH";
   return "Otro depósito";
 }
+/* ---- Historial en transito, partida por partida ----
+   El motor arrastra TODO lo que no compensa de un mes al siguiente, sin limite de tiempo (un cheque
+   puede compensar hasta 4 meses despues). Pero cuando la caja cuadra, el cierre solo mostraba totales
+   por metodo: las partidas viejas quedaban invisibles y no habia forma de notar un deposito que una
+   cajera omitio. Esta tabla muestra cada partida con su fecha, marca las que vienen arrastrandose de
+   meses anteriores y alerta cuando un cheque supera los 4 meses (ya ni el banco lo va a aceptar). */
+function mesTrabajoActual(){
+  if(STATE.periodos && STATE.periodos.mesTrabajo) return STATE.periodos.mesTrabajo;
+  var s = STATE.saldoCajaGeneral;
+  return (s && s.fechaFinal) ? s.fechaFinal.slice(0,7) : null;
+}
+function tablaTransitoHtml(){
+  var items = recolectarEnTransito().slice().sort(function(a,b){ return String(a.fecha).localeCompare(String(b.fecha)); });
+  if(!items.length) return "";
+  var mesW = mesTrabajoActual();
+  var finMes = STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.fechaFinal;
+  var h = '<div class="cg-box cg-hist"><div class="cg-h">Historial en tránsito · partida por partida</div>' +
+    '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
+  var arrastre = 0, vencidos = 0;
+  items.forEach(function(it){
+    var viejo = mesW && it.fecha && it.fecha.slice(0,7) < mesW;
+    if(viejo) arrastre++;
+    var edad = (finMes && it.fecha) ? daysBetween(it.fecha, finMes) : 0;
+    var vencido = esChequeEnTransito(it) && edad > 122;   // 4 meses: limite para presentar un cheque
+    if(vencido) vencidos++;
+    var nota = vencido ? ' <i class="tr-venc">más de 4 meses — verificá si el depósito se omitió</i>'
+             : viejo ? ' <i class="tr-viejo">arrastre de ' + mesLargo(it.fecha.slice(0,7)) + '</i>' : "";
+    h += '<tr'+(vencido?' class="tr-mal"':"")+'><td>'+esc(it.fecha||"")+'</td><td>'+esc(it.banco||"")+'</td><td>'+
+         esc(String(it.concepto||"").slice(0,46))+nota+'</td><td class="num">'+fmt(it.monto)+'</td></tr>';
+  });
+  h += '</tbody></table><div class="cg-note">'+items.length+' partida(s).' +
+    (arrastre ? ' <b>'+arrastre+' viene(n) arrastrándose de meses anteriores</b> — siguen acá hasta que compensen en el banco: así se detecta un depósito omitido.' : "") +
+    ' Todas viajan en el Excel del resumen para el Paso 0 del mes siguiente.</div></div>';
+  return h;
+}
 function transitoPorMetodo(){
   var items = recolectarEnTransito();
   var porMetodo = {}; var total = 0;
@@ -5104,6 +5143,7 @@ function cierreCajaHtml(){
         (saldo.inicial==null && saldo.final==null ? '<div class="cg-note">Los saldos no se pudieron leer del navegador de Caja General — ingresalos a mano para que la comparación tenga sentido.</div>' : '') +
       '</div>' +
       desgloseSaldoCajaHtml() +
+      tablaTransitoHtml() +
     '</div>' +
     '<button class="btn-run" id="btnTransito">Descargar resumen en tránsito</button>' +
   '</div>';

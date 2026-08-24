@@ -1827,6 +1827,30 @@ test("una remision de tarjeta al arranque del mes es compensacion del mes anteri
   eq(recolectarEnTransito().filter(function(x){ return Math.abs(x.monto-230.31)<0.005; }).length, 0);
 });
 
+test("el historial en transito muestra cada partida y marca el arrastre de meses viejos", () => {
+  // El motor arrastra sin limite de tiempo, pero el cierre solo mostraba totales por metodo: un cheque
+  // de diciembre invisible en pantalla es un deposito omitido que nadie va a notar.
+  STATE.periodos = { mesTrabajo: "2026-02" };
+  STATE.saldoCajaGeneral = { inicial: 0, final: 100, fechaFinal: "2026-02-28" };
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.results = { paso0: [
+    { clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2025-10-15", monto: 500.00, concepto: "cheque en transito", texto: "x" },
+    { clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2025-12-22", monto: 435.71, concepto: "cheque en transito", texto: "x" }
+  ], paso2: [
+    { clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 90.00, concepto: "Cheque (detalle individual)", texto: "x" }
+  ]};
+  const h = tablaTransitoHtml();
+  ["2025-10-15", "2025-12-22", "2026-02-28"].forEach(function(f){
+    if (h.indexOf(f) < 0) throw new Error("falta la partida del " + f);
+  });
+  if (h.indexOf("arrastre de diciembre 2025") < 0) throw new Error("no marca el arrastre de diciembre");
+  // El de octubre lleva mas de 4 meses (136 dias al cierre): un cheque ya vencido debe alertar fuerte.
+  if (h.indexOf("más de 4 meses") < 0) throw new Error("no alerta el cheque vencido");
+  if (h.indexOf("2 viene(n) arrastrándose") < 0) throw new Error("no cuenta el arrastre en la nota");
+  // Y el motor los sigue arrastrando: los tres estan en el resumen, sin limite de antiguedad.
+  eq(recolectarEnTransito().length, 3);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
