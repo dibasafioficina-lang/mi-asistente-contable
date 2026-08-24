@@ -1129,9 +1129,11 @@ test("el desglose del saldo de Caja General suma el saldo final", () => {
     paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", monto: 1571.10, concepto: "tarjeta", texto: "x" }]
   };
   const d = desgloseSaldoCaja();
-  cerca(d.transito, 4221.14, "solo lo pendiente + lo nuevo del mes");
+  // Dentro de Caja General solo sigue lo que no tiene asiento de salida: el item de tarjeta del Paso 2
+  // nace de un CREDITO de Caja General, o sea que ya salio de la cuenta y va del lado del banco.
+  cerca(d.transito, 2650.04, "solo lo pendiente del Paso 0");
   cerca(d.compenso, 13003.97, "la apertura que ya compensó");
-  cerca(d.resto, 966.15, "retenciones y comisiones");
+  cerca(d.resto, 2537.25, "el resto del movimiento (retenciones + lo salido sin compensar)");
   cerca(d.transito + d.compenso + d.resto, d.final, "las tres partes dan el saldo final");
 });
 
@@ -1450,13 +1452,13 @@ test("cuando no coincide, dice de qué se compone la diferencia", () => {
   const d = desgloseSaldoCaja();
   cerca(d.totalResumen, 5575.39, "el tránsito completo");
   cerca(d.compenso, 13003.97);
-  cerca(d.soloBanco, 1354.25, "lo que ya salió de Caja General pero el banco no reflejó");
-  cerca(d.resto, 966.15, "retenciones de tarjeta");
+  cerca(d.soloBanco, 2925.35, "lo que ya salió de Caja General pero el banco no reflejó");
+  cerca(d.resto, 2537.25, "resto del movimiento (retenciones y tarjeta de fin de mes)");
   // Los tres componentes explican la diferencia al centavo.
   cerca(d.final - d.compenso + d.soloBanco - d.resto, d.totalResumen, "el puente cierra");
   const h = desgloseSaldoCajaHtml();
   if (h.indexOf("Coincide") >= 0) throw new Error("no debería dar verde");
-  ["13,003.97", "-1,354.25", "966.15", "Qué falta para que cuadre"].forEach(function(t){
+  ["13,003.97", "-2,925.35", "2,537.25", "Qué falta para que cuadre"].forEach(function(t){
     if (h.indexOf(t) < 0) throw new Error("falta en el desglose: " + t);
   });
 });
@@ -1465,8 +1467,8 @@ test("el detalle lista las partidas que ya salieron de Caja General", () => {
   // Mismo estado que la prueba anterior: el tránsito del Paso 3 no está en Caja General.
   STATE.estados = null; STATE.retVisaDetalle = null;
   const ya = partidasYaAcreditadas();
-  if (ya.length !== 1) throw new Error("esperaba una partida, hubo " + ya.length);
-  cerca(ya[0].monto, 1354.25);
+  if (ya.length !== 2) throw new Error("esperaba dos partidas, hubo " + ya.length);
+  cerca(Math.round(ya.reduce(function(a,x){ return a+x.monto; },0)*100)/100, 2925.35);
   const h = desgloseSaldoCajaHtml();
   if (h.indexOf("DEPOSITO BRINKS") < 0) throw new Error("la tabla no muestra el concepto");
 });
@@ -1712,6 +1714,88 @@ test("un depósito consolidado que aún no compensa queda en tránsito, no en ro
   const estMitad = [{ fecha: "2026-02-27", descripcion: "CR REMISION - V/MC", debito: 0, credito: 1124.69, fila: 2 }];
   const h2 = paso2(cg, estMitad, [], null, null, null, 7, 0.01, reporte, null);
   eq(contarRojas(h2), 1, "compensó solo una parte: hay que revisarla");
+});
+
+/* ---- Descargos del transito previo en los Pasos 2 y 3 ---- */
+const TR_DESC = [{ fecha: "2026-01-28", banco: "STG", monto: 405.00, concepto: "DEPOSITO BRINKS", sentido: "credito" }];
+const EST_DESC = [{ fecha: "2026-02-02", descripcion: "Ach De Brinks Panama, S.A.", debito: 0, credito: 405.00, fila: 2 }];
+
+test("Paso 2: el asiento que descarga transito compensado no es un deposito nuevo", () => {
+  // Febrero 2026: el ME-1896 descargaba el efectivo de enero (ya compensado el 02-feb) y salia como
+  // "en transito" otra vez, inflando el resumen. La linea del estado la consume el Paso 0, asi que el
+  // cotejo normal no la encuentra: hay que reconocerlo contra el transito previo compensado.
+  const cg = [{ fecha: "2026-02-28", debito: 0, credito: 405.00, descripcion: "DEPOSITO EFECTIVO STG PENDIENTE DE ENERO", referencia: "ME-9", fila: 5 }];
+  const h = paso2(cg, [], EST_DESC.map(function(x){ return Object.assign({}, x); }), null, null, null, 7, 0.01, null, TR_DESC);
+  eq(h.filter(esEnTransito).length, 0, "no debe quedar en transito");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); });
+  eq(inf.length, 1, "falta el informativo del descargo");
+  cerca(inf[0].monto, 405.00);
+});
+
+test("Paso 2: sin compensacion y sin etiqueta, el mismo importe NO es descargo", () => {
+  // La partida sigue pendiente en el banco: un deposito nuevo que coincida por casualidad debe seguir
+  // su camino normal (en transito de fin de mes), no borrarse como descargo.
+  const cg = [{ fecha: "2026-02-28", debito: 0, credito: 405.00, descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 28/02/2026", referencia: "ME-9", fila: 5 }];
+  const h = paso2(cg, [], [], null, null, null, 7, 0.01, null, TR_DESC);
+  eq(h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 0);
+  eq(h.filter(esEnTransito).length, 1, "queda en transito, como corresponde");
+});
+
+test("Paso 2: la etiqueta DESCARGO matchea directo, y sin correspondencia avisa", () => {
+  // Con la palabra DESCARGO la intencion es explicita: se acepta contra cualquier partida del transito
+  // previo aunque el estado no muestre la compensacion (p.ej. estado aun no exportado).
+  const cg = [{ fecha: "2026-02-15", debito: 0, credito: 405.00, descripcion: "DESCARGO TRANSITO ENERO STG", referencia: "ME-9", fila: 5 }];
+  const h = paso2(cg, [], [], null, null, null, 7, 0.01, null, TR_DESC);
+  eq(h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 1);
+  // Y si dice DESCARGO pero el importe no corresponde a nada, se avisa en vez de callar.
+  const cg2 = [{ fecha: "2026-02-15", debito: 0, credito: 999.99, descripcion: "DESCARGO TRANSITO ENERO STG", referencia: "ME-9", fila: 5 }];
+  const h2 = paso2(cg2, [], [], null, null, null, 7, 0.01, null, TR_DESC);
+  const av = h2.filter(function(x){ return x.clase === "aviso" && /correspondencia/.test(x.concepto || ""); });
+  eq(av.length, 1, "falta el aviso de DESCARGO sin correspondencia");
+});
+
+test("Paso 3: el debito del navegador que descarga transito compensado no queda en transito", () => {
+  // El mismo asiento visto del lado del banco (debito al banco). Camino sin CK (conciliarBancoEstado)...
+  const dStg = [{ fecha: "2026-02-05", debito: 405.00, credito: 0, descripcion: "DESCARGO TRANSITO ENERO", referencia: "ME-9", fila: 4 }];
+  const h = paso3([], dStg, [], EST_DESC.map(function(x){ return Object.assign({}, x); }), null, null, 7, 0.01, null, TR_DESC);
+  eq(contarRojas(h), 0);
+  eq(h.filter(esEnTransito).length, 0, "no debe quedar en transito");
+  eq(h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 1);
+  // ...y camino con concepto de cheque (pasa por la conciliacion de cheques): el ME-1855 de febrero.
+  const dB = [{ fecha: "2026-02-05", debito: 405.00, credito: 0, descripcion: "DESCARGO DE CK DE ENERO", referencia: "ME-9", fila: 4 }];
+  const trB = [{ fecha: "2026-01-28", banco: "Banistmo", monto: 405.00, concepto: "cheque en transito", sentido: "credito" }];
+  const estB = [{ fecha: "2026-02-02", descripcion: "DEPOSITO", debito: 0, credito: 405.00, fila: 2 }];
+  const h2 = paso3(dB, [], estB, [], null, null, 7, 0.01, null, trB);
+  eq(h2.filter(esEnTransito).length, 0, "el cheque-descargo tampoco queda en transito");
+  eq(h2.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 1);
+});
+
+test("la misma partida con fechas distintas en dos pasos se cuenta una sola vez", () => {
+  // El Paso 2 usa la fecha del reporte (cheque recibido el 11-feb) y el Paso 3 la del asiento (digitado
+  // el 12-feb): con fecha exacta se contaba dos veces. La ventana de dias del cotejo lo resuelve.
+  STATE.options = { ventanaDias: 7, tolerancia: 0.01 };
+  STATE.results = {
+    paso2: [{ clase: "en_transito", motivo: "cheque pendiente por cambiar", banco: "Banistmo", fecha: "2026-02-11", monto: 273.49, concepto: "Cheque (detalle individual)", texto: "x" }],
+    paso3: [{ clase: "en_transito", motivo: "cheque pendiente por cambiar", banco: "Banistmo", fecha: "2026-02-12", monto: 273.49, concepto: "DEPOSITO DE BANISTMO CK 12/02/2026", texto: "x" }]
+  };
+  eq(recolectarEnTransito().length, 1, "es la misma plata");
+  cerca(transitoPorMetodo().total, 273.49);
+});
+
+test("el desglose descuenta los descargos ya asentados, contando cada asiento una vez", () => {
+  // El mismo descargo lo ven varios pasos (credito en Caja General y debito en el diario del banco):
+  // sin deduplicar se restaria doble, y sin restar nada el renglon residual daba -5,324.67 en febrero.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 1000, final: 600, fechaFinal: "2026-02-28" };
+  const inf = { clase: "informativo", concepto: "Descargo de transito", banco: "STG", fecha: "2026-02-10", monto: 350, texto: "x" };
+  STATE.results = {
+    paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "STG", fecha: "2026-01-20", monto: 400, concepto: "deposito", texto: "x" }],
+    paso1: [inf],
+    paso3: [Object.assign({}, inf)]
+  };
+  cerca(totalDescargado(), 350, "un solo asiento, aunque lo vean dos pasos");
+  const d = desgloseSaldoCaja();
+  cerca(d.compenso, 250, "apertura 1000 - pendiente 400 - descargado 350");
 });
 
 /* --- resumen --- */
