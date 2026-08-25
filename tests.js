@@ -1952,6 +1952,46 @@ test("la ventana de compensacion del Paso 0 depende del tipo de partida", () => 
   cerca(r.compensadas[0].monto, 500.00);
 });
 
+test("un ACH puede compensar ANTES del asiento; el resto de los metodos no", () => {
+  // 27-jun-2026: el ACH de 1,313.10 entro al banco el 22 (100.00 + 579.10 + 25.00) y el 23 (609.00), o
+  // sea antes de que se registrara el asiento. Eso es normal en un ACH: se ordena y despues se digita.
+  const est = [
+    { fecha: "2026-06-22", descripcion: "Bouti A Petty Cert De Mayo", debito: 0, credito: 579.10, fila: 2 },
+    { fecha: "2026-06-22", descripcion: "Son Import A Petty Certificado", debito: 0, credito: 25.00, fila: 3 },
+    { fecha: "2026-06-22", descripcion: "Bouti A Petty Certif", debito: 0, credito: 100.00, fila: 4 },
+    { fecha: "2026-06-23", descripcion: "Pago De Shopping Petty Certificado", debito: 0, credito: 609.00, fila: 5 }
+  ];
+  const ach = [{ fecha: "2026-06-27", debito: 1313.10, credito: 0, descripcion: "DEPOSITO ACH STG DEL 27/6/2026", referencia: "ME-1", fila: 9 }];
+  const c = conciliarBancoEstado(ach, est.map(function(x){ return Object.assign({}, x); }), 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el ACH tiene que cotejar aunque el banco lo haya acreditado antes");
+
+  // El mismo importe y las mismas lineas, pero como deposito de EFECTIVO: ahi no puede ser anterior.
+  const efe = [{ fecha: "2026-06-27", debito: 1313.10, credito: 0, descripcion: "DEPOSITO BRINKS DEL 27/6/2026", referencia: "ME-2", fila: 9 }];
+  const c2 = conciliarBancoEstado(efe, est.map(function(x){ return Object.assign({}, x); }), 7, 0.01, null);
+  eq(c2.faltanEnBanco.length, 1, "un deposito de efectivo no se acredita antes de entregarse");
+});
+
+test("una misma partida vista por tres pasos se cuenta una sola vez", () => {
+  // Junio 2026: el Yappy de 16.04 lo veian el Paso 0, el 2 y el 3. Al marcarlo consumido en el Paso 2
+  // dejaba de estar disponible para el 3, que lo volvia a sumar: el transito quedaba inflado en 16.04.
+  STATE.options = { ventanaDias: 7, tolerancia: 0.01 };
+  const base = { clase: "en_transito", banco: "Banco General", fecha: "2026-06-30", monto: 16.04, texto: "x" };
+  STATE.results = {
+    paso0: [Object.assign({}, base, { motivo: "aún pendiente de compensar", concepto: "yappy en transito" })],
+    paso2: [Object.assign({}, base, { motivo: "último día del mes", concepto: "DEPOSITO POR YAPPY DEL 30/06/2026" })],
+    paso3: [Object.assign({}, base, { motivo: "último día del mes", concepto: "DEPOSITO POR YAPPY DEL 30/06/2026" })]
+  };
+  eq(recolectarEnTransito().length, 1, "es la misma plata vista tres veces");
+  cerca(transitoPorMetodo().total, 16.04);
+
+  // Pero dos partidas DISTINTAS del mismo importe y dia dentro de un mismo paso siguen siendo dos.
+  STATE.results = { paso2: [
+    { clase: "en_transito", motivo: "x", banco: "Banistmo", fecha: "2026-02-27", monto: 90.00, concepto: "Cheque (detalle individual)", texto: "x" },
+    { clase: "en_transito", motivo: "x", banco: "Banistmo", fecha: "2026-02-27", monto: 90.00, concepto: "Cheque (detalle individual)", texto: "x" }
+  ]};
+  eq(recolectarEnTransito().length, 2, "dos cheques iguales del mismo dia son dos partidas reales");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

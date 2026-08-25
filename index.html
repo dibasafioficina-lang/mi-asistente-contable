@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.08";
+var APP_VERSION="2026.09.09";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1738,7 +1738,8 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
     if(grupo.length < 2) return; // con una sola partida no hay nada que consolidar
     var suma = Math.round(grupo.reduce(function(a,i){ return a + poolDiario[i].monto; },0)*100)/100;
     // El efectivo clarea con rezago (el banco acredita días después), por eso la ventana se amplía.
-    var combo = buscarCombinacion(candidatos, f, suma, Math.max(ventanaDias, 10), tolerancia);
+    // El efectivo se entrega y el banco lo acredita ese dia o despues, nunca antes.
+    var combo = buscarCombinacion(candidatos, f, suma, Math.max(ventanaDias, 10), tolerancia, "adelante");
     if(!combo) return;
     combo.forEach(function(i){ candidatos[i].usado = true; });
     grupo.forEach(function(i){ poolDiario[i].usado = true; });
@@ -1861,10 +1862,24 @@ function distanciaBancaria(iso1, iso2){
   }
   return d - muertos;
 }
-function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia){
+/* ---- Sentido del tiempo en el cotejo ----
+   El banco acredita un depósito el mismo día o después: un crédito ANTERIOR al asiento no puede ser su
+   compensación. La excepción son los ACH, que se ordenan antes de que el asiento se registre — el ACH de
+   B/ 1,313.10 del 27-jun-2026 entró al banco el 22 (100.00 + 579.10 + 25.00) y el 23 (609.00). Para todo
+   lo demás —efectivo, cheque, tarjeta— la búsqueda va solo hacia adelante: sin esa restricción el
+   depósito Brinks del 11-jun se "completaba" con 3.62 de una ventanilla del 05-jun, que es imposible.
+   Los ACH se reconocen por el texto del asiento; para ellos la ventana sigue siendo bidireccional. */
+function esAchDesc(desc){ return normTxt(desc).indexOf("ACH")!==-1; }
+function sentidoDeposito(desc){ return esAchDesc(desc) ? null : "adelante"; }
+function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia, direccion){
   if(Math.abs(objetivo) <= tolerancia) return null;
   var idxs = [];
-  for(var i=0;i<pool.length;i++){ if(!pool[i].usado && distanciaBancaria(fecha, pool[i].fecha) <= ventanaDias) idxs.push(i); }
+  for(var i=0;i<pool.length;i++){
+    if(pool[i].usado || distanciaBancaria(fecha, pool[i].fecha) > ventanaDias) continue;
+    if(direccion==="adelante" && pool[i].fecha < fecha) continue;   // el banco no acredita antes del depósito
+    if(direccion==="atras" && pool[i].fecha > fecha) continue;
+    idxs.push(i);
+  }
   var a, b, c;
   for(a=0;a<idxs.length;a++){ if(Math.abs(montoConc(pool[idxs[a]]) - objetivo) <= tolerancia) return [idxs[a]]; }
   for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++){
@@ -2010,7 +2025,8 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // Solo los créditos que este depósito PUEDE compensar (las remisiones de tarjeta quedan reservadas
     // para depósitos de tarjeta). Comparte los objetos, así que marcar `usado` marca el pool original.
     var cand = poolEstado.filter(function(e){ return compatibleConRemision(e.descripcion, d.descripcion); });
-    var combo = buscarCombinacion(cand, d.fecha, objetivo, ventanaDias, tolerancia);
+    var sent = sentidoDeposito(d.descripcion);   // los ACH pueden haber entrado antes del asiento
+    var combo = buscarCombinacion(cand, d.fecha, objetivo, ventanaDias, tolerancia, sent);
     // Brinks: depósito Brinks del diario → crédito Brinks del estado, con ventana amplia (rezago).
     if(!combo && esBrinks(d.descripcion)){
       combo = buscarBrinks(cand, d.fecha, d.monto, VENTANA_BRINKS, tolerancia);
@@ -2019,7 +2035,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // 1313.10) que el estado refleja partido en MÁS de 3 líneas y con unos días de rezago. Se prueba una
     // combinación de hasta 5 créditos con ventana algo más amplia.
     if(!combo){
-      combo = buscarSubsetSuma(cand, d.fecha, objetivo, Math.max(ventanaDias, 8), tolerancia, 5);
+      combo = buscarSubsetSuma(cand, d.fecha, objetivo, Math.max(ventanaDias, 8), tolerancia, 5, sent);
     }
     if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); d.usado=true; }
   });
@@ -2027,7 +2043,9 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   poolEstado.forEach(function(e){
     if(e.usado) return;
     var cand = poolDiario.filter(function(d){ return compatibleConRemision(e.descripcion, d.descripcion); });
-    var combo = buscarCombinacion(cand, e.fecha, e.monto, ventanaDias, tolerancia);
+    // Mirado desde el estado, el asiento que le corresponde es de la misma fecha o ANTERIOR.
+    var combo = buscarCombinacion(cand, e.fecha, e.monto, ventanaDias, tolerancia,
+                                  esAchDesc(e.descripcion) ? null : "atras");
     if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); e.usado=true; }
   });
   return {
@@ -2169,7 +2187,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // que busca cada partida en las remisiones que le tocan.
       var poolBusq = poolDelMetodo(pool, dep.descripcion) || pool;
       function comboEnPool(objetivo){
-        var c = buscarCombinacion(poolBusq, dep.fecha, objetivo, ventanaDias, tolerancia);
+        var c = buscarCombinacion(poolBusq, dep.fecha, objetivo, ventanaDias, tolerancia, sentidoDeposito(dep.descripcion));
         if(!c) return null;
         if(poolBusq === pool) return c;
         return c.map(function(k){ return pool.indexOf(poolBusq[k]); }).filter(function(k){ return k>=0; });
@@ -4789,18 +4807,29 @@ function exportarChecklist(){
 // La misma partida puede aparecer en dos pasos con fechas DISTINTAS: el Paso 2 usa la fecha del reporte
 // de cajeras (el cheque se recibio el 11-feb) y el Paso 3 la del asiento (se digito el 12-feb). Exigir
 // fecha exacta la contaba dos veces, asi que el emparejamiento acepta la ventana de dias del cotejo.
-function yaCubiertoEnTransito(recolectado, it){
+// La misma partida puede aparecer en dos pasos con fechas DISTINTAS: el Paso 2 usa la fecha del reporte
+// de cajeras (el cheque se recibio el 11-feb) y el Paso 3 la del asiento (se digito el 12-feb). Exigir
+// fecha exacta la contaba dos veces, asi que el emparejamiento acepta la ventana de dias del cotejo.
+// `_cubrio` anota EN QUE PASO cubrio, no un simple si/no: el Yappy de junio lo veian el Paso 0, el 2 y el
+// 3, y al marcarla consumida en el Paso 2 dejaba de estar disponible para el 3, que la volvia a sumar.
+// Dentro de un mismo paso sigue sin poder cubrir dos veces: dos cheques iguales del mismo dia son dos
+// partidas reales y taparian una a la otra.
+function yaCubiertoEnTransito(recolectado, it, paso){
   var VENT = (STATE.options && STATE.options.ventanaDias) || 3;
   var pool = [];
   recolectado.forEach(function(x){
     if(String(x.banco||"")!==String(it.banco||"")) return;
-    if(x._cubrio) return;
+    if(x._cubrio && x._cubrio[paso]) return;
     pool.push({fecha:x.fecha, monto:x.monto, usado:false, ref:x});
   });
   if(!pool.length) return false;
   var combo = buscarSubsetSuma(pool, it.fecha, it.monto, VENT, 0.01, 8);
   if(!combo) return false;
-  combo.forEach(function(i){ pool[i].ref._cubrio = true; });
+  combo.forEach(function(i){
+    var r = pool[i].ref;
+    if(!r._cubrio) r._cubrio = {};
+    r._cubrio[paso] = true;
+  });
   return true;
 }
 function recolectarEnTransito(){
@@ -4821,7 +4850,7 @@ function recolectarEnTransito(){
     var nuevos = [];
     r[k].forEach(function(it){
       if(!esEnTransito(it) || entrante(it)) return;   // lo entrante ya compensó: no se arrastra
-      if(yaCubiertoEnTransito(previos, it)) return;   // el mismo depósito que ya vio otro paso
+      if(yaCubiertoEnTransito(previos, it, k)) return;   // el mismo depósito que ya vio otro paso
       nuevos.push(it);
     });
     out = out.concat(nuevos);
