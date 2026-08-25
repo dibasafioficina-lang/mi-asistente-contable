@@ -2083,6 +2083,39 @@ test("un archivo con celdas de importe ilegibles no se puede subir", () => {
   filas[18][16] = 985.79;
 });
 
+test("el Paso 2 cuadra un ACH que el banco partio en cuatro abonos", () => {
+  // 27-jun-2026: Caja General registra el ACH de 1,313.10 en un solo asiento y el banco lo acredito
+  // separado, un abono por cada quien transfirio: 100.00 + 579.10 + 25.00 el 22 y 609.00 el 23. Son
+  // CUATRO lineas y buscarCombinacion solo prueba hasta tres. El subset-sum sobre el pool entero se
+  // cortaba por el tope de nodos, asi que primero se reduce a las lineas donde un ACH puede caer.
+  CAL_BANCARIO = null;
+  const cg = [{ fecha: "2026-06-27", debito: 0, credito: 1313.10, descripcion: "DEPOSITO ACH STG DEL 27/6/2026", referencia: "ME-1983", fila: 9 }];
+  const est = [
+    { fecha: "2026-06-22", descripcion: "Bouti A Petty Certif", debito: 0, credito: 100.00, fila: 2 },
+    { fecha: "2026-06-22", descripcion: "Bouti A Petty Cert De Mayo", debito: 0, credito: 579.10, fila: 3 },
+    { fecha: "2026-06-22", descripcion: "Son Import A Petty Certificado", debito: 0, credito: 25.00, fila: 4 },
+    { fecha: "2026-06-23", descripcion: "Pago De Shopping Petty Certificado", debito: 0, credito: 609.00, fila: 5 }
+  ];
+  const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 0, "el ACH tiene que cuadrar");
+  eq(h.filter(esEnTransito).length, 0, "y no queda en transito");
+});
+
+test("el pool de un ACH descarta tarjeta, efectivo del camion y cargos", () => {
+  // Un ACH cae en transferencias y depositos de terceros, nunca en una remision de tarjeta ni en el
+  // camion de valores. Ademas de ser lo correcto, es lo que hace que el subset-sum no se corte.
+  const pool = [
+    { fecha: "2026-06-22", desc: "Bouti A Petty Certif", monto: 100 },
+    { fecha: "2026-06-22", desc: "Remisión V/Mc 016005605", monto: 231.70 },
+    { fecha: "2026-06-22", desc: "Remision Clave 016005605", monto: 236.82 },
+    { fecha: "2026-06-22", desc: "Ach De Brinks Panama, S.A.", monto: 310 },
+    { fecha: "2026-06-22", desc: "COMISION V/MC ESTABLECIMIENTO", monto: 12 }
+  ];
+  const sub = poolParaAch(pool);
+  eq(sub.length, 1, "solo la transferencia del cliente");
+  eq(sub[0].desc, "Bouti A Petty Certif");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

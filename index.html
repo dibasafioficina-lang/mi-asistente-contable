@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.12";
+var APP_VERSION="2026.09.13";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1825,6 +1825,21 @@ function compatibleConRemision(descEstado, descDiario){
 // Líneas del estado que compensan el MÉTODO de un depósito (VISA → Remisión V/Mc, CLAVE → Remisión
 // Clave). Devuelve null si el depósito no dice el método. Comparte los objetos del pool, así que marcar
 // `usado` en el subconjunto marca también el pool original.
+// Lineas del estado donde puede caer un ACH: transferencias y depositos de terceros. Se descartan las
+// remisiones de tarjeta, el efectivo del camion y los cargos del banco, que nunca son un ACH. Ademas de
+// ser lo correcto, achica el pool de ~104 lineas a unas pocas: el subset-sum de hasta 6 partidas sobre el
+// pool entero se cortaba por el tope de nodos y devolvia null aunque la combinacion estuviera ahi.
+function poolParaAch(poolEstado){
+  function d(e){ return e.descripcion || e.desc || ""; }
+  var sub = poolEstado.filter(function(e){
+    var n = normTxt(d(e));
+    if(esRemisionVisa(d(e)) || esRemisionClave(d(e))) return false;
+    if(n.indexOf("BRINK")!==-1) return false;
+    if(/COMISION|ITBMS|RETENCION|TIMBRE/.test(n)) return false;
+    return true;
+  });
+  return sub.length ? sub : null;
+}
 function poolDelMetodo(poolEstado, desc){
   var n = normTxt(desc);
   // El Paso 2 arma su pool con el campo "desc" y el Paso 3 con "descripcion": se aceptan los dos, si no
@@ -2277,6 +2292,19 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           var poolMet = poolDelMetodo(pool, dep.descripcion) || pool;
           combo = buscarSubsetSuma(poolMet, dep.fecha, netoPeriodo, 366, tolerancia, 60, "atras");
           if(combo) combo = combo.map(function(i){ return pool.indexOf(poolMet[i]); }).filter(function(i){ return i>=0; });
+        }
+      }
+      // 2c) ACH QUE EL BANCO PARTIO EN VARIOS ABONOS. Caja General registra la transferencia en un solo
+      // asiento y el banco la acredita separada, un abono por cada quien transfirio: el ACH de B/
+      // 1,313.10 del 27-jun-2026 entro como 100.00 + 579.10 + 25.00 el 22 y 609.00 el 23. Son CUATRO
+      // lineas y buscarCombinacion solo prueba hasta tres, asi que hace falta el subset-sum. Sin
+      // direccion, porque los ACH se ordenan antes de que el asiento se digite. Se limita a los ACH: en
+      // los demas metodos, abrir la busqueda a seis lineas invita a las combinaciones de casualidad.
+      if(!combo && esAchDesc(dep.descripcion)){
+        var poolAch = poolParaAch(pool) || pool;
+        combo = buscarSubsetSuma(poolAch, dep.fecha, objetivo, Math.max(ventanaDias, 10), tolerancia, 6);
+        if(combo && poolAch !== pool){
+          combo = combo.map(function(k){ return pool.indexOf(poolAch[k]); }).filter(function(k){ return k>=0; });
         }
       }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
