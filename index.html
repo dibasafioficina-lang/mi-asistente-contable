@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.13";
+var APP_VERSION="2026.09.14";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -5138,9 +5138,12 @@ function desgloseSaldoCaja(){
   var pendientePaso0 = suma(p0, function(x){ return esEnTransito(x) && !entrante(x); });
   var cuadre = cuadreSaldoInicialPaso0(STATE.transitoPrevio, s, STATE.diarioCaja);
   var apertura = cuadre ? cuadre.apertura : (s.inicial || 0);
-  // Se restan los descargos YA asentados: sin esto, tras registrar un descargo el renglon residual
-  // quedaba en un numero absurdo (febrero de 2026: -5,324.67).
-  var compenso = Math.round(Math.max(0, apertura - pendientePaso0 - totalDescargado())*100)/100;
+  // Lo que compenso y sigue sin descargar sale de las PARTIDAS, no de una resta. Calculado por diferencia
+  // (apertura - pendiente - descargado) absorbia cualquier descuadre de la apertura y lo presentaba como
+  // si fuera plata por descargar: en junio de 2026 pedia un asiento de 14,463.12 cuando las partidas que
+  // realmente compensaron sumaban 1,307.78. El descuadre de apertura es otra cosa y lo reporta el Paso 0,
+  // con su propio panel y su asiento de ajuste.
+  var compenso = Math.round(partidasApertura().reduce(function(a,x){ return a+x.monto; },0)*100)/100;
   var resto = Math.round((s.final - transitoCaja - compenso)*100)/100;
   var tm = transitoPorMetodo();
   return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto,
@@ -5260,7 +5263,19 @@ function asientosSugeridosHtml(){
       fecha: fecha, debito: "Banco donde compensó", credito: "[1.1.8] Caja General",
       monto: d.compenso,
       concepto: "Descargo de partidas que venían en tránsito del mes anterior y ya compensaron en el banco",
-      tabla: "",
+      // Las mismas partidas del renglon 1 del desglose: sin la tabla, el asiento pedia un monto que no
+      // se podia contrastar con nada.
+      tabla: (function(){
+        var ps = partidasApertura();
+        if(!ps.length) return "";
+        var f = '<table class="dif-tabla"><thead><tr><th>Compensó</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
+        ps.forEach(function(x){
+          f += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+esc(String(x.concepto||"").slice(0,44))+
+               '</td><td class="num">'+fmt(x.monto)+'</td></tr>';
+        });
+        return f + '<tr class="tot"><td colspan="3">Total</td><td class="num">'+
+               fmt(Math.round(ps.reduce(function(a,x){ return a+x.monto; },0)*100)/100)+'</td></tr></tbody></table>';
+      })(),
       nota: "Fechá cada descargo el día que el banco compensó, no a fin de mes: así el saldo diario de la cuenta es siempre el tránsito."
     });
   }
@@ -5639,15 +5654,50 @@ function exportarEnTransito(){
   XLSX.writeFile(wb, "en_transito_" + mes + ".xlsx");
 }
 // Lee un resumen de partidas en tránsito exportado (para el Paso 0 del mes siguiente).
+/* ---- Fechas invertidas en el resumen en transito ----
+   Excel guarda las fechas ambiguas (dia <= 12) como Date con MES/DIA cambiados: el cheque del 07-abr
+   quedaba como 04-jul y el del 12-may como 05-dic. Con eso la partida "viaja al futuro", nunca compensa
+   —el matching va hacia adelante— y encima el historial la marca vencida por mas de 4 meses.
+   Las filas con dia > 12 son inequivocas: de ellas sale el rango de meses real del resumen, y la fecha
+   ambigua se resuelve eligiendo la orientacion que caiga dentro de ese rango. */
+function mesesInequivocos(rows, cF, desde){
+  var meses = {};
+  for(var r=desde;r<rows.length;r++){
+    var row = rows[r]; if(!row) continue;
+    var v = row[cF];
+    if(v instanceof Date && !isNaN(v)){
+      // Celda Date: solo aporta si el dia no puede confundirse con un mes.
+      if(v.getDate() > 12) meses[v.getFullYear()+"-"+String(v.getMonth()+1).padStart(2,"0")] = true;
+      continue;
+    }
+    // Celda de TEXTO: Excel la dejo asi justamente porque no es ambigua ("19/3/2026"). Son las que mas
+    // aportan — en el resumen de junio de 2026 las unicas inequivocas venian como texto.
+    var m = String(v==null?"":v).trim().match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if(m && parseInt(m[1],10) > 12) meses[m[3]+"-"+String(parseInt(m[2],10)).padStart(2,"0")] = true;
+  }
+  return Object.keys(meses).sort();
+}
+function fechaTransito(raw, meses){
+  if(!(raw instanceof Date) || isNaN(raw) || !meses.length) return toISODate(raw, false);
+  var y = raw.getFullYear(), mo = raw.getMonth()+1, da = raw.getDate();
+  function iso(m, d){ return y+"-"+String(m).padStart(2,"0")+"-"+String(d).padStart(2,"0"); }
+  var directa = iso(mo, da);
+  if(da > 12) return directa;                                  // inequivoca
+  var dentro = function(f){ return f.slice(0,7) >= meses[0] && f.slice(0,7) <= meses[meses.length-1]; };
+  if(dentro(directa)) return directa;
+  var invertida = iso(da, mo);
+  return dentro(invertida) ? invertida : directa;
+}
 function parseTransitoPrevio(rows){
   var hIdx = findHeaderRow(rows, ["Fecha","Banco","Monto"]);
   if(hIdx===-1) throw new Error("No se encontró el encabezado (Fecha, Banco, Monto) en el resumen en tránsito.");
   var h = rows[hIdx];
   var cF=colIdx(h,"Fecha"), cB=colIdx(h,"Banco"), cM=colIdx(h,"Monto"), cC=colIdx(h,"Concepto"), cR=colIdx(h,"Comprobante");
+  var mesesOK = cF>=0 ? mesesInequivocos(rows, cF, hIdx+1) : [];
   var out = [];
   for(var r=hIdx+1;r<rows.length;r++){
     var row = rows[r]; if(!row) continue;
-    var iso = toISODate(cF>=0?row[cF]:null, false);
+    var iso = cF>=0 ? fechaTransito(row[cF], mesesOK) : null;
     var monto = money(cM>=0?row[cM]:0);
     if(!iso || !monto) continue;
     // Normaliza el nombre del banco a la forma canónica (acepta "stg"/"STG", "banistmo", "general", etc.).

@@ -1788,20 +1788,34 @@ test("la misma partida con fechas distintas en dos pasos se cuenta una sola vez"
   cerca(transitoPorMetodo().total, 273.49);
 });
 
-test("el desglose descuenta los descargos ya asentados, contando cada asiento una vez", () => {
-  // El mismo descargo lo ven varios pasos (credito en Caja General y debito en el diario del banco):
-  // sin deduplicar se restaria doble, y sin restar nada el renglon residual daba -5,324.67 en febrero.
+test("el renglon de apertura sale de sus partidas, no de una resta", () => {
+  // Calculado como apertura - pendiente - descargado, el renglon absorbia cualquier descuadre de la
+  // apertura y lo presentaba como plata por descargar: en junio de 2026 pedia un asiento de 14,463.12
+  // cuando las partidas que de verdad habian compensado sumaban 1,307.78. Ahora sale de las partidas, y
+  // el detalle cuadra con el total por construccion.
   STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
-  STATE.saldoCajaGeneral = { inicial: 1000, final: 600, fechaFinal: "2026-02-28" };
-  const inf = { clase: "informativo", concepto: "Descargo de transito", banco: "STG", fecha: "2026-02-10", monto: 350, texto: "x" };
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  // Apertura de 9,000 contra un transito previo de 750: un descuadre enorme, que NO es plata por descargar.
+  STATE.saldoCajaGeneral = { inicial: 9000, final: 600, fechaFinal: "2026-02-28" };
+  const inf = { clase: "informativo", concepto: "Descargo de transito", banco: "STG", fecha: "2026-02-10", monto: 350,
+                partidas: [{ banco: "STG", fecha: "2026-01-20", monto: 350, concepto: "deposito" }], texto: "x" };
   STATE.results = {
-    paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "STG", fecha: "2026-01-20", monto: 400, concepto: "deposito", texto: "x" }],
+    paso0: [
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-02-05", monto: 350, concepto: "deposito", texto: "x" },
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-02-06", monto: 120, concepto: "deposito", texto: "x" },
+      { clase: "en_transito", motivo: "aún pendiente", banco: "STG", fecha: "2026-01-25", monto: 400, concepto: "deposito", texto: "x" }
+    ],
     paso1: [inf],
     paso3: [Object.assign({}, inf)]
   };
+  // El mismo descargo lo ven dos pasos: se cuenta una sola vez.
   cerca(totalDescargado(), 350, "un solo asiento, aunque lo vean dos pasos");
+  const ap = partidasApertura();
+  eq(ap.length, 1, "de las dos compensadas, una ya tiene descargo");
+  cerca(ap[0].monto, 120);
   const d = desgloseSaldoCaja();
-  cerca(d.compenso, 250, "apertura 1000 - pendiente 400 - descargado 350");
+  cerca(d.compenso, 120, "solo lo que compenso y sigue sin descargar");
+  cerca(d.compenso, ap.reduce(function(a,x){ return a+x.monto; },0), "el renglon es la suma de su detalle");
 });
 
 test("una remision de tarjeta al arranque del mes es compensacion del mes anterior, no diferencia", () => {
@@ -2114,6 +2128,47 @@ test("el pool de un ACH descarta tarjeta, efectivo del camion y cargos", () => {
   const sub = poolParaAch(pool);
   eq(sub.length, 1, "solo la transferencia del cliente");
   eq(sub[0].desc, "Bouti A Petty Certif");
+});
+
+test("el resumen en transito corrige las fechas que Excel guardo invertidas", () => {
+  // Excel guarda las fechas ambiguas (dia <= 12) como Date con MES/DIA cambiados: el cheque del 07-abr
+  // quedaba como 04-jul y el del 12-may como 05-dic. Con eso la partida viaja al futuro, nunca compensa
+  // --el matching va hacia adelante-- y el historial la marca vencida por mas de 4 meses.
+  // Las inequivocas (dia > 12) dan el rango real; en el resumen de junio venian como TEXTO.
+  const rows = [
+    ["Fecha","Banco","Monto","Concepto","Comprobante"],
+    ["19/3/2026", "Banistmo", 500.00, "deposito de Banistmo CK", ""],
+    ["20/4/2026", "Banistmo", 85.50, "deposito de Banistmo CK", ""],
+    ["30/5/2026", "Banistmo", 224.89, "deposito de Banistmo CK", ""],
+    [new Date(2026, 6, 4), "Banistmo", 66.45, "deposito de Banistmo CK", ""],
+    [new Date(2026, 11, 5), "Banistmo", 270.41, "deposito de Banistmo CK", ""],
+    [new Date(2026, 3, 25), "Banistmo", 289.60, "deposito de Banistmo CK", ""]
+  ];
+  const tr = parseTransitoPrevio(rows);
+  const porMonto = function(m){ return tr.filter(function(x){ return Math.abs(x.monto-m)<0.005; })[0]; };
+  eq(porMonto(66.45).fecha, "2026-04-07", "04-jul era 07-abr");
+  eq(porMonto(270.41).fecha, "2026-05-12", "05-dic era 12-may");
+  // Las que ya caian dentro del rango no se tocan, ambiguas o no.
+  eq(porMonto(289.60).fecha, "2026-04-25");
+  eq(porMonto(500.00).fecha, "2026-03-19");
+  eq(porMonto(224.89).fecha, "2026-05-30");
+});
+
+test("el asiento de descargo muestra las partidas que lo componen", () => {
+  // Pedia un monto sin decir de que salia: el historial en transito de abajo es otra cosa (lo que queda
+  // pendiente) y no tiene por que sumar lo mismo, asi que no habia con que contrastarlo.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 500, final: 900, fechaFinal: "2026-06-30" };
+  STATE.results = { paso0: [
+    { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "Banistmo", fecha: "2026-06-15", monto: 66.45, concepto: "deposito de Banistmo CK", texto: "x" },
+    { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "Banistmo", fecha: "2026-06-03", monto: 224.89, concepto: "deposito de Banistmo CK", texto: "x" }
+  ]};
+  const h = asientosSugeridosHtml();
+  if (h.indexOf("Descargo del tránsito del mes anterior") < 0) throw new Error("falta el asiento");
+  ["2026-06-15", "66.45", "2026-06-03", "224.89", "291.34"].forEach(function(t){
+    if (h.indexOf(t) < 0) throw new Error("el asiento no muestra " + t);
+  });
 });
 
 /* --- resumen --- */
