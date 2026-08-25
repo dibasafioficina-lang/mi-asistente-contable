@@ -2021,6 +2021,41 @@ test("el renglon de apertura compensada muestra que partidas lo componen", () =>
   if (h.indexOf("Cheque (detalle individual)") >= 0) throw new Error("lista una que ya se descargo");
 });
 
+test("el descargo visto solo por el Paso 1 tambien excluye sus partidas del detalle", () => {
+  // El Paso 1 detecta el descargo desde el credito en Caja General, sin necesidad del navegador del
+  // banco. Su hallazgo no llevaba la lista de partidas, asi que el TOTAL del renglon si restaba el
+  // descargo pero el DETALLE listaba esas mismas partidas como pendientes: la tabla contradecia al
+  // numero de arriba. Pasaba con los 6 cheques de Banistmo de febrero cuando faltaba ese navegador.
+  const cg = [{ fecha: "2026-02-02", debito: 0, credito: 490.00, descripcion: "DESCARGO CK BANISTMO EN CIRCULACION DE ENERO", referencia: "ME-1855", fila: 8 }];
+  const transito = [
+    { fecha: "2026-01-15", banco: "Banistmo", monto: 250.00, concepto: "Cheque (detalle individual)", sentido: "credito" },
+    { fecha: "2026-01-22", banco: "Banistmo", monto: 240.00, concepto: "Cheque (detalle individual)", sentido: "credito" }
+  ];
+  const h1 = paso1([], cg, null, 0.01, [], "2026-02-01", transito);
+  const inf = h1.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); });
+  eq(inf.length, 1, "el Paso 1 tiene que reconocer el descargo");
+  if (!inf[0].partidas) throw new Error("el hallazgo del Paso 1 debe llevar las partidas que descarga");
+  eq(inf[0].partidas.length, 2);
+
+  // Con ese hallazgo, el detalle de la apertura no debe listar las dos partidas ya descargadas.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 800, final: 600, fechaFinal: "2026-02-28" };
+  STATE.results = {
+    paso0: [
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "Banistmo", fecha: "2026-02-03", monto: 250.00, concepto: "Cheque (detalle individual)", texto: "x" },
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "Banistmo", fecha: "2026-02-09", monto: 240.00, concepto: "Cheque (detalle individual)", texto: "x" },
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-02-02", monto: 310.00, concepto: "DEPOSITO BRINKS", texto: "x" }
+    ],
+    paso1: h1
+  };
+  const ap = partidasApertura();
+  eq(ap.length, 1, "solo la de STG, que no tiene descargo");
+  cerca(ap[0].monto, 310.00);
+  // Y el detalle cuadra con el total del renglon.
+  cerca(ap.reduce(function(a,x){ return a+x.monto; },0), desgloseSaldoCaja().compenso, "detalle = renglon");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

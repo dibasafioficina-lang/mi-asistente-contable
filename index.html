@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.10";
+var APP_VERSION="2026.09.11";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1507,6 +1507,10 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   descargos.forEach(function(dg){
     hallazgos.push({
       fecha:dg.fecha, banco:dg.banco, monto:dg.monto, clase:"informativo", concepto:"Descargo de tránsito",
+      // Igual que el de los Pasos 2 y 3: el desglose del saldo las necesita para saber cuales de las
+      // partidas compensadas siguen sin descargo. Sin esta lista, el detalle listaba como pendientes
+      // partidas que el total SI habia restado, y el renglon se contradecia con su propia tabla.
+      partidas: dg.partidas.map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
       texto: "Descargo del tránsito del mes anterior: el crédito a Caja General de B/ " + fmt(dg.monto) + " del " +
              dg.fecha + " (" + dg.banco + ") descarga " + dg.partidas.length + " partida(s) que venían en tránsito y " +
              "compensaron en el banco este mes, así que NO se compara contra el reporte de cajeras — esa venta la " +
@@ -5248,6 +5252,14 @@ function desgloseSaldoCajaHtml(){
       });
       h += '<tr class="tot"><td colspan="3">Total</td><td class="num">'+
            fmt(Math.round(apert.reduce(function(a,x){ return a+x.monto; },0)*100)/100)+'</td></tr></tbody></table>';
+    }
+    // El total sale de la aritmetica del saldo y el detalle de cruzar partidas: si no coinciden, el
+    // detalle esta incompleto y hay que decirlo en vez de dejar una tabla que no suma lo que dice arriba.
+    var sumaAp = Math.round(apert.reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+    if(Math.abs(sumaAp - d.compenso) > 0.03){
+      h += '<div class="cg-note cg-prov">El detalle suma B/ '+fmt(sumaAp)+' y el renglón B/ '+fmt(d.compenso)+'. ' +
+        'No coinciden: falta algún navegador de banco para reconocer todos los asientos de descargo, o alguno ' +
+        'no cruza con su partida. Subí los navegadores de los tres bancos y volvé a ejecutar.</div>';
     }
   }
 
