@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.11";
+var APP_VERSION="2026.09.12";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -590,9 +590,9 @@ function detalleCelda(clave, hoja, rows, r, c){
   }
   return { clave:clave, hoja:hoja, celda:letraCol(c)+(r+1), fecha:fecha, quien:quien, columna:columna };
 }
-function textoUbicacion(u){
+function textoUbicacion(u, nombreArchivo){
   if(!u) return "";
-  var arch = (STATE.files[u.clave] && STATE.files[u.clave].name) || NOMBRE_TIPO[u.clave] || u.clave;
+  var arch = nombreArchivo || (STATE.files[u.clave] && STATE.files[u.clave].name) || NOMBRE_TIPO[u.clave] || u.clave;
   var t = "Archivo: " + arch + (u.hoja ? " · hoja " + u.hoja.trim() : "") + " · celda " + u.celda;
   var det = [];
   if(u.fecha) det.push("la fila del " + u.fecha);
@@ -751,6 +751,45 @@ var NOMBRE_TIPO = {
   retenciones:"el navegador de retenciones a empleados por pagar"
 };
 // null si el archivo va en esa casilla; si no, el texto de la alerta.
+/* ---- Celdas de importe ilegibles: el archivo no entra ----
+   Una celda con texto donde va un numero (el clasico "273.49-255.60-164.08-292.62", los cheques del dia
+   escritos uno detras de otro) se lee como CERO y esa partida no entra al cotejo: el paso puede salir
+   "sin diferencias" con plata faltando. Antes se avisaba DESPUES de conciliar; ahora el archivo se
+   rechaza al subirlo, que es cuando corregir el Excel cuesta menos. Se usa el parser que le toca a la
+   casilla, asi que solo se miran las celdas que el cotejo va a leer de verdad.
+   Los contadores son globales y los usa el aviso de cada paso: se guardan y se reponen. */
+function ilegiblesDelArchivo(key, rows){
+  var nAntes = ilegiblesN, valsAntes = ilegiblesVals;
+  ilegiblesN = 0; ilegiblesVals = [];
+  try{
+    if(key==="reporte"){
+      parseReporteConsolidado(rows);
+      try{ parseChequesDetalle(rows); }catch(e){}
+      try{ parseFaltantesSobrantes(rows); }catch(e){}
+    }
+    else if(key==="transitoPrevio") parseTransitoPrevio(rows);
+    else if(key==="retVisa") parseRetencionesVisa(rows);
+    else if(key==="estBanistmo") parseEstadoCuenta(rows, "banistmo");
+    else if(key==="estStg") parseEstadoCuenta(rows, "stg");
+    else if(key==="estBancoGeneral") parseEstadoCuenta(rows, "bancogeneral");
+    else { parseDiario(rows, null); try{ parseSaldoCajaGeneral(rows); }catch(e){} }
+  }catch(e){}   // si el parser revienta, de eso se encarga la validacion de formato
+  var res = { n: ilegiblesN, vals: ilegiblesVals.slice() };
+  ilegiblesN = nAntes; ilegiblesVals = valsAntes;
+  return res;
+}
+// Texto de la ubicacion sin el nombre del archivo: al subirlo, el usuario ya sabe cual es.
+function ubicacionCorta(rows, valor){
+  var u = ubicarIlegible({ subido: rows }, valor);
+  if(!u) return "";
+  var t = (u.hoja ? "hoja " + u.hoja.trim() + " · " : "") + "celda " + u.celda;
+  var det = [];
+  if(u.fecha) det.push("la fila del " + u.fecha);
+  if(u.quien) det.push("(" + u.quien + ")");
+  var cola = det.join(" ");
+  if(u.columna) cola += (cola ? ", " : "") + "columna " + u.columna;
+  return t + (cola ? " — " + cola : "");
+}
 function validarArchivoParaCasilla(key, rows){
   var esp = CASILLA_ESPERA[key];
   if(!esp) return null;                 // casilla sin firma conocida: no se valida
@@ -772,6 +811,18 @@ function validarArchivoParaCasilla(key, rows){
     if(!movs || !movs.length){
       return "Archivo equivocado: es un estado de cuenta, pero no tiene el formato de " + esp.nombre + ".";
     }
+  }
+  // Ultimo control: celdas de importe que no se pueden leer como numero.
+  var il = ilegiblesDelArchivo(key, rows);
+  if(il.n){
+    var det = il.vals.slice(0,3).map(function(v){
+      var d = ubicacionCorta(rows, v);
+      return "«" + String(v).slice(0,60) + "»" + (d ? " — " + d : "");
+    }).join("\n· ");
+    return "Hay " + il.n + " celda(s) de importe que no se pueden leer como número:\n\n· " + det +
+           (il.vals.length > 3 ? "\n(y " + (il.vals.length - 3) + " más)" : "") +
+           "\n\nSe leerían como CERO y esas partidas quedarían fuera del cotejo, así que el paso podría " +
+           "salir sin diferencias con plata faltando. Corregí la celda en el Excel, volvé a exportarlo y subilo de nuevo.";
   }
   return null;
 }

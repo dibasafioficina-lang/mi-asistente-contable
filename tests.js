@@ -2056,6 +2056,33 @@ test("el descargo visto solo por el Paso 1 tambien excluye sus partidas del deta
   cerca(ap.reduce(function(a,x){ return a+x.monto; },0), desgloseSaldoCaja().compenso, "detalle = renglon");
 });
 
+test("un archivo con celdas de importe ilegibles no se puede subir", () => {
+  // Se leerian como CERO y esa partida quedaria fuera del cotejo: el paso saldria "sin diferencias" con
+  // plata faltando. Mejor rechazarlo al subirlo, que es cuando corregir el Excel cuesta menos.
+  const filas = [];
+  filas[5] = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"CHEQUE"];
+  filas[6] = ["Fecha","Empresa","Cajera","Efectivo\nBrink",null,null,null,null,null,null,null,null,null,null,null,"Cheque\nSr.George","Cheque\nBanistmo"];
+  filas[7] = ["2026-02-11","PETTY SHOP","VERONICA",100,null,null,null,null,null,null,null,null,null,null,null,0,50];
+  filas[18] = ["2026-02-12","PETTY SHOP","DARITZA",80,null,null,null,null,null,null,null,null,null,null,null,0,"273.49-255.60-164.08-292.62"];
+  const libro = filas; libro.hojas = { "FEBRERO ": filas };
+  const msg = validarArchivoParaCasilla("reporte", libro);
+  if (!msg) throw new Error("deberia rechazar el archivo");
+  if (msg.indexOf("273.49-255.60-164.08-292.62") < 0) throw new Error("no dice cual es el valor ilegible");
+  if (msg.indexOf("celda Q19") < 0) throw new Error("no dice en que celda esta");
+  if (msg.indexOf("Cheque / Banistmo") < 0) throw new Error("no dice de que columna es");
+
+  // El mismo archivo con la celda corregida entra sin problema.
+  filas[18][16] = 985.79;
+  eq(validarArchivoParaCasilla("reporte", libro), null, "corregida, tiene que entrar");
+
+  // Y el contador global no queda alterado: lo usa el aviso de cada paso.
+  ilegiblesN = 0; ilegiblesVals = [];
+  filas[18][16] = "no es un numero";
+  validarArchivoParaCasilla("reporte", libro);
+  eq(ilegiblesN, 0, "la validacion no debe ensuciar el contador del cotejo");
+  filas[18][16] = 985.79;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
