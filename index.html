@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.06";
+var APP_VERSION="2026.09.07";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2158,11 +2158,26 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(usarDetalleCheques && esChequeDesc(dep.descripcion)) return;
       var pool = bancoCred[banco];
       var objetivo = dep.credito;
-      // 1) match directo (1:1 o combinación) dentro de la ventana
-      var combo = buscarCombinacion(pool, dep.fecha, objetivo, ventanaDias, tolerancia);
+      // 1) match directo (1:1 o combinación) dentro de la ventana. Un depósito POR TARJETA se busca solo
+      // entre las remisiones de su método: compensa en una remisión V/Mc o Clave, nunca en un pago de
+      // certificado ni en un ACH. Sin esa restricción el motor arma combinaciones que cuadran de pura
+      // casualidad y le roban la línea al depósito que sí le correspondía — el 17-jun-2026 el depósito de
+      // tarjeta de 847.07 "cuadró" con 609.00 de un certificado + 236.82 de una remisión clave + 1.26, y
+      // esa remisión era la del depósito del 22, que terminó saliendo como diferencia.
+      // Si el total no aparece dentro del método NO se reintenta con todo el pool: casi siempre significa
+      // que el asiento consolidó varios métodos, y de eso se encarga el desglose del informe (punto 3),
+      // que busca cada partida en las remisiones que le tocan.
+      var poolBusq = poolDelMetodo(pool, dep.descripcion) || pool;
+      function comboEnPool(objetivo){
+        var c = buscarCombinacion(poolBusq, dep.fecha, objetivo, ventanaDias, tolerancia);
+        if(!c) return null;
+        if(poolBusq === pool) return c;
+        return c.map(function(k){ return pool.indexOf(poolBusq[k]); }).filter(function(k){ return k>=0; });
+      }
+      var combo = comboEnPool(objetivo);
       // 2) STG con retenciones VISA: el banco muestra el neto → probar bruto − retención del día
       if(!combo && banco==="STG" && retVisaPorDia && retVisaPorDia[dep.fecha]!=null){
-        combo = buscarCombinacion(pool, dep.fecha, Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100, ventanaDias, tolerancia);
+        combo = comboEnPool(Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100);
       }
       // 2b) DEPÓSITO ACUMULADO DEL PERÍODO: algunos meses el diario registra la VISA de todo el mes en un
       // solo asiento del último día ("DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026") mientras el
@@ -2201,8 +2216,27 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           desglose.forEach(function(p){
             // Se prueban TODAS, no se corta en la primera que falla: saber si no compensó ninguna o solo
             // algunas es lo que distingue un depósito en tránsito de un problema real.
-            var c = buscarCombinacion(pool, dep.fecha, p.monto, ventDesglose, tolerancia);
-            if(c){ c.forEach(function(i){ pool[i].usado = true; idxs.push(i); }); halladasN++; }
+            // El pool se restringe a las líneas del MISMO MÉTODO (una partida VISA compensa en una
+            // remisión V/Mc, no en un ACH de Brinks). Sin eso la búsqueda armaba combinaciones falsas:
+            // el 22-jun-2026 la VISA de 243.61 "cuadraba" con 55.00 + 185.00 + 3.61 de tres ACH de otros
+            // días, consumía esas tres líneas legítimas y tapaba el match real.
+            var poolP = poolDelMetodo(pool, p.metodo) || pool;
+            var c = buscarCombinacion(poolP, dep.fecha, p.monto, ventDesglose, tolerancia);
+            // La VISA de STG compensa NETA: el banco acredita la remisión con la retención ya descontada
+            // (esa misma venta de 243.61 entró al banco como 231.70). El match directo ya lo contemplaba;
+            // el del desglose no, así que la partida VISA no se encontraba nunca.
+            if(!c && banco==="STG" && retVisaPorDia && retVisaPorDia[p.fecha]!=null &&
+               normTxt(p.metodo).indexOf("VISA")!==-1){
+              c = buscarCombinacion(poolP, dep.fecha, Math.round((p.monto - retVisaPorDia[p.fecha])*100)/100,
+                                    ventDesglose, tolerancia);
+            }
+            if(c){
+              c.forEach(function(k){
+                var idx = pool.indexOf(poolP[k]);   // poolP puede ser un subconjunto: se marca en el pool real
+                if(idx>=0){ pool[idx].usado = true; idxs.push(idx); }
+              });
+              halladasN++;
+            }
             else todas = false;
           });
           if(todas){ partesHalladas = desglose; }

@@ -1887,6 +1887,46 @@ test("si no queda ningun asiento por registrar, el bloque lo dice", () => {
   if (h.indexOf("No queda ninguno") < 0) throw new Error("deberia decir que no queda nada por registrar");
 });
 
+test("un deposito por tarjeta no cuadra con lineas de otro concepto", () => {
+  // 17-jun-2026: el deposito de tarjeta de 847.07 "cuadro" con 609.00 de un pago de certificado + 236.82
+  // de una remision clave + 1.26 sueltos. La suma daba, pero le robo al deposito del 22 la remision que
+  // era suya, y ese termino saliendo como diferencia. Un deposito por tarjeta compensa en remisiones.
+  const cg = [{ fecha: "2026-06-17", debito: 0, credito: 847.07, descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 17/6/2026", referencia: "ME-1", fila: 5 }];
+  const est = [
+    { fecha: "2026-06-23", descripcion: "Pago De Shopping Petty Certificado", debito: 0, credito: 609.00, fila: 2 },
+    { fecha: "2026-06-23", descripcion: "Remision Clave 016005605", debito: 0, credito: 236.82, fila: 3 },
+    { fecha: "2026-06-22", descripcion: "Descripción", debito: 0, credito: 1.26, fila: 4 },
+    { fecha: "2026-06-18", descripcion: "Remision Clave 016005605", debito: 0, credito: 435.22, fila: 5 }
+  ];
+  const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null);
+  // No cuadra por combinacion falsa: queda pendiente (en transito), que es lo honesto.
+  eq(h.filter(function(x){ return x.clase === "en_transito" || (x.clase || "diff") === "diff"; }).length, 1);
+  // Y la remision del 23 NO fue consumida: sigue disponible para el deposito que le corresponde.
+  if (est[1]._transitoUsado) throw new Error("no debia tocar la remision del 23");
+});
+
+test("la partida VISA del desglose se busca NETA de retencion", () => {
+  // 22-jun-2026: el asiento de 480.43 dice CLAVE pero es VISA 243.61 + CLAVE 236.82. La VISA compensa
+  // neta (243.61 - 11.91 = 231.70) y la CLAVE al dia siguiente. El desglose buscaba la VISA por su bruto
+  // y no la encontraba nunca, asi que el asiento entero salia como diferencia.
+  const cg = [{ fecha: "2026-06-22", debito: 0, credito: 480.43, descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 22/6/2026", referencia: "ME-00000001976", fila: 9 }];
+  const reporte = [
+    { fecha: "2026-06-22", banco: "STG", metodo: "VISA", monto: 243.61, cajera: "A" },
+    { fecha: "2026-06-22", banco: "STG", metodo: "CLAVE", monto: 236.82, cajera: "A" }
+  ];
+  const est = [
+    { fecha: "2026-06-22", descripcion: "Remisión V/Mc 016005605 Liq. No. 3906896", debito: 0, credito: 231.70, fila: 2 },
+    { fecha: "2026-06-23", descripcion: "Remision Clave 016005605", debito: 0, credito: 236.82, fila: 3 }
+  ];
+  const ret = { "2026-06-22": 11.91 };
+  const h = paso2(cg, [], est, null, ret, null, 7, 0.01, reporte, null);
+  eq(contarRojas(h), 0, "las dos partidas compensaron");
+  eq(h.filter(esEnTransito).length, 0, "y no queda nada en transito");
+  // Sin el informe de retenciones no hay como saber el neto: ahi si queda pendiente.
+  const h2 = paso2(cg, [], est.map(function(x){ return Object.assign({}, x); }), null, null, null, 7, 0.01, reporte, null);
+  if (contarRojas(h2) + h2.filter(esEnTransito).length === 0) throw new Error("sin retenciones no deberia cuadrar solo");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
