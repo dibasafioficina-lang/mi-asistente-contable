@@ -2171,6 +2171,55 @@ test("el asiento de descargo muestra las partidas que lo componen", () => {
   });
 });
 
+test("el efectivo del dia se empareja partida por partida antes que por la suma", () => {
+  // El banco acredita el Brinks por un lado y la ventanilla por otro, y hasta en dias distintos: el
+  // 11-jun-2026 la ventanilla de 3.61 entro el 12 y el Brinks de 535.00 el 15. Buscar la suma del dia
+  // primero hacia que una combinacion cuadrara de casualidad y se llevara la linea de otro dia, y esos
+  // depositos quedaban en transito teniendo su credito en el banco.
+  CAL_BANCARIO = null;
+  const diario = [
+    { fecha: "2026-06-11", debito: 535.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 11/6/2026", fila: 2 },
+    { fecha: "2026-06-11", debito: 3.61, credito: 0, descripcion: "DEPOSITO DEL 11/6/2026", fila: 3 }
+  ];
+  const estado = [
+    { fecha: "2026-06-12", descripcion: "Descripción", debito: 0, credito: 3.61, fila: 5 },
+    { fecha: "2026-06-15", descripcion: "Ach De Brink S Panama S.A.", debito: 0, credito: 535.00, fila: 6 }
+  ];
+  const c = conciliarBancoEstado(diario, estado, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "los dos tienen su credito en el banco, en dias distintos");
+
+  // Y cuando el banco SI los junta en un solo deposito, la consolidacion por suma sigue funcionando.
+  const diario2 = [
+    { fecha: "2026-06-11", debito: 535.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 11/6/2026", fila: 2 },
+    { fecha: "2026-06-11", debito: 3.61, credito: 0, descripcion: "DEPOSITO DEL 11/6/2026", fila: 3 }
+  ];
+  const estado2 = [{ fecha: "2026-06-12", descripcion: "Ach De Brink S Panama S.A.", debito: 0, credito: 538.61, fila: 5 }];
+  const c2 = conciliarBancoEstado(diario2, estado2, 7, 0.01, null);
+  eq(c2.faltanEnBanco.length, 0, "juntos en una sola linea tambien cuadran");
+});
+
+test("la parte de un deposito consolidado no se suma ademas del total", () => {
+  // 30-jun-2026: el Paso 2 trae de Caja General el asiento consolidado de 280.21 (VISA 91.26 + CLAVE
+  // 188.95) y el Paso 3 ve la CLAVE de 188.95 por separado en el diario del banco. Son la misma plata:
+  // sumar las dos inflaba el transito en 188.95.
+  STATE.options = { ventanaDias: 7, tolerancia: 0.01 };
+  STATE.results = {
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-06-30", monto: 280.21,
+              concepto: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026", texto: "x",
+              partes: [{ metodo: "VISA", monto: 91.26 }, { metodo: "CLAVE", monto: 188.95 }] }],
+    paso3: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-06-30", monto: 188.95,
+              concepto: "DEPOSITO POR TARJETA CLAVE STG DEL 30/06/2026", texto: "x" }]
+  };
+  eq(recolectarEnTransito().length, 1, "es la misma plata");
+  cerca(transitoPorMetodo().total, 280.21, "queda el consolidado, que es el total");
+
+  // Una partida que NO es parte del consolidado si se suma.
+  STATE.results.paso3.push({ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-06-30",
+                             monto: 9.02, concepto: "DEPOSITO DEL 30/06/2026", texto: "x" });
+  eq(recolectarEnTransito().length, 2);
+  cerca(transitoPorMetodo().total, 289.23);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

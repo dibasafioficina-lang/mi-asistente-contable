@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.15";
+var APP_VERSION="2026.09.16";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1782,6 +1782,18 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
   // huérfano al asiento que acumula toda la VISA del mes. Comparten objetos, así que marcar `usado` en
   // este subconjunto marca también el pool original.
   var candidatos = poolEstado.filter(function(e){ return !esRemisionVisa(e.descripcion) && !esRemisionClave(e.descripcion); });
+  // La linea del estado del MISMO importe mas cercana, del dia del deposito en adelante.
+  function igualImporte(f, monto){
+    var mejor = -1, mejorDist = Infinity, tope = Math.max(ventanaDias, 10);
+    for(var k=0;k<candidatos.length;k++){
+      var e = candidatos[k];
+      if(e.usado || Math.abs(montoConc(e) - monto) > tolerancia) continue;
+      if(e.fecha < f) continue;                 // el banco no acredita antes del deposito
+      var dist = distanciaBancaria(f, e.fecha);
+      if(dist <= tope && dist < mejorDist){ mejor = k; mejorDist = dist; }
+    }
+    return mejor;
+  }
   var porFecha = {};
   poolDiario.forEach(function(d, i){
     if(d.usado || !esDepositoEfectivo(d.descripcion)) return;
@@ -1790,7 +1802,18 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
   var n = 0;
   Object.keys(porFecha).sort().forEach(function(f){
     var grupo = porFecha[f].filter(function(i){ return !poolDiario[i].usado; });
-    if(grupo.length < 2) return; // con una sola partida no hay nada que consolidar
+    // PRIMERO cada partida contra una linea del mismo importe: el banco suele acreditar el Brinks por un
+    // lado y la ventanilla por otro, y hasta en dias distintos (el 11-jun-2026 la ventanilla de 3.61
+    // entro el 12 y el Brinks de 535.00 el 15). Buscar la suma del dia antes que eso hacia que una
+    // combinacion cuadrara de casualidad y se llevara la linea que le tocaba a otro dia: los depositos
+    // de 3.61 y 4.90 quedaban en transito teniendo su credito en el banco.
+    grupo = grupo.filter(function(idx){
+      var k = igualImporte(f, poolDiario[idx].monto);
+      if(k < 0) return true;
+      candidatos[k].usado = true; poolDiario[idx].usado = true; n++;
+      return false;
+    });
+    if(grupo.length < 2) return; // lo que quede suelto lo cotejan las pasadas normales
     var suma = Math.round(grupo.reduce(function(a,i){ return a + poolDiario[i].monto; },0)*100)/100;
     // El efectivo clarea con rezago (el banco acredita días después), por eso la ventana se amplía.
     // El efectivo se entrega y el banco lo acredita ese dia o despues, nunca antes.
@@ -2369,6 +2392,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(ultimoDia && dep.fecha===ultimoDia){
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+          // Si el asiento consolida varios metodos, se anota su desglose: el Paso 3 ve esos metodos por
+          // separado en el diario del banco, y sin esto la parte se sumaba ademas del total.
+          partes: desglose ? desglose.map(function(p){ return { metodo:p.metodo, monto:p.monto }; }) : null,
           concepto:concepto, comprobante:refRaw, motivo:"último día del mes",
           texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " (\"" + concepto +
                  "\") es del último día del mes — queda en tránsito para el mes siguiente (aún no compensa en el banco)." + ref,
@@ -4878,6 +4904,22 @@ function yaCubiertoEnTransito(recolectado, it, paso){
     pool.push({fecha:x.fecha, monto:x.monto, usado:false, ref:x});
   });
   if(!pool.length) return false;
+  // Una partida puede ser PARTE de un consolidado que ya vio otro paso: el 30-jun-2026 el Paso 2 trajo
+  // el asiento de 280.21 de Caja General (VISA 91.26 + CLAVE 188.95) y el Paso 3 la CLAVE de 188.95 por
+  // separado, desde el diario del banco. Sumaba las dos y el transito quedaba inflado en 188.95. Se
+  // reconoce con el desglose del informe que la partida consolidada trae anotado: si la nueva coincide
+  // con uno de sus metodos, ya esta contada.
+  for(var p=0;p<pool.length;p++){
+    var prev = pool[p].ref;
+    if(!prev || !prev.partes || prev._cubrio && prev._cubrio[paso]) continue;
+    if(distanciaBancaria(it.fecha, prev.fecha) > VENT) continue;
+    var cabe = prev.partes.some(function(x){ return Math.abs(x.monto - it.monto) < 0.01; });
+    if(cabe){
+      if(!prev._cubrio) prev._cubrio = {};
+      prev._cubrio[paso] = true;
+      return true;
+    }
+  }
   var combo = buscarSubsetSuma(pool, it.fecha, it.monto, VENT, 0.01, 8);
   if(!combo) return false;
   combo.forEach(function(i){
