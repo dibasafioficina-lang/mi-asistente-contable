@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.14";
+var APP_VERSION="2026.09.15";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2480,29 +2480,6 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
   return hallazgos;
 }
 
-// Paso 3: Diario del banco vs Estado de cuenta real (matching 1:1 por monto +- tolerancia, ventana de dias, excluyendo ABORTED)
-function matchUnoAUno(origenA, campoA, origenB, campoB, ventanaDias, tolerancia){
-  var usadosB = new Array(origenB.length).fill(false);
-  var sinPar = [];
-  origenA.forEach(function(a, idxA){
-    if(normTxt(a.descripcion||a.referencia).indexOf("ABORTED")!==-1) return; // excluir silenciosamente
-    var montoA = a[campoA];
-    if(!montoA) return;
-    var mejor = -1, mejorDist = Infinity;
-    origenB.forEach(function(b, idxB){
-      if(usadosB[idxB]) return;
-      if(normTxt(b.descripcion).indexOf("ABORTED")!==-1) return;
-      var montoB = b[campoB];
-      if(Math.abs(montoA-montoB) <= tolerancia){
-        var dist = distanciaBancaria(a.fecha, b.fecha);
-        if(dist <= ventanaDias && dist < mejorDist){ mejor = idxB; mejorDist = dist; }
-      }
-    });
-    if(mejor>=0){ usadosB[mejor] = true; }
-    else { sinPar.push(a); }
-  });
-  return sinPar;
-}
 // Conciliación de CHEQUES para el Paso 3: los cheques del diario (depósitos "CK") y los cheques en
 // tránsito de meses anteriores (Paso 0) se emparejan contra los DEPÓSITOS del estado de cuenta con
 // subset-sum hacia adelante (un cheque clarea en su fecha o después; el banco a veces junta varios).
@@ -3054,7 +3031,6 @@ function esNoRojo(item){ return esSinConfirmar(item) || esEnTransito(item) || es
 function contarRojas(items){ return Array.isArray(items) ? items.filter(function(i){return !esNoRojo(i);}).length : 0; }
 function contarSinConfirmar(items){ return Array.isArray(items) ? items.filter(esSinConfirmar).length : 0; }
 function contarEnTransito(items){ return Array.isArray(items) ? items.filter(esEnTransito).length : 0; }
-function contarEfectivo(items){ return Array.isArray(items) ? items.filter(esEfectivo).length : 0; }
 /* ---- Identidad de un hallazgo ----
    El tilde de "corregido" se guardaba con la POSICIÓN del hallazgo en la lista ("paso0_3"). Al recalcular
    un paso la lista cambia de orden y de tamaño, así que los tildes quedaban aplicados a otras partidas y
@@ -3278,13 +3254,6 @@ function destinoRet(txt){
   if(n.indexOf("CAJA DE AHORRO")!==-1 || n.indexOf("BANCO")!==-1 || n.indexOf("PRESTAMO")!==-1 || n.indexOf("GEORGE")!==-1 || n.indexOf("STG")!==-1 || n.indexOf("NACIONAL")!==-1 || n.indexOf("NALPMA")!==-1) return "Banco / Préstamo";
   if(n.indexOf("COOPERATIVA")!==-1 || n.indexOf("CASESO")!==-1 || n.indexOf("AHORRO")!==-1) return "Cooperativa / Ahorro";
   return null;
-}
-// Separa "TEXTO monto" → {texto, monto} (monto 0 si la línea no termina en número).
-function partirMontoRet(s){
-  var m = String(s).match(/^(.*?)[\s:.\-]*(-?[\d]+[.,]\d{2})\s*$/);
-  // El guion en el detalle es solo cómo se digitó, NO un signo negativo: el signo real lo da la columna
-  // Débito/Crédito del movimiento. Las sub-líneas son siempre magnitudes → valor absoluto.
-  return m ? {texto:m[1].trim(), monto:Math.abs(money(m[2]))} : {texto:String(s).trim(), monto:0};
 }
 // Como partirMontoRet pero el monto puede estar en el MEDIO: "AMABELIS 7.00 CASA FUN VIDA" →
 // {texto:"AMABELIS", monto:7.00, hint:"CASA FUN VIDA"} (el hint es el acreedor específico de la línea).
