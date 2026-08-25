@@ -1992,6 +1992,35 @@ test("una misma partida vista por tres pasos se cuenta una sola vez", () => {
   eq(recolectarEnTransito().length, 2, "dos cheques iguales del mismo dia son dos partidas reales");
 });
 
+test("el renglon de apertura compensada muestra que partidas lo componen", () => {
+  // El renglon daba un total y nada mas: no habia forma de saber que asiento falta. Son las partidas del
+  // Paso 0 que ya compensaron en el banco y todavia no tienen su descargo asentado.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 1000, final: 800, fechaFinal: "2026-02-28" };
+  STATE.results = {
+    paso0: [
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "STG", fecha: "2026-02-02", monto: 246.20, concepto: "DEPOSITO POR TARJETA CLAVE STG DEL 31/01/2026", texto: "x" },
+      { clase: "en_transito", motivo: "compensó — venía del mes anterior", banco: "Banistmo", fecha: "2026-02-03", monto: 153.56, concepto: "Cheque (detalle individual)", texto: "x" },
+      { clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2025-12-22", monto: 600.24, concepto: "cheque en transito", texto: "x" }
+    ],
+    // El descargo del cheque SI se asento: esa partida no debe aparecer en el detalle.
+    paso3: [{ clase: "informativo", concepto: "Descargo de transito", banco: "Banistmo", fecha: "2026-02-03", monto: 153.56,
+              partidas: [{ banco: "Banistmo", fecha: "2026-01-15", monto: 153.56, concepto: "Cheque (detalle individual)" }], texto: "x" }]
+  };
+  const ap = partidasApertura();
+  eq(ap.length, 1, "solo la que no tiene descargo");
+  cerca(ap[0].monto, 246.20);
+  // Y el detalle suma exactamente lo que dice el renglon.
+  const d = desgloseSaldoCaja();
+  cerca(ap.reduce(function(a,x){ return a+x.monto; },0), d.compenso, "el detalle cuadra con el total");
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Apertura que ya compensó en el banco") < 0) throw new Error("falta el bloque");
+  // El concepto se recorta a 44 caracteres en la tabla, asi que se busca el prefijo.
+  if (h.indexOf("DEPOSITO POR TARJETA CLAVE STG DEL") < 0) throw new Error("no lista la partida");
+  if (h.indexOf("Cheque (detalle individual)") >= 0) throw new Error("lista una que ya se descargo");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

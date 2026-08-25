@@ -497,7 +497,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.09";
+var APP_VERSION="2026.09.10";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2133,6 +2133,9 @@ function reconocerDescargo(monto, fecha, banco, desc, poolDescargo, tolerancia){
 function hallazgoDescargo(banco, fecha, monto, desc, dsc, comprobante, fuente){
   if(dsc.partidas){
     return { fecha:fecha, banco:banco, monto:monto, clase:"informativo", concepto:"Descargo de transito",
+      // Las partidas que descarga viajan en el hallazgo: el desglose del saldo las necesita para saber
+      // cuales de las que compensaron siguen sin asiento de descargo.
+      partidas: dsc.partidas.map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
       comprobante:comprobante||"", motivo:"descargo del transito del mes anterior",
       texto: banco + " " + fecha + ": el asiento de B/ " + fmt(monto) + " (" + String(desc||"").trim().slice(0,80) + ") " +
              "descarga " + dsc.partidas.length + " partida(s) del transito del mes anterior — no es un deposito nuevo: " +
@@ -4991,6 +4994,40 @@ function marcarChequesAcreditados(){
     }
   });
 }
+// Partidas del Paso 0 que YA compensaron en el banco este mes y todavia no tienen su asiento de descargo.
+// Son las que componen el renglon "Apertura que ya compenso en el banco": plata que el banco ya acredito
+// pero que sigue registrada en Caja General, asi que infla el saldo contra el transito real.
+function partidasApertura(){
+  var r = STATE.results || {};
+  var descargadas = {};
+  function k(banco, fecha, monto){ return String(banco||"")+"|"+String(fecha||"")+"|"+Math.round((monto||0)*100); }
+  var vistos = {};
+  ["paso1","paso2","paso3"].forEach(function(p){
+    (Array.isArray(r[p])?r[p]:[]).forEach(function(x){
+      if(x.clase!=="informativo" || String(x.concepto||"").indexOf("Descargo")<0 || !x.partidas) return;
+      var idAsiento = k(x.banco, x.fecha, x.monto);
+      if(vistos[idAsiento]) return;   // el mismo asiento lo ven varios pasos
+      vistos[idAsiento] = true;
+      x.partidas.forEach(function(p2){
+        var c = k(p2.banco, p2.fecha, p2.monto);
+        descargadas[c] = (descargadas[c]||0) + 1;
+      });
+    });
+  });
+  return (Array.isArray(r.paso0)?r.paso0:[]).filter(function(x){
+    if(!esEnTransito(x) || !/mes anterior/i.test(x.motivo||"")) return false;
+    // El Paso 0 reporta la partida con la fecha en que COMPENSO; el descargo la referencia con su fecha
+    // original, asi que el cruce va por banco + importe (y consume una sola vez cada una).
+    var hit = null;
+    Object.keys(descargadas).forEach(function(c){
+      if(hit || !descargadas[c]) return;
+      var p = c.split("|");
+      if(p[0]===String(x.banco||"") && Math.abs(parseInt(p[2],10)/100 - x.monto) < 0.005) hit = c;
+    });
+    if(hit){ descargadas[hit]--; return false; }
+    return true;
+  });
+}
 function desgloseSaldoCaja(){
   var s = STATE.saldoCajaGeneral;
   if(!s || s.final==null) return null;
@@ -5195,15 +5232,29 @@ function desgloseSaldoCajaHtml(){
     return cerrar(h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
       'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div>');
   }
-  h += '<div class="cg-h" style="margin-top:16px">La diferencia se compone de dos cosas que van en sentido opuesto</div>';
+  h += '<div class="cg-h" style="margin-top:16px">De qué se compone la diferencia</div>';
+  // (1) Partidas que venian en transito, el banco YA las acredito y nadie hizo el asiento que las saca de
+  // Caja General. Van con su detalle: el renglon solo decia el total y no habia forma de saber cuales son.
+  var apert = partidasApertura();
   if(Math.abs(d.compenso) > 0.005){
-    h += fila("Apertura que ya compensó en el banco", d.compenso, "falta el asiento que la descarga");
+    h += '<div class="dif-sub">1 · Apertura que ya compensó en el banco <b>+ B/ '+fmt(d.compenso)+'</b>' +
+      '<span>Venían en tránsito del mes anterior, el banco ya las acreditó este mes y todavía no se hizo el ' +
+      'asiento que las descarga (débito al banco / crédito a Caja General), así que siguen inflando el saldo.</span></div>';
+    if(apert.length){
+      h += '<table class="dif-tabla"><thead><tr><th>Compensó</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
+      apert.forEach(function(x){
+        h += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+esc(String(x.concepto||"").slice(0,44))+
+             '</td><td class="num">'+fmt(x.monto)+'</td></tr>';
+      });
+      h += '<tr class="tot"><td colspan="3">Total</td><td class="num">'+
+           fmt(Math.round(apert.reduce(function(a,x){ return a+x.monto; },0)*100)/100)+'</td></tr></tbody></table>';
+    }
   }
 
   // (1) Efectivo que sigue en tránsito pero cuyo asiento ya salió de Caja General.
   var ya = partidasYaAcreditadas();
   if(Math.abs(d.soloBanco) > 0.005){
-    h += '<div class="dif-sub">1 · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
+    h += '<div class="dif-sub">'+(Math.abs(d.compenso)>0.005?"2":"1")+' · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
       '<span>El asiento del depósito se hizo el día que se entregó al banco, así que ya no está en la cuenta. ' +
       'Se corrige solo cuando el crédito se registre al compensar.</span></div>';
     if(ya.length){ h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
@@ -5216,7 +5267,7 @@ function desgloseSaldoCajaHtml(){
 
   // (2) Retenciones y comisiones de tarjeta: lo que el banco se quedó y nunca va a acreditar.
   if(Math.abs(d.resto) > 0.005){
-    h += '<div class="dif-sub">2 · Retenciones y comisiones de tarjeta <b>+ B/ '+fmt(d.resto)+'</b>' +
+    h += '<div class="dif-sub">'+(Math.abs(d.compenso)>0.005?"3":"2")+' · Retenciones y comisiones de tarjeta <b>+ B/ '+fmt(d.resto)+'</b>' +
       '<span>La venta entra BRUTA a Caja General y el depósito sale NETO: la diferencia se queda en la cuenta. ' +
       'El banco nunca la va a acreditar, se la descontó.</span></div>';
     var rv = STATE.retVisaDetalle;
