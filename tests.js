@@ -1927,6 +1927,31 @@ test("la partida VISA del desglose se busca NETA de retencion", () => {
   if (contarRojas(h2) + h2.filter(esEnTransito).length === 0) throw new Error("sin retenciones no deberia cuadrar solo");
 });
 
+test("la ventana de compensacion del Paso 0 depende del tipo de partida", () => {
+  // Un cheque puede clarear hasta 4 meses despues; un deposito de ventanilla o de efectivo, no. Con una
+  // ventana unica de 366 dias, el deposito de B/ 1.92 del 20-mar-2026 "compenso" con otro 1.92 del
+  // 03-jun (75 dias despues) por pura coincidencia de importe, y dejo de arrastrarse justo cuando esa
+  // insistencia es la senal de que el deposito nunca se hizo.
+  eq(ventanaTransito({ concepto: "Cheque en circulacion" }), 90);
+  eq(ventanaTransito({ concepto: "deposito en transito" }), 15);
+  eq(ventanaTransito({ concepto: "DEPOSITO POR TARJETA CLAVE STG" }), 12);
+
+  CAL_BANCARIO = null;
+  const previo = [
+    { fecha: "2026-03-20", banco: "STG", monto: 1.92, concepto: "deposito en transito", sentido: "credito" },
+    { fecha: "2026-03-19", banco: "STG", monto: 500.00, concepto: "Cheque en circulacion", sentido: "credito" }
+  ];
+  const estado = [
+    { fecha: "2026-06-03", descripcion: "Descripción", debito: 0, credito: 1.92, fila: 2 },
+    { fecha: "2026-06-03", descripcion: "DEPOSITO", debito: 0, credito: 500.00, fila: 3 }
+  ];
+  const r = consumirTransitoPrevio(previo, { STG: estado }, 0.01);
+  const pend = r.pendientes.map(function(p){ return p.monto; });
+  if (pend.indexOf(1.92) < 0) throw new Error("el deposito de 1.92 a 75 dias no debia darse por compensado");
+  eq(r.compensadas.length, 1, "el cheque si compensa: para el la ventana es de 4 meses");
+  cerca(r.compensadas[0].monto, 500.00);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
