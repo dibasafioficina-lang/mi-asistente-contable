@@ -2430,6 +2430,60 @@ test("avisa cuando al navegador de Caja General le faltan lineas", () => {
   eq(integridadHtml([]), "");
 });
 
+test("un deposito de fin de mes sin credito en Caja General es transito, no diferencia", () => {
+  // Con la mecanica nueva el credito a Caja General se registra el dia que el BANCO COMPENSA. Un deposito
+  // de los ultimos dias del mes compensa el mes siguiente, asi que su credito tambien: comparar el reporte
+  // del dia contra los creditos del dia lo marcaba como "asiento que falta registrar" todos los meses.
+  // Paso en febrero de 2026 con los 3,571.60 del 27-feb y los 2,662.52 del 28-feb.
+  CAL_BANCARIO = null;
+  const reporte = [
+    { fecha: "2026-02-10", banco: "Banistmo", metodo: "VISA", monto: 500.00, cajera: "A" },
+    { fecha: "2026-02-27", banco: "Banistmo", metodo: "VISA", monto: 1124.69, cajera: "A" },
+    { fecha: "2026-02-27", banco: "Banistmo", metodo: "CHEQUE", monto: 1463.08, cajera: "A" },
+    { fecha: "2026-02-28", banco: "Banistmo", metodo: "VISA", monto: 300.00, cajera: "A" }
+  ];
+  // El diario solo registra el deposito del 10; los de fin de mes van el mes que viene.
+  const cg = [{ fecha: "2026-02-10", debito: 0, credito: 500.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/02/2026", referencia: "ME-1", fila: 5 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-02-01", null);
+  eq(contarRojas(h), 0, "los de fin de mes no son diferencias");
+  const t = h.filter(esEnTransito);
+  eq(t.length, 2, "el 27 y el 28 quedan en transito");
+  cerca(t.reduce(function(a,x){ return a+x.monto; },0), 2887.77);
+  if (!t[0].partes) throw new Error("el hallazgo debe llevar su desglose por metodo");
+
+  // Uno de mitad de mes sin credito SIGUE siendo diferencia: ahi si falta el asiento.
+  const reporte2 = [{ fecha: "2026-02-10", banco: "Banistmo", metodo: "VISA", monto: 500.00, cajera: "A" }];
+  const h2 = paso1(reporte2, [], null, 0.01, [], "2026-02-01", null);
+  eq(contarRojas(h2), 1, "a mitad de mes, sin credito, falta el asiento");
+});
+
+test("los cheques del detalle no se suman ademas del consolidado que los contiene", () => {
+  // El consolidado del 27-feb-2026 (3,571.60) incluye CHEQUE 1,463.08, que el detalle del informe trae
+  // como doce cheques sueltos. Sumar las dos cosas inflaba el transito en 1,463.08.
+  STATE.options = { ventanaDias: 7, tolerancia: 0.01 };
+  STATE.results = {
+    paso1: [{ clase: "en_transito", motivo: "depósito de fin de mes", banco: "Banistmo", fecha: "2026-02-27", monto: 3571.60,
+              concepto: "Depósito de fin de mes reportado por la cajera", texto: "x",
+              partes: [{ metodo: "VISA", monto: 1124.69 }, { metodo: "CLAVE", monto: 983.83 }, { metodo: "CHEQUE", monto: 1463.08 }] }],
+    paso2: [
+      { clase: "en_transito", motivo: "cheque pendiente", banco: "Banistmo", fecha: "2026-02-27", monto: 270.30, concepto: "Cheque (detalle individual)", texto: "x" },
+      { clase: "en_transito", motivo: "cheque pendiente", banco: "Banistmo", fecha: "2026-02-27", monto: 1192.78, concepto: "Cheque (detalle individual)", texto: "x" }
+    ]
+  };
+  eq(recolectarEnTransito().length, 1, "los cheques ya estan dentro del consolidado");
+  cerca(transitoPorMetodo().total, 3571.60);
+
+  // Una partida de OTRO metodo, que no es parte del consolidado, si se suma.
+  STATE.results.paso2.push({ clase: "en_transito", motivo: "x", banco: "Banistmo", fecha: "2026-02-27", monto: 9.02, concepto: "DEPOSITO DEL 27/02/2026", texto: "x" });
+  eq(recolectarEnTransito().length, 2, "un deposito de ventanilla no es parte de VISA/CLAVE/CHEQUE");
+  cerca(transitoPrevioTotalTest(), 3580.62);
+
+  // Y una partida del dia siguiente no puede comerse el saldo del dia anterior.
+  STATE.results.paso2 = [{ clase: "en_transito", motivo: "x", banco: "Banistmo", fecha: "2026-02-28", monto: 270.30, concepto: "Cheque (detalle individual)", texto: "x" }];
+  eq(recolectarEnTransito().length, 2, "otra fecha, otra partida");
+});
+function transitoPrevioTotalTest(){ return transitoPorMetodo().total; }
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

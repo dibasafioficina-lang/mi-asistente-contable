@@ -540,7 +540,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.20";
+var APP_VERSION="2026.09.21";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1599,6 +1599,19 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   var dias = {};
   Object.keys(repPorBancoDia).forEach(function(k){ dias[k.split("|")[1]] = true; });
   Object.keys(cajaPorBancoDia).forEach(function(k){ dias[k.split("|")[1]] = true; });
+  /* ---- Depositos de fin de mes bajo la mecanica nueva ----
+     El credito a Caja General se registra el dia que el BANCO COMPENSA, no el dia del deposito. Un
+     deposito de los ultimos dias del mes compensa el mes siguiente, asi que su credito tambien va el mes
+     siguiente: comparar el reporte del dia contra los creditos del dia lo marcaba como "asiento que falta
+     registrar" todos los meses. En febrero de 2026 salian asi los 3,571.60 del 27-feb y los 2,662.52 del
+     28-feb, que estaban bien: sus asientos van en marzo.
+     No se silencia: se clasifica EN TRANSITO, viaja al resumen del mes siguiente y si nunca llega a
+     compensar se sigue arrastrando — que es como se detecta un deposito que no se hizo. */
+  var finMesP1 = ultimoDiaMes(Object.keys(dias));
+  function esFinDeMesP1(f){
+    if(!finMesP1 || !f || f > finMesP1) return false;
+    return distanciaBancaria(f, finMesP1) <= 3;
+  }
 
   var hallazgos = [];
   descargos.forEach(function(dg){
@@ -1668,6 +1681,26 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
         }
       }
 
+      // La cajera reporto el deposito y Caja General todavia no tiene su credito: si es de los ultimos
+      // dias del mes, es lo que se espera — el credito va cuando el banco compense, el mes que viene.
+      if(diff > tolerancia && esFinDeMesP1(fecha)){
+        var partes = (reporte||[]).filter(function(r){ return r.fecha===fecha && r.banco===bk && r.monto>0; });
+        var det = partes.length ? partes.map(function(p){ return p.metodo + " B/ " + fmt(p.monto); }).join(" + ") : "";
+        hallazgos.push({
+          fecha:fecha, banco:bk, monto:diff, clase:"en_transito",
+          concepto:"Depósito de fin de mes reportado por la cajera", comprobante:"",
+          // El desglose por metodo: el Paso 2 ve esos mismos cheques uno por uno en el detalle del
+          // informe, y sin esto se sumarian ademas del consolidado.
+          partes: partes.map(function(p){ return { metodo:p.metodo, monto:p.monto }; }),
+          motivo:"depósito de fin de mes — el crédito se registra al compensar",
+          texto: bk + " " + fecha + ": la cajera reportó B/ " + fmt(diff) + " depositado a " + bk +
+                 (det ? " (" + det + ")" : "") + " y Caja General todavía no tiene el crédito. Es de los últimos días " +
+                 "del mes: el banco lo compensa el mes siguiente y ahí va su asiento. Queda en tránsito y viaja al " +
+                 "resumen del próximo mes." + comprobanteTxt(fecha),
+          fuente: "Reporte consolidado de caja / Diario Caja General"
+        });
+        return;
+      }
       hallazgos.push({
         fecha:fecha, banco:bk, monto:diff, clase:"diff",
         texto: "Diferencia " + bk + " " + fecha + ": reporte de cajeras B/ " + fmt(info.a) +
@@ -5053,6 +5086,19 @@ function exportarChecklist(){
 // 3, y al marcarla consumida en el Paso 2 dejaba de estar disponible para el 3, que la volvia a sumar.
 // Dentro de un mismo paso sigue sin poder cubrir dos veces: dos cheques iguales del mismo dia son dos
 // partidas reales y taparian una a la otra.
+// El concepto de una partida contra el metodo que declara una parte del consolidado. Sin esto, cualquier
+// partida chica cabria en el saldo de cualquier parte: un deposito de ventanilla de 9.02 se comia el
+// saldo de la parte VISA y desaparecia del resumen.
+function mismoMetodoParte(concepto, metodo){
+  var c = normTxt(concepto), m = normTxt(metodo);
+  if(!c || !m) return false;
+  if(m.indexOf("CHEQUE")!==-1 || m==="CK") return esChequeDesc(concepto);
+  if(m.indexOf("VISA")!==-1) return c.indexOf("VISA")!==-1 || c.indexOf("V/MC")!==-1;
+  if(m.indexOf("CLAVE")!==-1) return c.indexOf("CLAVE")!==-1;
+  if(m.indexOf("YAPPY")!==-1) return c.indexOf("YAPPY")!==-1;
+  if(m.indexOf("ACH")!==-1) return c.indexOf("ACH")!==-1;
+  return false;
+}
 function yaCubiertoEnTransito(recolectado, it, paso){
   var VENT = (STATE.options && STATE.options.ventanaDias) || 3;
   var pool = [];
@@ -5062,20 +5108,24 @@ function yaCubiertoEnTransito(recolectado, it, paso){
     pool.push({fecha:x.fecha, monto:x.monto, usado:false, ref:x});
   });
   if(!pool.length) return false;
-  // Una partida puede ser PARTE de un consolidado que ya vio otro paso: el 30-jun-2026 el Paso 2 trajo
-  // el asiento de 280.21 de Caja General (VISA 91.26 + CLAVE 188.95) y el Paso 3 la CLAVE de 188.95 por
-  // separado, desde el diario del banco. Sumaba las dos y el transito quedaba inflado en 188.95. Se
-  // reconoce con el desglose del informe que la partida consolidada trae anotado: si la nueva coincide
-  // con uno de sus metodos, ya esta contada.
+  // Una partida puede ser PARTE de un consolidado que ya vio otro paso: el 30-jun-2026 el Paso 2 trajo el
+  // asiento de 280.21 de Caja General (VISA 91.26 + CLAVE 188.95) y el Paso 3 la CLAVE de 188.95 por
+  // separado. Y una PARTE puede a su vez venir partida: el consolidado del 27-feb-2026 (3,571.60) incluye
+  // CHEQUE 1,463.08, que el detalle del informe trae como doce cheques sueltos.
+  // Por eso no se marca la previa como consumida: se le descuenta a la parte que corresponda hasta
+  // agotarla. La fecha tiene que ser la misma — con ventana, un cheque del dia siguiente se comeria el
+  // saldo del dia anterior.
   for(var p=0;p<pool.length;p++){
     var prev = pool[p].ref;
-    if(!prev || !prev.partes || prev._cubrio && prev._cubrio[paso]) continue;
-    if(distanciaBancaria(it.fecha, prev.fecha) > VENT) continue;
-    var cabe = prev.partes.some(function(x){ return Math.abs(x.monto - it.monto) < 0.01; });
-    if(cabe){
-      if(!prev._cubrio) prev._cubrio = {};
-      prev._cubrio[paso] = true;
-      return true;
+    if(!prev || !prev.partes || !prev.partes.length) continue;
+    if(String(prev.fecha||"") !== String(it.fecha||"")) continue;
+    if(!prev._saldoPartes) prev._saldoPartes = prev.partes.map(function(x){ return x.monto; });
+    for(var q=0;q<prev._saldoPartes.length;q++){
+      if(!mismoMetodoParte(it.concepto, prev.partes[q].metodo)) continue;
+      if(prev._saldoPartes[q] >= it.monto - 0.01){
+        prev._saldoPartes[q] = Math.round((prev._saldoPartes[q] - it.monto)*100)/100;
+        return true;
+      }
     }
   }
   var combo = buscarSubsetSuma(pool, it.fecha, it.monto, VENT, 0.01, 8);
@@ -5095,7 +5145,7 @@ function recolectarEnTransito(){
   // llevan etiqueta de banco); ese solo aparece en el Paso 3, cotejando el diario del banco contra su
   // estado. En enero eran 1,354.25 en cinco partidas del 28 al 31 que quedaban fuera del resumen.
   var pasos = ["paso0","paso1","paso2","paso3"];
-  pasos.forEach(function(k){ if(Array.isArray(r[k])) r[k].forEach(function(x){ delete x._cubrio; }); });
+  pasos.forEach(function(k){ if(Array.isArray(r[k])) r[k].forEach(function(x){ delete x._cubrio; delete x._saldoPartes; }); });
   var out = [];
   pasos.forEach(function(k){
     if(!Array.isArray(r[k])) return;
