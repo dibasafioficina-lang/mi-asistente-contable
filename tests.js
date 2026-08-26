@@ -2484,6 +2484,36 @@ test("los cheques del detalle no se suman ademas del consolidado que los contien
 });
 function transitoPrevioTotalTest(){ return transitoPorMetodo().total; }
 
+
+test("avisa cuando al navegador de un BANCO le faltan los depositos", () => {
+  // Caja General acredita los depositos del mes con comprobantes ME-18xx.
+  const caja = [
+    { fecha:"2026-02-02", referencia:"ME-00000001855", descripcion:"DEPOSITO BRINKS", debito:0, credito:1000 },
+    { fecha:"2026-02-03", referencia:"ME-00000001856", descripcion:"DEPOSITO BRINKS", debito:0, credito:500 }
+  ];
+  // STG trae su lado; Banistmo salio filtrado y no comparte NI UN comprobante.
+  const diarios = {
+    STG: [{ fecha:"2026-02-02", referencia:"ME-00000001855", descripcion:"DEPOSITO", debito:1000, credito:0 }],
+    Banistmo: [{ fecha:"2026-02-11", referencia:"PAY0010655", descripcion:"TRASPASO", debito:3000, credito:0 }]
+  };
+  const estados = {
+    STG: [{ fecha:"2026-02-02", descripcion:"DEPOSITO", debito:0, credito:1000 }],
+    Banistmo: [{ fecha:"2026-02-03", descripcion:"CR REMISION", debito:0, credito:500 }]
+  };
+  const r = integridadDiariosBanco(caja, diarios, estados);
+  eq(r.length, 1, "solo se denuncia el banco sin comprobantes en comun");
+  eq(r[0].banco, "Banistmo");
+  cerca(r[0].sinRespaldo, 500);   // ME-1856 quedo sin contrapartida en ningun banco
+
+  // Si el navegador de Banistmo trae su lado, no se denuncia nada.
+  diarios.Banistmo.push({ fecha:"2026-02-03", referencia:"ME-00000001856", descripcion:"DEPOSITO", debito:500, credito:0 });
+  eq(integridadDiariosBanco(caja, diarios, estados).length, 0, "archivo completo, sin aviso");
+
+  // Un banco cuyo estado de cuenta no tuvo entradas ese mes no se denuncia aunque no comparta nada.
+  const sinEntradas = { Banistmo: [] };
+  eq(integridadDiariosBanco(caja, { Banistmo: [] }, sinEntradas).length, 0, "sin entradas en el estado, sin aviso");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
