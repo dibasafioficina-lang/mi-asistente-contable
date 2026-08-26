@@ -2585,6 +2585,38 @@ test("una venta que entra y no sale por ningun deposito se denuncia", () => {
   STATE.diarioCaja = null; STATE.retVisaDetalle = null;
 });
 
+
+test("una venta sin deposito queda en transito y viaja al mes siguiente", () => {
+  // No la ve ningun paso: no hay linea de banco que cotejar, justamente porque el deposito falta. Si no
+  // entra al resumen, el mes que viene nadie se acuerda de ella y una venta que nunca llego al banco
+  // desaparece sin dejar rastro.
+  STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null; STATE.estados = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 2384.86, fechaFinal: "2026-02-29" };
+  STATE.results = {
+    paso0: [], paso1: [], paso2: [],
+    // El Brinks del mes dice donde compensa el efectivo: de ahi sale el banco de la partida.
+    paso3: [{ clase: "en_transito", motivo: "depósito de fin de mes", banco: "STG", fecha: "2026-02-26", monto: 605.00, concepto: "DEPOSITO BRINKS DEL 26/02/2026", texto: "x" }]
+  };
+  STATE.diarioCaja = [{ fecha: "2026-02-28", referencia: "ME-1877", debito: 2384.86, credito: 0, descripcion: "REPORTE DE VENTA DEL 28/02/2026" }];
+  eq(bancoDelEfectivo(), "STG", "el banco sale de donde compenso el efectivo del mes");
+  const tr = recolectarEnTransito();
+  const p = tr.filter(function(x){ return x.concepto === "Depósito pendiente de identificar"; });
+  eq(p.length, 1, "la venta sin deposito entra al resumen en transito");
+  eq(p[0].banco, "STG");
+  cerca(p[0].monto, 2384.86);
+  cerca(transitoPorMetodo().total, 2989.86);   // 605.00 del Brinks + 2,384.86 de la venta
+  // Y sigue DENTRO de Caja General: entro y no salio, asi que no descuadra el saldo contra el transito.
+  const c = clasificarTransito();
+  eq(c.dentro.filter(function(x){ return x.concepto === "Depósito pendiente de identificar"; }).length, 1);
+  cerca(desgloseSaldoCaja().resto, 0);
+
+  // Sin evidencia de donde compensa el efectivo, la partida va sin banco en vez de con uno inventado.
+  STATE.results.paso3 = [];
+  eq(bancoDelEfectivo(), null, "sin evidencia no se inventa un banco");
+  eq(recolectarEnTransito().filter(function(x){ return x.concepto === "Depósito pendiente de identificar"; })[0].banco, "");
+  STATE.diarioCaja = null;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

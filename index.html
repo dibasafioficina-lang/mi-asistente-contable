@@ -540,7 +540,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.23";
+var APP_VERSION="2026.09.24";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -5237,6 +5237,12 @@ function recolectarEnTransito(){
     });
     out = out.concat(nuevos);
   });
+  // Y al final, las ventas que entraron a la cuenta y no salieron por ningun deposito. No las ve
+  // ningun paso —no hay linea de banco que cotejar, justamente porque falta— pero son plata que sigue
+  // pendiente de depositar y tiene que viajar al mes siguiente igual que el resto.
+  var vsd = [];
+  try{ vsd = partidasVentaSinDeposito(); }catch(e){ vsd = []; }
+  vsd.forEach(function(it){ if(!yaCubiertoEnTransito(out, it, "ventas")) out.push(it); });
   return out;
 }
 
@@ -5259,6 +5265,8 @@ function transitoSigueEnCaja(it){
   if(it._paso === "paso0") return true;
   // El Paso 1 marca lo que la cajera reporto y Caja General no tiene acreditado: sigue dentro por definicion.
   if(it._paso === "paso1") return true;
+  // Una venta sin deposito no salio de la cuenta por definicion: entro y no salio.
+  if(it._paso === "ventas") return true;
   // Un cheque del detalle sigue dentro mientras su deposito no se haya asentado.
   if(it._paso === "paso2" && it.concepto === "Cheque (detalle individual)") return !it._yaAcreditada;
   // El resto (VISA acumulada, Brinks, ventanilla) ya tiene su credito: su transito es del lado del banco.
@@ -5481,9 +5489,11 @@ function desgloseSaldoCaja(){
   var arrastre = (cuadre && !cuadre.ok) ? Math.round(-cuadre.dif*100)/100 : 0;
   // Las ventas que entraron a la cuenta y no salieron por ningun deposito tienen su propio renglon:
   // metidas en el residuo se leian como retenciones de tarjeta y mandaban a buscar donde no era.
+  // Ya no se restan aparte: entran al resumen en transito y por lo tanto a transitoCaja. Se guardan
+  // igual para poder mostrar de que dias vienen.
   var vsd = ventasSinDeposito();
   var sinDepositar = Math.round(vsd.reduce(function(a,x){ return a+x.pendiente; },0)*100)/100;
-  var resto = Math.round((s.final - transitoCaja - compenso - arrastre - sinDepositar)*100)/100;
+  var resto = Math.round((s.final - transitoCaja - compenso - arrastre)*100)/100;
   var tm = transitoPorMetodo();
   return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto, arrastre:arrastre,
            aperturaLibro:(cuadre?cuadre.apertura:null), aperturaTransito:(cuadre?cuadre.total:null),
@@ -5558,6 +5568,48 @@ function ventasSinDeposito(){
   });
   out.sort(function(a,b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
   return out;
+}
+
+/* ---- Donde compensa el efectivo ----
+   Una venta que entro y no salio por ningun deposito tiene que viajar al mes siguiente como cualquier
+   otra partida en transito, y para eso necesita banco: el Paso 0 agrupa por banco para cotejar contra el
+   estado de cuenta. El efectivo no lo dice ningun archivo, asi que se deduce de donde compensaron los
+   depositos de efectivo DE ESTE MISMO MES. Si no hay evidencia o hay mas de un banco, se deja sin banco
+   y la partida lo dice: es preferible a inventarle uno y que no compense nunca. */
+function bancoDelEfectivo(){
+  var r = STATE.results || {}, bancos = {};
+  ["paso0","paso1","paso2","paso3"].forEach(function(k){
+    (Array.isArray(r[k]) ? r[k] : []).forEach(function(x){
+      if(!x.banco) return;
+      var t = normTxt((x.concepto||"") + " " + (x.texto||""));
+      if(esBrinks(t) || t.indexOf("EFECTIVO")!==-1) bancos[x.banco] = true;
+    });
+  });
+  var ks = Object.keys(bancos);
+  return ks.length === 1 ? ks[0] : null;
+}
+// Las ventas sin deposito, con forma de hallazgo, para que entren al resumen en transito y viajen al
+// mes siguiente. Si el deposito nunca aparece, se van a seguir arrastrando: es la unica forma de notar
+// que una venta no llego al banco.
+function partidasVentaSinDeposito(){
+  var banco = bancoDelEfectivo();
+  return ventasSinDeposito().map(function(v){
+    var falta = "B/ " + fmt(v.pendiente) + " de la venta del " + v.fecha;
+    return {
+      fecha: v.fecha, banco: banco || "", monto: v.pendiente, clase: "en_transito",
+      concepto: "Depósito pendiente de identificar", comprobante: v.ref,
+      motivo: "la venta entró a Caja General y no salió por ningún depósito",
+      texto: "El " + v.fecha + " entró una venta de B/ " + fmt(v.venta) + " a Caja General. " +
+        (v.acreditado > 0.005 ? "Se acreditaron B/ " + fmt(v.acreditado) + " de depósitos" : "No se acreditó ningún depósito") +
+        (v.visa > 0.005 ? " (más B/ " + fmt(v.visa) + " de VISA St. Georges, que se acredita a fin de mes)" : "") +
+        (v.reportado > 0.005 ? " y la cajera reportó B/ " + fmt(v.reportado) + " depositados" : " y la cajera no reportó depósito") +
+        ": quedan " + falta + " sin explicar. Se arrastra al mes siguiente hasta que el depósito aparezca en el banco. " +
+        (banco ? "Se asume " + banco + " porque es donde compensó el efectivo de este mes; si fue otro banco, corregilo en el resumen."
+               : "No se pudo deducir a qué banco va: completá el banco en el resumen en tránsito antes de usarlo el mes que viene."),
+      fuente: "Diario Caja General / Reporte consolidado de caja",
+      _paso: "ventas"
+    };
+  });
 }
 
 // Cargos de tarjeta del estado de cuenta, agrupados por concepto. Es lo que el banco se quedó y nunca va
@@ -5925,25 +5977,27 @@ function desgloseSaldoCajaHtml(){
       h += '<tr class="tot"><td colspan="3">Total</td><td class="num">'+fmt(d.soloBanco)+'</td></tr></tbody></table>'; }
   }
 
-  // (2) Ventas que entraron a la cuenta y no salieron por ningun deposito. Va ANTES del renglon de
-  // retenciones porque hasta ahora caia adentro de el, y ahi se leia como un cargo del banco cuando en
-  // realidad es plata que hay que ir a buscar.
+  // Las ventas que entraron y no salieron por ningun deposito YA estan en el resumen en transito, asi que
+  // no son un componente de la diferencia: se cancelan solas. Pero hay que decir de donde salieron, porque
+  // no vienen de ningun paso y en el resumen aparecen sin explicacion.
   if(Math.abs(d.sinDepositar) > 0.005){
-    nBloque++;
-    h += '<div class="dif-sub">'+nBloque+' · Ventas que entraron y no salieron por ningún depósito <b>+ B/ '+fmt(d.sinDepositar)+'</b>' +
+    h += '<div class="dif-sub">Dentro del tránsito: ventas que entraron y no salieron por ningún depósito <b>B/ '+fmt(d.sinDepositar)+'</b>' +
       '<span>La venta del día entra a Caja General y sale cuando se deposita. Estos días entró la venta y el ' +
-      'depósito no aparece: ni acreditado en la cuenta, ni reportado por la cajera. Esa plata sigue dentro de Caja ' +
-      'General y <b>no está en el resumen en tránsito</b>, así que nadie la está siguiendo. ' +
-      'Revisá si el depósito se hizo y no se reportó, si el efectivo todavía está en la caja esperando a Brinks, ' +
-      'o si falta una línea en el informe de cajeras.</span></div>';
+      'depósito no aparece: ni acreditado en la cuenta, ni reportado por la cajera. <b>Quedan en tránsito y viajan al mes ' +
+      'que viene</b>, así que si el depósito nunca aparece se van a seguir arrastrando. Revisá si el depósito se hizo y ' +
+      'no se reportó, si el efectivo todavía está en la caja esperando a Brinks, o si falta una línea en el informe de cajeras.</span></div>';
     h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Comprobante</th><th class="num">Venta del día</th>' +
-         '<th class="num">Acreditado</th><th class="num">Reportó la cajera</th><th class="num">Sin explicar</th></tr></thead><tbody>';
+         '<th class="num">Acreditado</th><th class="num">Reportó la cajera</th><th class="num">Queda en tránsito</th></tr></thead><tbody>';
     (d.ventasSinDeposito||[]).forEach(function(x){
       h += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.ref||"")+'</td><td class="num">'+fmt(x.venta)+'</td>' +
            '<td class="num">'+fmt(Math.round((x.acreditado+x.visa)*100)/100)+'</td><td class="num">'+fmt(x.reportado)+'</td>' +
            '<td class="num"><b>'+fmt(x.pendiente)+'</b></td></tr>';
     });
     h += '<tr class="tot"><td colspan="5">Total</td><td class="num">'+fmt(d.sinDepositar)+'</td></tr></tbody></table>';
+    var bkE = bancoDelEfectivo();
+    h += '<div class="cg-note">' + (bkE
+      ? 'En el resumen quedan a nombre de <b>'+esc(bkE)+'</b>, que es donde compensó el efectivo de este mes. Si esos depósitos van a otro banco, corregilo en el resumen antes de usarlo el mes que viene.'
+      : '<b>Quedan sin banco.</b> No se pudo deducir dónde compensan, y sin banco el Paso 0 del mes que viene no las puede cotejar contra ningún estado de cuenta: completalo a mano en el resumen.') + '</div>';
   }
 
   // (2) Retenciones y comisiones de tarjeta: lo que el banco se quedó y nunca va a acreditar.
@@ -6003,7 +6057,7 @@ function desgloseSaldoCajaHtml(){
   var pasos = [];
   if(d.resto >= 1) pasos.push('saldar las retenciones y comisiones de tarjeta contra gastos bancarios');
   if(d.compenso > 0.005) pasos.push('descargar lo que venía en tránsito y el banco ya acreditó');
-  if(Math.abs(d.sinDepositar) > 0.005) pasos.push('averiguar dónde están las ventas que entraron y no salieron por ningún depósito');
+  if(Math.abs(d.sinDepositar) > 0.005) pasos.push('averiguar dónde están las ventas que entraron y no salieron por ningún depósito, que quedaron en tránsito');
   if(Math.abs(d.arrastre) > 0.005) pasos.push('resolver el arrastre de meses anteriores, que no se corrige con asientos de este mes');
   h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> ' +
     (pasos.length ? pasos.join('; ') + '. ' : '') +
