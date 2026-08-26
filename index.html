@@ -264,6 +264,16 @@
   .cg-pie-as{margin-top:18px;border-top:2px solid var(--line);padding-top:12px}
   .cg-asientos .cg-h{margin-bottom:8px}
   .as-item{background:#F7F4F9;border:1px solid #E2D9EA;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+  .as-item.as-hecho{background:#F2F9F5;border-color:#BEE3CD}
+  .as-reg{display:inline-block;background:var(--ok);color:#fff;font-family:"Mulish";font-size:10px;font-weight:800;
+    letter-spacing:.6px;padding:2px 8px;border-radius:999px;vertical-align:middle;margin-left:6px}
+  .as-reg-nota{font-size:11.5px;color:#3F6E56;background:#EAF5EE;border-radius:8px;padding:7px 9px;margin:8px 0 4px;line-height:1.45}
+  .fas{margin-top:9px;background:#F7F4F9;border:1px solid #E2D9EA;border-radius:9px;padding:8px 10px}
+  .fas-tit{font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:#4A3C63;margin-bottom:5px}
+  .fas-por{font-size:12px;color:var(--slate);line-height:1.45;margin-bottom:6px}
+  .fas-fila{display:flex;gap:10px;font-size:12px;padding:1px 0;color:var(--slate)}
+  .fas-fila span{min-width:58px;flex-shrink:0}
+  .fas-fila b{color:var(--heading);font-weight:700}
   .as-tit{font-size:13px;font-weight:800;color:#4A3C63;margin-bottom:6px}
   .as-tit b{font-family:"Mulish";white-space:nowrap}
   .as-linea{display:flex;gap:10px;font-size:12px;padding:2px 0;color:var(--slate)}
@@ -497,7 +507,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.16";
+var APP_VERSION="2026.09.17";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4581,7 +4591,8 @@ function renderResultados(){
       '<input type="checkbox" data-ck="'+ckKey+'" '+checked+'>' +
       // esc(): el texto lleva descripciones tomadas del Excel. Sin escapar, una celda con HTML se ejecuta
       // al renderizar y puede ocultar una diferencia de la pantalla.
-      '<div class="ftxt">'+esc(item.texto)+'<span class="src">'+esc(item.fuente)+'</span></div>' +
+      '<div class="ftxt">'+esc(item.texto)+'<span class="src">'+esc(item.fuente)+'</span>' +
+        asientoHallazgoHtml(asientoDelHallazgo(item, p.key)) + '</div>' +
       '<div class="famt">'+montoTxt+'</div></div>';
   }
   // Fila de subtotal (alineada con la columna de montos, con espaciador de la casilla).
@@ -5217,6 +5228,70 @@ function cargosTarjetaPorBanco(){
    desglose dice qué asiento falta en cada caso. */
 // Diferencias rojas sin resolver en toda la conciliación. Si el reporte se imprime con alguna abierta,
 // el papel tiene que decirlo: si no, se archiva un cuadre que en realidad no cerró.
+/* ---- Que asiento hay que registrar para cerrar un hallazgo ----
+   Quien usa esto no tiene formacion contable: decir "hay una diferencia de B/ 149.73" no alcanza para
+   saber que hacer. Cada diferencia roja lleva ahora el asiento concreto —que cuenta va al debito, cual al
+   credito y por cuanto— explicado en una linea de por que.
+   La regla de fondo es siempre la misma: Caja General es la cuenta puente. Cuando el dinero SALE de caja
+   hacia el banco, el banco se DEBITA (le entra) y Caja General se ACREDITA (le sale).
+   Devuelve null cuando el hallazgo no se arregla con un asiento (ej. un dato mal escrito en el Excel). */
+function cuentaDeBanco(banco){
+  if(banco === "Banistmo") return "[1.1.1.07] Banistmo";
+  if(banco === "STG") return "[1.1.1.10] St. Georges Bank";
+  if(banco === "Banco General") return "Banco General";
+  return banco || "el banco";
+}
+function asientoDelHallazgo(item, pasoKey){
+  if(!item || (item.clase && item.clase !== "diff")) return null;
+  var monto = Math.abs(item.monto || 0);
+  if(!(monto > 0.005)) return null;
+  var banco = item.banco || "";
+  var txt = String(item.texto || "");
+  var CG = "[1.1.8] Caja General";
+
+  // Paso 1: el informe de cajeras y el diario de Caja General no dicen lo mismo ese dia.
+  if(pasoKey === "paso1" && /Diferencia /.test(txt)){
+    if((item.monto || 0) > 0){
+      // La cajera reporto mas de lo que el diario registro como depositado: falta el asiento del deposito.
+      return { porque: "La cajera reportó este dinero como depositado a " + banco + " y en Caja General no está registrado el depósito. Falta el asiento que lo saca de la caja y lo mete al banco.",
+               debito: cuentaDeBanco(banco), credito: CG, monto: monto,
+               concepto: "Depósito a " + banco + " del " + (item.fecha||"") + " reportado por la cajera",
+               fecha: item.fecha || "" };
+    }
+    return { porque: "En Caja General hay más depósitos a " + banco + " de los que la cajera reportó ese día. Revisá primero el informe de caja: si al informe le falta la venta, se corrige ahí y no con un asiento. Si el que sobra es el asiento, hay que reversarlo.",
+             debito: CG, credito: cuentaDeBanco(banco), monto: monto,
+             concepto: "Reverso del depósito a " + banco + " del " + (item.fecha||"") + " que el informe de caja no respalda",
+             fecha: item.fecha || "", revisarPrimero: true };
+  }
+
+  // Paso 2: Caja General dice que se deposito y el banco no lo muestra.
+  if(pasoKey === "paso2"){
+    return { porque: "Caja General registra este depósito a " + banco + " y el estado de cuenta no lo muestra. Si el banco ya lo acreditó con otra fecha o partido en varias líneas, no hace falta asiento: revisá el estado. Si el depósito nunca se hizo, hay que reversar el asiento.",
+             debito: CG, credito: cuentaDeBanco(banco), monto: monto,
+             concepto: "Reverso del depósito a " + banco + " del " + (item.fecha||"") + " que el banco no acredita",
+             fecha: item.fecha || "", revisarPrimero: true };
+  }
+
+  // Paso 3: el banco muestra un movimiento que el diario no tiene.
+  if(pasoKey === "paso3" && /no aparece registrado en el diario/.test(txt)){
+    return { porque: "El banco acreditó este dinero y en el diario de " + banco + " no hay ningún asiento que lo registre. Es plata que entró y todavía no está en los libros.",
+             debito: cuentaDeBanco(banco), credito: CG, monto: monto,
+             concepto: "Depósito acreditado por " + banco + " el " + (item.fecha||"") + " sin registrar",
+             fecha: item.fecha || "" };
+  }
+  return null;
+}
+function asientoHallazgoHtml(a){
+  if(!a) return "";
+  return '<div class="fas">' +
+    '<div class="fas-tit">' + (a.revisarPrimero ? "Qué revisar y, si corresponde, qué registrar" : "Asiento que falta registrar") + '</div>' +
+    '<div class="fas-por">' + esc(a.porque) + '</div>' +
+    '<div class="fas-fila"><span>Fecha</span><b>' + esc(a.fecha) + '</b></div>' +
+    '<div class="fas-fila"><span>Débito</span><b>' + esc(a.debito) + ' · B/ ' + fmt(a.monto) + '</b></div>' +
+    '<div class="fas-fila"><span>Crédito</span><b>' + esc(a.credito) + ' · B/ ' + fmt(a.monto) + '</b></div>' +
+    '<div class="fas-fila"><span>Concepto</span><b>' + esc(a.concepto) + '</b></div>' +
+  '</div>';
+}
 function rojasAbiertas(){
   var n = 0;
   ["paso0"].concat(PASO_ORDEN).forEach(function(k){
@@ -5232,6 +5307,42 @@ function rojasAbiertas(){
    sea exactamente el transito. Los cargos NO se deducen por diferencia — se leen del estado de cuenta y
    del informe de retenciones, que es dato duro, y se desglosan por banco y concepto para que el asiento
    se pueda digitar directo. */
+/* ---- ¿El asiento sugerido ya se registro? ----
+   Una vez que el asiento esta hecho y el navegador se vuelve a exportar, el reporte no deberia seguir
+   pidiendolo como si faltara. Se busca en el diario de Caja General un CREDITO por su importe con un
+   concepto compatible: primero una linea sola, y si no, varias del mismo dia que sumen (el asiento de
+   cargos suele digitarse renglon por renglon, uno por comision, retencion e ITBMS).
+   La tolerancia es de 3 centavos, la misma del cotejo. */
+function asientoRegistrado(monto, patron){
+  var diario = STATE.diarioCaja || [];
+  if(!(monto > 0.005) || !diario.length) return null;
+  var cand = diario.filter(function(x){
+    return x.credito > 0 && patron.test(normTxt(x.descripcion));
+  });
+  for(var k=0;k<cand.length;k++){
+    if(Math.abs(cand[k].credito - monto) <= 0.03) return { fecha:cand[k].fecha, ref:String(cand[k].referencia||"").trim(), n:1 };
+  }
+  var porDia = {};
+  cand.forEach(function(x){ (porDia[x.fecha] = porDia[x.fecha] || []).push(x); });
+  var hit = null;
+  Object.keys(porDia).sort().forEach(function(f){
+    if(hit || porDia[f].length < 2) return;
+    var s = Math.round(porDia[f].reduce(function(a,x){ return a+x.credito; },0)*100)/100;
+    if(Math.abs(s - monto) <= 0.03) hit = { fecha:f, ref:String(porDia[f][0].referencia||"").trim(), n:porDia[f].length };
+  });
+  return hit;
+}
+function selloRegistrado(reg){
+  if(!reg) return "";
+  return ' <span class="as-reg">REGISTRADO</span>';
+}
+function notaRegistrado(reg){
+  if(!reg) return "";
+  return '<div class="as-reg-nota">Ya hay un asiento por este importe en el diario de Caja General: ' +
+    esc(reg.fecha) + (reg.ref ? " · " + esc(reg.ref) : "") +
+    (reg.n > 1 ? " (" + reg.n + " renglones del mismo día)" : "") +
+    '. Verificá que sea este mismo antes de darlo por hecho.</div>';
+}
 function asientosSugeridosHtml(){
   var d = desgloseSaldoCaja();
   if(!d) return "";
@@ -5254,6 +5365,7 @@ function asientosSugeridosHtml(){
     if(totRet > 0.005) filas += '<tr><td>STG</td><td>Retención VISA (informe de retenciones)</td><td class="num">'+fmt(totRet)+'</td></tr>';
     bloques.push({
       titulo: "Cargos bancarios y de facturación de tarjeta",
+      patron: /COMISION|RETENCION|ITBMS|GASTO|CARGO|BANCARIO|DEVOLUCION/,
       fecha: fecha, debito: "Gastos bancarios / Comisiones de tarjeta", credito: "[1.1.8] Caja General",
       monto: totCargos,
       concepto: "Retenciones, comisiones e ITBMS de tarjeta del período — la venta entra bruta a Caja General y el depósito sale neto",
@@ -5271,6 +5383,7 @@ function asientosSugeridosHtml(){
   if(d.compenso > 0.005){
     bloques.push({
       titulo: "Descargo del tránsito del mes anterior",
+      patron: /DESCARGO|CIRCULACION|TRANSITO|COMPENS/,
       fecha: fecha, debito: "Banco donde compensó", credito: "[1.1.8] Caja General",
       monto: d.compenso,
       concepto: "Descargo de partidas que venían en tránsito del mes anterior y ya compensaron en el banco",
@@ -5297,12 +5410,14 @@ function asientosSugeridosHtml(){
   }
   var h = '<div class="cg-asientos"><div class="cg-h">Asientos por registrar</div>';
   bloques.forEach(function(b, k){
-    h += '<div class="as-item"><div class="as-tit">'+(k+1)+' · '+esc(b.titulo)+' <b>B/ '+fmt(b.monto)+'</b></div>' +
+    var reg = b.patron ? asientoRegistrado(b.monto, b.patron) : null;
+    h += '<div class="as-item'+(reg?" as-hecho":"")+'"><div class="as-tit">'+(k+1)+' · '+esc(b.titulo)+
+      ' <b>B/ '+fmt(b.monto)+'</b>'+selloRegistrado(reg)+'</div>' +
       '<div class="as-linea"><span>Fecha</span><b>'+esc(b.fecha)+'</b></div>' +
       '<div class="as-linea"><span>Débito</span><b>'+esc(b.debito)+' · B/ '+fmt(b.monto)+'</b></div>' +
       '<div class="as-linea"><span>Crédito</span><b>'+esc(b.credito)+' · B/ '+fmt(b.monto)+'</b></div>' +
       '<div class="as-linea"><span>Concepto</span><b>'+esc(b.concepto)+'</b></div>' +
-      b.tabla + (b.nota ? '<div class="cg-note">'+esc(b.nota)+'</div>' : "") + '</div>';
+      notaRegistrado(reg) + b.tabla + (b.nota ? '<div class="cg-note">'+esc(b.nota)+'</div>' : "") + '</div>';
   });
   return h + '</div>';
 }

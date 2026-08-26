@@ -2220,6 +2220,71 @@ test("la parte de un deposito consolidado no se suma ademas del total", () => {
   cerca(transitoPorMetodo().total, 289.23);
 });
 
+test("cada diferencia dice que asiento hay que registrar", () => {
+  // Quien usa esto no tiene formacion contable: "hay una diferencia de B/ 149.73" no alcanza para saber
+  // que hacer. La regla de fondo: cuando el dinero sale de caja al banco, el banco se DEBITA y Caja
+  // General se ACREDITA.
+  // Paso 1, la cajera reporto mas de lo registrado: falta el asiento del deposito.
+  const a1 = asientoDelHallazgo({ clase: "diff", banco: "STG", fecha: "2026-02-05", monto: 149.73,
+    texto: "Diferencia STG 2026-02-05: reporte de cajeras B/ 202.12 vs. diario Caja General" }, "paso1");
+  if (!a1) throw new Error("el Paso 1 deberia sugerir asiento");
+  eq(a1.debito, "[1.1.1.10] St. Georges Bank", "el banco recibe: va al debito");
+  eq(a1.credito, "[1.1.8] Caja General", "la caja entrega: va al credito");
+  cerca(a1.monto, 149.73);
+  if (a1.revisarPrimero) throw new Error("este caso es un asiento directo, no un reverso");
+
+  // Paso 1 al reves (el diario tiene mas que el informe): es un reverso y hay que revisar antes.
+  const a2 = asientoDelHallazgo({ clase: "diff", banco: "STG", fecha: "2026-02-02", monto: -556.51,
+    texto: "Diferencia STG 2026-02-02: reporte de cajeras B/ 1,094.72 vs. diario Caja General" }, "paso1");
+  eq(a2.debito, "[1.1.8] Caja General", "el reverso va al reves");
+  eq(a2.credito, "[1.1.1.10] St. Georges Bank");
+  cerca(a2.monto, 556.51, "el monto va en positivo aunque la diferencia sea negativa");
+  if (!a2.revisarPrimero) throw new Error("un reverso hay que revisarlo antes de registrarlo");
+
+  // Paso 3, el banco acredito y no hay asiento: entra plata que no esta en los libros.
+  const a3 = asientoDelHallazgo({ clase: "diff", banco: "Banistmo", fecha: "2026-02-26", monto: 371.28,
+    texto: "Banistmo 2026-02-26: B/ 371.28 en el estado de cuenta no aparece registrado en el diario contable" }, "paso3");
+  eq(a3.debito, "[1.1.1.07] Banistmo");
+  eq(a3.credito, "[1.1.8] Caja General");
+
+  // Lo que no se arregla con un asiento no lo sugiere.
+  eq(asientoDelHallazgo({ clase: "aviso", banco: "STG", fecha: "2026-02-05", monto: 10, texto: "x" }, "paso1"), null);
+  eq(asientoDelHallazgo({ clase: "en_transito", banco: "STG", fecha: "2026-02-05", monto: 10, texto: "x" }, "paso2"), null);
+  // Y el HTML lleva las tres lineas del asiento.
+  const h = asientoHallazgoHtml(a1);
+  ["Débito", "Crédito", "Concepto", "149.73"].forEach(function(t){
+    if (h.indexOf(t) < 0) throw new Error("al asiento le falta " + t);
+  });
+});
+
+test("un asiento ya registrado se marca REGISTRADO", () => {
+  // Una vez hecho el asiento y reexportado el navegador, el reporte no debe seguir pidiendolo.
+  STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 1000, fechaFinal: "2026-02-28" };
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-02-28", monto: 1000, concepto: "Cheque (detalle individual)", texto: "x" }] };
+  STATE.estados = { Banistmo: [
+    { fecha: "2026-02-15", debito: 170.00, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
+    { fecha: "2026-02-20", debito: 503.11, credito: 0, descripcion: "RETENCION ITBMS V/MC" }
+  ]};
+  STATE.diarioCaja = [];
+  if (asientosSugeridosHtml().indexOf("as-reg") >= 0) throw new Error("sin el asiento no debe decir REGISTRADO");
+  // Registrado en un solo renglon.
+  STATE.diarioCaja = [{ fecha: "2026-02-28", debito: 0, credito: 673.11, descripcion: "COMISIONES Y RETENCIONES DE TARJETA", referencia: "ME-1899", fila: 9 }];
+  if (asientosSugeridosHtml().indexOf("as-reg") < 0) throw new Error("deberia marcarlo REGISTRADO");
+  // Digitado renglon por renglon el mismo dia, que es como suele hacerse.
+  STATE.diarioCaja = [
+    { fecha: "2026-02-28", debito: 0, credito: 170.00, descripcion: "COMISION DE TARJETA", referencia: "ME-1899", fila: 8 },
+    { fecha: "2026-02-28", debito: 0, credito: 503.11, descripcion: "RETENCION ITBMS DE TARJETA", referencia: "ME-1899", fila: 9 }
+  ];
+  if (asientosSugeridosHtml().indexOf("as-reg") < 0) throw new Error("varios renglones del mismo dia tambien cuentan");
+  // Ni un importe distinto ni otro concepto lo marcan.
+  STATE.diarioCaja = [{ fecha: "2026-02-28", debito: 0, credito: 999.99, descripcion: "COMISION DE TARJETA", referencia: "ME-1", fila: 9 }];
+  if (asientosSugeridosHtml().indexOf("as-reg") >= 0) throw new Error("otro importe no es este asiento");
+  STATE.diarioCaja = [{ fecha: "2026-02-28", debito: 0, credito: 673.11, descripcion: "DEPOSITO BRINKS DEL 28/02/2026", referencia: "ME-1", fila: 9 }];
+  if (asientosSugeridosHtml().indexOf("as-reg") >= 0) throw new Error("otro concepto no es este asiento");
+  STATE.estados = null; STATE.diarioCaja = null;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
