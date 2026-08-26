@@ -1871,7 +1871,9 @@ test("los asientos sugeridos salen del estado de cuenta, no de una diferencia", 
   // y concepto para poder digitar el asiento directo. Deducirlos por diferencia arrastraria cualquier
   // otro descuadre al renglon de gastos bancarios.
   STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
-  STATE.saldoCajaGeneral = { inicial: 0, final: 1000, fechaFinal: "2026-02-28" };
+  // La cuenta cierra en 1,894.32 con 1,000.00 en transito: los 894.32 de residuo son los cargos que
+  // quedaron atrapados adentro. Sin residuo no hay nada que sacar de Caja General (ver el test de abajo).
+  STATE.saldoCajaGeneral = { inicial: 0, final: 1894.32, fechaFinal: "2026-02-28" };
   STATE.results = { paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 1000, concepto: "Cheque (detalle individual)", texto: "x" }] };
   STATE.estados = { Banistmo: [
     { fecha: "2026-02-15", debito: 170.00, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
@@ -2260,7 +2262,7 @@ test("cada diferencia dice que asiento hay que registrar", () => {
 test("un asiento ya registrado se marca REGISTRADO", () => {
   // Una vez hecho el asiento y reexportado el navegador, el reporte no debe seguir pidiendolo.
   STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null;
-  STATE.saldoCajaGeneral = { inicial: 0, final: 1000, fechaFinal: "2026-02-28" };
+  STATE.saldoCajaGeneral = { inicial: 0, final: 1673.11, fechaFinal: "2026-02-28" };
   STATE.results = { paso2: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-02-28", monto: 1000, concepto: "Cheque (detalle individual)", texto: "x" }] };
   STATE.estados = { Banistmo: [
     { fecha: "2026-02-15", debito: 170.00, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
@@ -2512,6 +2514,75 @@ test("avisa cuando al navegador de un BANCO le faltan los depositos", () => {
   // Un banco cuyo estado de cuenta no tuvo entradas ese mes no se denuncia aunque no comparta nada.
   const sinEntradas = { Banistmo: [] };
   eq(integridadDiariosBanco(caja, { Banistmo: [] }, sinEntradas).length, 0, "sin entradas en el estado, sin aviso");
+});
+
+
+test("si la cuenta ya cuadra, los cargos no se acreditan a Caja General", () => {
+  // La venta entra bruta y el deposito sale bruto tambien: los cargos del banco nunca quedan atrapados
+  // en Caja General. Cuando el saldo YA es el transito, pedir el asiento de cargos contra Caja General la
+  // dejaria corta por su importe. En febrero de 2026 eran 1,268.76 sobre una cuenta cuadrada al centavo.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 1000, fechaFinal: "2026-02-28" };
+  STATE.results = { paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 1000, concepto: "Cheque (detalle individual)", texto: "x" }] };
+  STATE.estados = { Banistmo: [
+    { fecha: "2026-02-15", debito: 170.00, credito: 0, descripcion: "COMISION V/MC ESTABLECIMIENTO AFILIADO" },
+    { fecha: "2026-02-20", debito: 503.11, credito: 0, descripcion: "RETENCION ITBMS V/MC" }
+  ]};
+  const h = asientosSugeridosHtml();
+  if (h.indexOf("nada que registrar contra Caja General") < 0) throw new Error("deberia avisar que no va contra Caja General");
+  if (h.indexOf("Gastos bancarios / Comisiones") >= 0) throw new Error("no debe proponer el asiento contra Caja General");
+  if (h.indexOf("673.11") < 0) throw new Error("el aviso tiene que decir de cuanto son los cargos");
+  STATE.estados = null;
+});
+
+
+test("la tabla de lo ya acreditado suma exactamente su propio total", () => {
+  // Las dos caras del transito se calculaban por separado: una recorriendo el Paso 0 y los cheques del
+  // Paso 2, la otra restando eso del total del resumen. En febrero de 2026 el renglon decia 9,856.78 y su
+  // tabla listaba 11,499.86. Ahora las dos salen de clasificar la MISMA lista, asi que no pueden diferir.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null;
+  STATE.estados = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 5000, fechaFinal: "2026-02-29" };
+  STATE.results = {
+    paso0: [{ clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2025-12-22", monto: 435.71, concepto: "cheque en transito", texto: "x" }],
+    paso1: [{ clase: "en_transito", motivo: "depósito de fin de mes — el crédito se registra al compensar", banco: "Banistmo", fecha: "2026-02-27", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", texto: "x" }],
+    paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-02-28", monto: 4148.70, concepto: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 28 DE FEBRERO 2026.", texto: "x" }],
+    paso3: []
+  };
+  const c = clasificarTransito();
+  // El deposito de fin de mes del Paso 1 sigue DENTRO de la cuenta: es justo lo que Caja General no acredito.
+  cerca(c.totalDentro, 4007.31);   // 435.71 + 3,571.60
+  cerca(c.totalFuera, 4148.70);    // la VISA acumulada ya tiene su credito
+  eq(c.dentro.length + c.fuera.length, recolectarEnTransito().length, "ninguna partida se pierde ni se duplica");
+  const suma = Math.round(partidasYaAcreditadas().reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+  cerca(suma, desgloseSaldoCaja().soloBanco);
+});
+
+test("una venta que entra y no sale por ningun deposito se denuncia", () => {
+  // El 28 de febrero de 2026 entraron 5,047.42 de venta, la cajera reporto 2,662.52 depositados a Banistmo
+  // y de los otros 2,384.90 no habia rastro. Iban dentro del renglon de retenciones, donde se leian como
+  // un cargo del banco en vez de plata que hay que ir a buscar.
+  STATE.results = { paso1: [{ clase: "en_transito", motivo: "depósito de fin de mes", banco: "Banistmo", fecha: "2026-02-28", monto: 2662.52, concepto: "Depósito de fin de mes reportado por la cajera", texto: "x" }] };
+  STATE.retVisaDetalle = null;
+  STATE.diarioCaja = [
+    { fecha: "2026-02-28", referencia: "ME-1877", debito: 5047.42, credito: 0, descripcion: "REPORTE DE VENTA DEL 28/02/2026" },
+    { fecha: "2026-02-27", referencia: "ME-1876", debito: 900.00, credito: 900.00, descripcion: "REPORTE DE VENTA DEL 27/02/2026" }
+  ];
+  const v = ventasSinDeposito();
+  eq(v.length, 1, "solo el dia que quedo sin explicar");
+  cerca(v[0].pendiente, 2384.90);
+
+  // Un ajuste de saldo no es una venta: no obliga a ningun deposito.
+  STATE.diarioCaja = [{ fecha: "2026-01-01", referencia: "ME-2023", debito: 18123.07, credito: 0, descripcion: "AJUSTA SALDO ERRADO DE LA CAJA GENERAL AL CIERRE" }];
+  eq(ventasSinDeposito().length, 0, "un ajuste de saldo no se denuncia como venta sin depositar");
+
+  // La VISA de St. Georges se acredita en un solo asiento a fin de mes: su venta diaria no esta pendiente.
+  STATE.diarioCaja = [{ fecha: "2026-02-12", referencia: "ME-1864", debito: 431.05, credito: 0, descripcion: "REPORTE DE VENTA DEL 12/02/2026" }];
+  STATE.results = { paso1: [] };
+  eq(ventasSinDeposito().length, 1, "sin el informe de retenciones la venta VISA queda pendiente");
+  STATE.retVisaDetalle = [{ fecha: "2026-02-12", bruto: 431.05, retenciones: -19.97, neto: 411.08 }];
+  eq(ventasSinDeposito().length, 0, "con el informe, la venta VISA del dia ya esta explicada");
+  STATE.diarioCaja = null; STATE.retVisaDetalle = null;
 });
 
 /* --- resumen --- */

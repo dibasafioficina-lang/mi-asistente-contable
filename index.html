@@ -540,7 +540,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.22";
+var APP_VERSION="2026.09.23";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -5232,11 +5232,44 @@ function recolectarEnTransito(){
     r[k].forEach(function(it){
       if(!esEnTransito(it) || entrante(it)) return;   // lo entrante ya compensó: no se arrastra
       if(yaCubiertoEnTransito(previos, it, k)) return;   // el mismo depósito que ya vio otro paso
+      it._paso = k;
       nuevos.push(it);
     });
     out = out.concat(nuevos);
   });
   return out;
+}
+
+/* ---- De que lado esta cada partida en transito ----
+   El resumen de transito y el saldo de Caja General se miran desde lados distintos, y la diferencia entre
+   los dos solo se explica bien si de CADA partida se sabe si su credito a Caja General ya se hizo o no.
+
+   Antes esto se calculaba por resta: "transito dentro de la cuenta" se armaba recorriendo el Paso 0 y los
+   cheques del Paso 2 por su cuenta, y lo demas salia de restarlo del total del resumen. Dos errores:
+   contaba cheques del Paso 2 que el resumen ya habia descartado por estar dentro de un consolidado
+   (1,643.08 en febrero de 2026) y no contaba los depositos de fin de mes del Paso 1, que son justamente
+   los que TODAVIA estan en la cuenta (6,234.12 el mismo mes). El panel terminaba diciendo que 9,856.78
+   ya habian salido de Caja General mientras su propia tabla listaba 11,499.86, y el residuo de
+   retenciones se inflaba a 7,257.47 cuando los cargos del mes eran 1,268.76.
+
+   Ahora las dos caras salen de recorrer UNA sola lista —el resumen en transito— y clasificar partida por
+   partida, asi que la tabla suma siempre su propio total. */
+function transitoSigueEnCaja(it){
+  // El Paso 0 son partidas viejas que aun no se descargaron: su credito a Caja General todavia no se hizo.
+  if(it._paso === "paso0") return true;
+  // El Paso 1 marca lo que la cajera reporto y Caja General no tiene acreditado: sigue dentro por definicion.
+  if(it._paso === "paso1") return true;
+  // Un cheque del detalle sigue dentro mientras su deposito no se haya asentado.
+  if(it._paso === "paso2" && it.concepto === "Cheque (detalle individual)") return !it._yaAcreditada;
+  // El resto (VISA acumulada, Brinks, ventanilla) ya tiene su credito: su transito es del lado del banco.
+  return false;
+}
+function clasificarTransito(){
+  marcarChequesAcreditados();
+  var dentro = [], fuera = [];
+  recolectarEnTransito().forEach(function(x){ (transitoSigueEnCaja(x) ? dentro : fuera).push(x); });
+  function suma(a){ return Math.round(a.reduce(function(s,x){ return s+(x.monto||0); },0)*100)/100; }
+  return { dentro:dentro, fuera:fuera, totalDentro:suma(dentro), totalFuera:suma(fuera) };
 }
 
 // Un ítem en tránsito es cheque si su concepto/texto lo dice (Paso 0 y detalle de cheques); el resto
@@ -5419,12 +5452,11 @@ function desgloseSaldoCaja(){
   // Paso 2 no vio compensar. El efectivo que detecta el Paso 3 (Brinks, ventanilla) ya está acreditado en
   // Caja General —su tránsito es del lado del BANCO—, así que va al resumen del Paso 0 pero no compone
   // este saldo. Sin la distinción el renglón de retenciones salía negativo.
-  marcarChequesAcreditados();
-  // Dentro de Caja General solo sigue lo que NO tiene asiento de salida: las partidas del Paso 0 aun
-  // pendientes y los cheques del detalle cuyo deposito no se asento. El resto del transito ya salio de
-  // la cuenta (su asiento ES un credito de Caja General) y esta en transito del lado del banco.
-  var transitoCaja = Math.round((suma(p0, function(x){ return esEnTransito(x) && !entrante(x); }) +
-                                 suma(p2, function(x){ return esEnTransito(x) && x.concepto==="Cheque (detalle individual)" && !x._yaAcreditada; }))*100)/100;
+  // Dentro de Caja General sigue lo que no tiene asiento de salida; el resto ya se acredito y su
+  // transito es del lado del banco. Las dos caras salen de clasificar el MISMO resumen, partida por
+  // partida: calcularlas por separado dejaba tablas que no sumaban su total.
+  var clas = clasificarTransito();
+  var transitoCaja = clas.totalDentro;
   // De lo que compensó durante el mes, cuánto sigue DENTRO del saldo. No se puede asumir que está todo:
   // si el descargo ya se hizo, restarlo otra vez deja el renglón de retenciones en un número absurdo
   // (pasó al registrar el descargo de enero: daba −12,037.82). Se deduce del propio saldo de apertura —
@@ -5447,33 +5479,87 @@ function desgloseSaldoCaja(){
   // viejos; si abre con MENOS, falta plata en la apertura (o el ajuste que la corrige no se detecto).
   // En enero de 2026, sin contemplar el signo negativo, el residuo daba -10,466.72 en vez de 2,537.25.
   var arrastre = (cuadre && !cuadre.ok) ? Math.round(-cuadre.dif*100)/100 : 0;
-  var resto = Math.round((s.final - transitoCaja - compenso - arrastre)*100)/100;
+  // Las ventas que entraron a la cuenta y no salieron por ningun deposito tienen su propio renglon:
+  // metidas en el residuo se leian como retenciones de tarjeta y mandaban a buscar donde no era.
+  var vsd = ventasSinDeposito();
+  var sinDepositar = Math.round(vsd.reduce(function(a,x){ return a+x.pendiente; },0)*100)/100;
+  var resto = Math.round((s.final - transitoCaja - compenso - arrastre - sinDepositar)*100)/100;
   var tm = transitoPorMetodo();
   return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto, arrastre:arrastre,
            aperturaLibro:(cuadre?cuadre.apertura:null), aperturaTransito:(cuadre?cuadre.total:null),
            totalResumen:tm.total, n:tm.count,
-           soloBanco: Math.round((tm.total - transitoCaja)*100)/100 };
+           soloBanco: clas.totalFuera, sinDepositar:sinDepositar, ventasSinDeposito:vsd };
 }
 /* ---- Detalle de los dos componentes de la diferencia ----
    Los dos van en sentidos opuestos y conviene poder verlos partida por partida, no solo el total. */
 // Lo que está en el tránsito pero YA salió de Caja General: el efectivo cuyo asiento se hizo el día del
 // depósito. Son las partidas que aporta el Paso 3 y que el Paso 2 no ve (no llevan etiqueta de banco).
-function partidasYaAcreditadas(){
+function partidasYaAcreditadas(){ return clasificarTransito().fuera; }
+/* ---- Ventas del dia que no tienen deposito ----
+   La venta del dia entra como DEBITO a Caja General y sale como CREDITO cuando se deposita. Si un dia
+   entra la venta y no sale nada, esa plata se queda en la cuenta sin estar en el resumen en transito:
+   nadie la ve. En febrero de 2026 eran 2,667.15 de los dias 27 y 28 —la parte que la cajera no reporto
+   haber depositado— y el panel los presentaba como "retenciones de tarjeta", que es donde iba a parar
+   todo lo que no se supiera explicar.
+
+   Tres cosas no cuentan como venta sin depositar, y hay que descontarlas o el aviso sale todos los dias:
+   1. La VISA de St. Georges, que se acredita en un solo asiento a fin de mes (el informe de retenciones
+      dice cuanto vendio cada dia).
+   2. Lo que el Paso 1 ya marco en transito: la cajera lo reporto, el credito va cuando el banco compense.
+   3. Los descargos del transito del mes anterior, que son creditos del dia pero de ventas viejas. */
+function ventasSinDeposito(){
+  var cg = STATE.diarioCaja || [];
+  if(!cg.length) return [];
   var r = STATE.results || {};
-  var entrante = function(x){ return /mes anterior/i.test(x.motivo||""); };
-  var enCG = [];
-  (Array.isArray(r.paso0)?r.paso0:[]).forEach(function(x){ if(esEnTransito(x) && !entrante(x)) enCG.push(x); });
-  marcarChequesAcreditados();
-  (Array.isArray(r.paso2)?r.paso2:[]).forEach(function(x){ if(esEnTransito(x) && x.concepto==="Cheque (detalle individual)" && !x._yaAcreditada) enCG.push(x); });
-  var cuenta = {};
-  function k(x){ return (x.banco||"")+"|"+(x.fecha||"")+"|"+Math.round((x.monto||0)*100); }
-  enCG.forEach(function(x){ cuenta[k(x)] = (cuenta[k(x)]||0) + 1; });
-  return recolectarEnTransito().filter(function(x){
-    var c = k(x);
-    if(cuenta[c]){ cuenta[c]--; return false; }
-    return true;
+  // Ventas VISA STG por dia, del informe de retenciones: su credito no llega hasta fin de mes.
+  var visaDia = {};
+  (STATE.retVisaDetalle || []).forEach(function(d){ visaDia[d.fecha] = Math.round(((visaDia[d.fecha]||0) + d.bruto)*100)/100; });
+  // Lo que el Paso 1 dejo en transito ese dia (deposito reportado por la cajera, sin credito todavia).
+  var transDia = {};
+  (Array.isArray(r.paso1) ? r.paso1 : []).forEach(function(x){
+    if(esEnTransito(x)) transDia[x.fecha] = Math.round(((transDia[x.fecha]||0) + x.monto)*100)/100;
   });
+  // Creditos que son descargo de transito viejo: no pagan la venta de hoy.
+  var desc = {};
+  ["paso1","paso2","paso3"].forEach(function(k){
+    (Array.isArray(r[k]) ? r[k] : []).forEach(function(x){
+      if(x.clase==="informativo" && String(x.concepto||"").indexOf("Descargo")!==-1)
+        desc[(x.fecha||"")+"|"+Math.round((x.monto||0)*100)] = true;
+    });
+  });
+  var comp = {};
+  cg.forEach(function(x){
+    var k = String(x.referencia==null?"":x.referencia).trim();
+    if(!/^ME-/i.test(k)) return;
+    if(!comp[k]) comp[k] = {ref:k, fecha:x.fecha, venta:0, acreditado:0};
+    if(x.fecha && x.fecha < comp[k].fecha) comp[k].fecha = x.fecha;
+    // Solo la VENTA del dia obliga a un deposito. Otros debitos —un ajuste de saldo, la reposicion de
+    // un fondo— entran a la cuenta y no salen por el banco: en enero de 2026 un "AJUSTA SALDO ERRADO
+    // DE LA CAJA GENERAL AL CIERRE" de 18,123.07 se denunciaba como venta sin depositar.
+    // "VETA" no es un descuido nuestro: asi viene escrito el asiento del 14 de febrero de 2026.
+    if(x.debito > 0 && /VENTA|VETA/.test(normTxt(x.descripcion)))
+      comp[k].venta = Math.round((comp[k].venta + x.debito)*100)/100;
+    if(x.credito > 0){
+      // El acumulado de VISA de fin de mes ("DEL 1 AL 28") paga ventas de todo el mes, no las de hoy.
+      if(/\bDEL\s+\d+\s+AL\s+\d+/i.test(String(x.descripcion||""))) return;
+      if(desc[(x.fecha||"")+"|"+Math.round(x.credito*100)]) return;
+      comp[k].acreditado = Math.round((comp[k].acreditado + x.credito)*100)/100;
+    }
+  });
+  var out = [];
+  Object.keys(comp).forEach(function(k){
+    var c = comp[k];
+    if(!(c.venta > 0)) return;
+    var visa = visaDia[c.fecha] || 0, trans = transDia[c.fecha] || 0;
+    var pend = Math.round((c.venta - c.acreditado - visa - trans)*100)/100;
+    if(pend <= 1) return;   // hasta un dolar es redondeo de faltantes/sobrantes, no una omision
+    out.push({ ref:c.ref, fecha:c.fecha, venta:c.venta, acreditado:c.acreditado,
+               visa:visa, reportado:trans, pendiente:pend });
+  });
+  out.sort(function(a,b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
+  return out;
 }
+
 // Cargos de tarjeta del estado de cuenta, agrupados por concepto. Es lo que el banco se quedó y nunca va
 // a acreditar, así que queda en Caja General porque la venta entró bruta.
 function cargosTarjetaPorBanco(){
@@ -5659,7 +5745,20 @@ function asientosSugeridosHtml(){
   var rv = STATE.retVisaDetalle || [];
   var totRet = rv.length ? Math.round(rv.reduce(function(a,x){ return a+Math.abs(x.retenciones); },0)*100)/100 : 0;
   var totCargos = Math.round((cg.reduce(function(a,b){ return a+b.total; },0) + totRet)*100)/100;
-  if(totCargos > 0.005){
+  if(Math.abs(d.resto) < 1 && totCargos > 0.005){
+    // La cuenta ya cuadra: nada de esos cargos quedo atrapado en Caja General. Proponer igual el asiento
+    // la dejaria corta por su importe. Los cargos existen, pero su contrapartida es el banco.
+    bloques.push({
+      titulo: "Cargos de tarjeta del per\u00edodo — nada que registrar contra Caja General",
+      patron: /(?!)/, fecha: fecha, debito: "", credito: "", monto: 0, soloNota: true,
+      concepto: "",
+      tabla: "",
+      nota: "Los estados de cuenta traen B/ " + fmt(totCargos) + " de comisiones, retenciones e ITBMS de tarjeta, " +
+        "pero el saldo de Caja General ya coincide con el tr\u00e1nsito: de esos cargos no qued\u00f3 nada dentro de la cuenta. " +
+        "Su asiento va contra el banco (d\u00e9bito a gastos bancarios / cr\u00e9dito al banco), no contra Caja General, " +
+        "y ese registro est\u00e1 fuera de este m\u00f3dulo. Acreditar Caja General por este importe la dejar\u00eda corta en B/ " + fmt(totCargos) + "."
+    });
+  } else if(totCargos > 0.005){
     var filas = "";
     cg.forEach(function(b){
       Object.keys(b.porTipo).sort().forEach(function(t){
@@ -5713,9 +5812,19 @@ function asientosSugeridosHtml(){
       '<div class="cg-note">No queda ninguno: el saldo de Caja General ya es exactamente el tránsito por compensar.</div></div>';
   }
   var h = '<div class="cg-asientos"><div class="cg-h">Asientos por registrar</div>';
+  var nAs = 0;
   bloques.forEach(function(b, k){
+    // Un bloque "soloNota" no es un asiento: es una aclaracion de por que NO hay que registrar nada.
+    // Dibujarlo con debito, credito y B/ 0.00 se leia como un asiento en cero.
+    if(b.soloNota){
+      h += '<div class="as-item as-aviso"><div class="as-tit">'+esc(b.titulo)+'</div>' +
+           '<div class="cg-note">'+esc(b.nota)+'</div></div>';
+      return;
+    }
     var reg = b.patron ? asientoRegistrado(b.monto, b.patron) : null;
-    h += '<div class="as-item'+(reg?" as-hecho":"")+'"><div class="as-tit">'+(k+1)+' · '+esc(b.titulo)+
+
+    nAs++;
+    h += '<div class="as-item'+(reg?" as-hecho":"")+'"><div class="as-tit">'+nAs+' · '+esc(b.titulo)+
       ' <b>B/ '+fmt(b.monto)+'</b>'+selloRegistrado(reg)+'</div>' +
       '<div class="as-linea"><span>Fecha</span><b>'+esc(b.fecha)+'</b></div>' +
       '<div class="as-linea"><span>Débito</span><b>'+esc(b.debito)+' · B/ '+fmt(b.monto)+'</b></div>' +
@@ -5816,8 +5925,30 @@ function desgloseSaldoCajaHtml(){
       h += '<tr class="tot"><td colspan="3">Total</td><td class="num">'+fmt(d.soloBanco)+'</td></tr></tbody></table>'; }
   }
 
+  // (2) Ventas que entraron a la cuenta y no salieron por ningun deposito. Va ANTES del renglon de
+  // retenciones porque hasta ahora caia adentro de el, y ahi se leia como un cargo del banco cuando en
+  // realidad es plata que hay que ir a buscar.
+  if(Math.abs(d.sinDepositar) > 0.005){
+    nBloque++;
+    h += '<div class="dif-sub">'+nBloque+' · Ventas que entraron y no salieron por ningún depósito <b>+ B/ '+fmt(d.sinDepositar)+'</b>' +
+      '<span>La venta del día entra a Caja General y sale cuando se deposita. Estos días entró la venta y el ' +
+      'depósito no aparece: ni acreditado en la cuenta, ni reportado por la cajera. Esa plata sigue dentro de Caja ' +
+      'General y <b>no está en el resumen en tránsito</b>, así que nadie la está siguiendo. ' +
+      'Revisá si el depósito se hizo y no se reportó, si el efectivo todavía está en la caja esperando a Brinks, ' +
+      'o si falta una línea en el informe de cajeras.</span></div>';
+    h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Comprobante</th><th class="num">Venta del día</th>' +
+         '<th class="num">Acreditado</th><th class="num">Reportó la cajera</th><th class="num">Sin explicar</th></tr></thead><tbody>';
+    (d.ventasSinDeposito||[]).forEach(function(x){
+      h += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.ref||"")+'</td><td class="num">'+fmt(x.venta)+'</td>' +
+           '<td class="num">'+fmt(Math.round((x.acreditado+x.visa)*100)/100)+'</td><td class="num">'+fmt(x.reportado)+'</td>' +
+           '<td class="num"><b>'+fmt(x.pendiente)+'</b></td></tr>';
+    });
+    h += '<tr class="tot"><td colspan="5">Total</td><td class="num">'+fmt(d.sinDepositar)+'</td></tr></tbody></table>';
+  }
+
   // (2) Retenciones y comisiones de tarjeta: lo que el banco se quedó y nunca va a acreditar.
-  if(Math.abs(d.resto) > 0.005){
+  // Menos de un dolar es el redondeo de los faltantes y sobrantes del mes, no un renglon del reporte.
+  if(Math.abs(d.resto) >= 1){
     nBloque++;
     // El residuo puede quedar NEGATIVO cuando el asiento de cargos del mes ya se registro: entonces de la
     // cuenta salio mas de lo que quedaba por salir, y titularlo "retenciones + B/ -1,000.54" no se
@@ -5867,8 +5998,16 @@ function desgloseSaldoCajaHtml(){
             "bancarios va por los cargos del estado, no por el residuo.") + '</div>';
     }
   }
-  h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> saldar las retenciones de tarjeta contra gastos bancarios; ' +
-    'lo demás se corrige solo al acreditar Caja General el día que el banco compensa, no el día del depósito.</div>';
+  // Lo que falta depende del mes. Cuando el residuo es cero, decirle que salde retenciones contra gastos
+  // bancarios lo manda a hacer un asiento que descuadraria la cuenta.
+  var pasos = [];
+  if(d.resto >= 1) pasos.push('saldar las retenciones y comisiones de tarjeta contra gastos bancarios');
+  if(d.compenso > 0.005) pasos.push('descargar lo que venía en tránsito y el banco ya acreditó');
+  if(Math.abs(d.sinDepositar) > 0.005) pasos.push('averiguar dónde están las ventas que entraron y no salieron por ningún depósito');
+  if(Math.abs(d.arrastre) > 0.005) pasos.push('resolver el arrastre de meses anteriores, que no se corrige con asientos de este mes');
+  h += '<div class="cg-note"><b>Qué falta para que cuadre:</b> ' +
+    (pasos.length ? pasos.join('; ') + '. ' : '') +
+    'Lo demás se corrige solo al acreditar Caja General el día que el banco compensa, no el día del depósito.</div>';
   return cerrar(h);
 }
 function cierreCajaHtml(){
