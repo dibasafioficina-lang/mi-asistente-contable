@@ -1,2 +1,5 @@
 node_modules/
 *.zip
+_*.js
+_*.html
+~$*
