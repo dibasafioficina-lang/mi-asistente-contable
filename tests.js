@@ -2334,6 +2334,65 @@ test("el reverso esconde el debito/credito hasta confirmar la revision", () => {
   if (h2.indexOf("Asiento que falta registrar") < 0) throw new Error("le falta el titulo");
 });
 
+test("ST GEORGES se reconoce como STG", () => {
+  // El banco se escribe de varias formas segun quien exporte. Sin esto, el resumen en transito de junio
+  // de 2026 traia 1,972.60 con banco "ST GEORGES" y esas cinco partidas quedaban fuera del cotejo del
+  // Paso 0: ni compensaban ni quedaban pendientes, desaparecian.
+  ["STG", "ST GEORGES", "St. Georges", "DEPOSITO POR TARJETA CLAVE STG"].forEach(function(s){
+    eq(clasificarBancoPorTexto(s), "STG", s + " deberia ser STG");
+  });
+  eq(clasificarBancoPorTexto("Banistmo"), "Banistmo");
+  eq(clasificarBancoPorTexto("Banco General"), "Banco General");
+});
+
+test("un banco no reconocido en el resumen en transito se denuncia", () => {
+  // Una partida cuyo banco no se reconoce no entra a ningun pool: no compensa ni queda pendiente. Que eso
+  // pase en silencio es peor que una diferencia, porque el total del resumen deja de cuadrar sin motivo.
+  const previo = [
+    { fecha: "2026-05-30", banco: "Bancolombia", monto: 500.00, concepto: "deposito en transito", sentido: "credito" },
+    { fecha: "2026-05-30", banco: "STG", monto: 100.00, concepto: "deposito en transito", sentido: "credito" }
+  ];
+  const h = paso0(previo, [], [], null, 7, 0.01);
+  const av = h.filter(function(x){ return /no reconozco/.test(x.texto || ""); });
+  eq(av.length, 1, "deberia avisar del banco desconocido");
+  cerca(av[0].monto, 500.00);
+  if (av[0].texto.indexOf("Bancolombia") < 0) throw new Error("no dice cual es el banco raro");
+  eq(contarRojas(h) >= 1, true, "es una diferencia, no un aviso menor");
+});
+
+test("el arrastre de meses anteriores sale del residuo, en las dos direcciones", () => {
+  // Metido dentro del renglon residual, un descuadre de apertura se disfraza de "cargos de tarjeta" y
+  // manda a buscar donde no es: en junio de 2026 el residuo daba 9,446.30 cuando los cargos del mes eran
+  // 990.54. Y sin contemplar el signo negativo, enero daba -10,466.72 en vez de 2,537.25.
+  STATE.chequesDetalle = null; STATE.estados = null; STATE.retVisaDetalle = null;
+  // La cuenta abre con 900 y el resumen del mes pasado justifica 400: sobran 500 de meses viejos.
+  STATE.saldoCajaGeneral = { inicial: 900, final: 950, fechaFinal: "2026-06-30", fechaInicial: "2026-06-01" };
+  STATE.diarioCaja = [];
+  STATE.transitoPrevio = [{ fecha: "2026-05-20", banco: "STG", monto: 400, concepto: "deposito en transito", sentido: "credito" }];
+  STATE.results = { paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "STG", fecha: "2026-05-20", monto: 400, concepto: "deposito", texto: "x" }] };
+  let d = desgloseSaldoCaja();
+  cerca(d.arrastre, 500, "la cuenta trae 500 de mas al abrir");
+  cerca(d.transito + d.compenso + d.resto + d.arrastre, d.final, "los cuatro renglones dan el saldo");
+  let h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Arrastre de meses anteriores") < 0) throw new Error("falta el bloque de arrastre");
+  if (h.indexOf("no se generó este mes") < 0) throw new Error("no explica que no es de este mes");
+
+  // Al reves: la cuenta abre con 200 y el resumen justifica 400. Falta plata en la apertura.
+  STATE.saldoCajaGeneral = { inicial: 200, final: 950, fechaFinal: "2026-06-30", fechaInicial: "2026-06-01" };
+  d = desgloseSaldoCaja();
+  cerca(d.arrastre, -200, "la cuenta abre con 200 de menos");
+  cerca(d.transito + d.compenso + d.resto + d.arrastre, d.final, "sigue cuadrando");
+  h = desgloseSaldoCajaHtml();
+  if (h.indexOf("abre con menos") < 0) throw new Error("no explica el caso inverso");
+
+  // Si la apertura cuadra con el resumen, no hay bloque de arrastre que mostrar.
+  STATE.saldoCajaGeneral = { inicial: 400, final: 950, fechaFinal: "2026-06-30", fechaInicial: "2026-06-01" };
+  d = desgloseSaldoCaja();
+  cerca(d.arrastre, 0);
+  if (desgloseSaldoCajaHtml().indexOf("Arrastre de meses anteriores") >= 0) throw new Error("no deberia mostrar arrastre");
+  STATE.transitoPrevio = null; STATE.diarioCaja = null;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

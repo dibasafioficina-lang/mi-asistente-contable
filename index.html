@@ -539,7 +539,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.18";
+var APP_VERSION="2026.09.19";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1427,7 +1427,10 @@ function sumBy(arr, keyFn, valFn){
 function clasificarBancoPorTexto(desc){
   var n = normTxt(desc);
   if(n.indexOf("BTS")!==-1 || n.indexOf("BANISTMO")!==-1) return "Banistmo";
-  if(n.indexOf("STG")!==-1) return "STG";
+  // El banco se escribe de varias formas segun quien exporte: "STG", "ST GEORGES", "St. Georges".
+  // Sin "GEORGE", el resumen en transito de junio de 2026 traia 1,972.60 con banco "ST GEORGES" y esas
+  // cinco partidas quedaban fuera del cotejo del Paso 0: ni compensaban ni quedaban pendientes.
+  if(n.indexOf("STG")!==-1 || n.indexOf("GEORGE")!==-1) return "STG";
   // Yappy compensa en Banco General (todo lo que diga YAPPY va a Banco General),
   // más menciones explícitas del banco ("BANCO GENERAL" / "B. GENERAL").
   if(n.indexOf("YAPPY")!==-1 || n.indexOf("BANCO GENERAL")!==-1 || n.indexOf("B. GENERAL")!==-1 || n.indexOf("B.GENERAL")!==-1) return "Banco General";
@@ -5239,9 +5242,18 @@ function desgloseSaldoCaja(){
   // realmente compensaron sumaban 1,307.78. El descuadre de apertura es otra cosa y lo reporta el Paso 0,
   // con su propio panel y su asiento de ajuste.
   var compenso = Math.round(partidasApertura().reduce(function(a,x){ return a+x.monto; },0)*100)/100;
-  var resto = Math.round((s.final - transitoCaja - compenso)*100)/100;
+  // ARRASTRE DE MESES ANTERIORES. Si la cuenta abre el mes con mas de lo que el resumen del Paso 0
+  // justifica, ese exceso no se genero este mes y ningun asiento de este mes lo corrige. Metido dentro
+  // del renglon residual quedaba disfrazado de "cargos de tarjeta" y mandaba a buscar donde no era: en
+  // junio de 2026 el residuo daba 9,446.30 cuando los cargos reales del mes eran 990.54.
+  // Va en las dos direcciones. Si la cuenta abre con MAS de lo justificado, sobra arrastre de meses
+  // viejos; si abre con MENOS, falta plata en la apertura (o el ajuste que la corrige no se detecto).
+  // En enero de 2026, sin contemplar el signo negativo, el residuo daba -10,466.72 en vez de 2,537.25.
+  var arrastre = (cuadre && !cuadre.ok) ? Math.round(-cuadre.dif*100)/100 : 0;
+  var resto = Math.round((s.final - transitoCaja - compenso - arrastre)*100)/100;
   var tm = transitoPorMetodo();
-  return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto,
+  return { final:s.final, fecha:s.fechaFinal, transito:transitoCaja, compenso:compenso, resto:resto, arrastre:arrastre,
+           aperturaLibro:(cuadre?cuadre.apertura:null), aperturaTransito:(cuadre?cuadre.total:null),
            totalResumen:tm.total, n:tm.count,
            soloBanco: Math.round((tm.total - transitoCaja)*100)/100 };
 }
@@ -5554,9 +5566,23 @@ function desgloseSaldoCajaHtml(){
   h += '<div class="cg-h" style="margin-top:16px">De qué se compone la diferencia</div>';
   // (1) Partidas que venian en transito, el banco YA las acredito y nadie hizo el asiento que las saca de
   // Caja General. Van con su detalle: el renglon solo decia el total y no habia forma de saber cuales son.
+  // (0) Lo que ya venia descuadrado al abrir el mes. Va primero: es lo mas grande y lo que mas confunde,
+  // porque no se arregla con nada de este mes.
+  var nBloque = 0;
+  if(Math.abs(d.arrastre) > 0.005){
+    nBloque++;
+    var sobra = d.arrastre > 0;
+    h += '<div class="dif-sub">'+nBloque+' · Arrastre de meses anteriores <b>'+(sobra?"+":"−")+' B/ '+fmt(Math.abs(d.arrastre))+'</b>' +
+      '<span>La cuenta abrió el mes con B/ '+fmt(d.aperturaLibro)+' y el resumen del mes pasado justifica ' +
+      'B/ '+fmt(d.aperturaTransito)+'. ' + (sobra
+        ? 'La cuenta trae de más: <b>eso no se generó este mes</b>. Son partidas de meses anteriores que compensaron en el banco y nunca se descargaron, o cargos de tarjeta viejos que nunca se saldaron. Ningún asiento de este mes lo corrige — hay que ir a los meses anteriores o registrar un ajuste de apertura.'
+        : 'La cuenta abre con menos de lo que el resumen dice que quedó pendiente. O al resumen le sobran partidas que ya habían compensado, o falta el ajuste de apertura que corrige el saldo. Revisá primero el resumen del mes pasado.') +
+      '</span></div>';
+  }
   var apert = partidasApertura();
   if(Math.abs(d.compenso) > 0.005){
-    h += '<div class="dif-sub">1 · Apertura que ya compensó en el banco <b>+ B/ '+fmt(d.compenso)+'</b>' +
+    nBloque++;
+    h += '<div class="dif-sub">'+nBloque+' · Apertura que ya compensó en el banco <b>+ B/ '+fmt(d.compenso)+'</b>' +
       '<span>Venían en tránsito del mes anterior, el banco ya las acreditó este mes y todavía no se hizo el ' +
       'asiento que las descarga (débito al banco / crédito a Caja General), así que siguen inflando el saldo.</span></div>';
     if(apert.length){
@@ -5581,7 +5607,8 @@ function desgloseSaldoCajaHtml(){
   // (1) Efectivo que sigue en tránsito pero cuyo asiento ya salió de Caja General.
   var ya = partidasYaAcreditadas();
   if(Math.abs(d.soloBanco) > 0.005){
-    h += '<div class="dif-sub">'+(Math.abs(d.compenso)>0.005?"2":"1")+' · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
+    nBloque++;
+    h += '<div class="dif-sub">'+nBloque+' · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
       '<span>El asiento del depósito se hizo el día que se entregó al banco, así que ya no está en la cuenta. ' +
       'Se corrige solo cuando el crédito se registre al compensar.</span></div>';
     if(ya.length){ h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
@@ -5594,9 +5621,18 @@ function desgloseSaldoCajaHtml(){
 
   // (2) Retenciones y comisiones de tarjeta: lo que el banco se quedó y nunca va a acreditar.
   if(Math.abs(d.resto) > 0.005){
-    h += '<div class="dif-sub">'+(Math.abs(d.compenso)>0.005?"3":"2")+' · Retenciones y comisiones de tarjeta <b>+ B/ '+fmt(d.resto)+'</b>' +
-      '<span>La venta entra BRUTA a Caja General y el depósito sale NETO: la diferencia se queda en la cuenta. ' +
-      'El banco nunca la va a acreditar, se la descontó.</span></div>';
+    nBloque++;
+    // El residuo puede quedar NEGATIVO cuando el asiento de cargos del mes ya se registro: entonces de la
+    // cuenta salio mas de lo que quedaba por salir, y titularlo "retenciones + B/ -1,000.54" no se
+    // entiende. Se separan los dos casos.
+    var restoPos = d.resto >= 0;
+    h += '<div class="dif-sub">'+nBloque+' · ' +
+      (restoPos ? 'Retenciones y comisiones de tarjeta <b>+ B/ '+fmt(d.resto)+'</b>'
+                : 'Cargos y ajustes que ya salieron de la cuenta <b>− B/ '+fmt(-d.resto)+'</b>') +
+      '<span>' + (restoPos
+        ? 'La venta entra BRUTA a Caja General y el depósito sale NETO: la diferencia se queda en la cuenta. El banco nunca la va a acreditar, se la descontó.'
+        : 'Este mes se registraron asientos que sacaron de Caja General más de lo que quedaba por salir — el de cargos de tarjeta es el más común. No hay nada que hacer con este renglón: es lo que ya se corrigió.') +
+      '</span></div>';
     var rv = STATE.retVisaDetalle;
     if(rv && rv.length){
       var totB=0, totR=0, totN=0;
@@ -6256,6 +6292,24 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
   var hallazgos = [];
+  // Una partida cuyo banco no se reconoce no entra a ningun pool y desaparece en silencio del cotejo:
+  // ni compensa ni queda pendiente. Antes de conciliar nada, se avisa.
+  var BANCOS_OK = { "Banistmo":1, "STG":1, "Banco General":1 };
+  var raros = (transitoPrevio||[]).filter(function(t){ return !BANCOS_OK[t.banco]; });
+  if(raros.length){
+    var totalRaro = Math.round(raros.reduce(function(a,t){ return a+t.monto; },0)*100)/100;
+    var nombres = {};
+    raros.forEach(function(t){ nombres[String(t.banco||"(vacío)")] = 1; });
+    hallazgos.push({
+      fecha:"", banco:"", monto:totalRaro, clase:"diff",
+      concepto:"Banco no reconocido en el resumen en tránsito", comprobante:"", motivo:"banco no reconocido",
+      texto: "El resumen en tránsito trae " + raros.length + " partida(s) por B/ " + fmt(totalRaro) +
+             " con un banco que no reconozco: " + Object.keys(nombres).map(function(x){ return "\"" + x + "\""; }).join(", ") +
+             ". Esas partidas NO se cotejan: no compensan ni quedan pendientes, simplemente se pierden. " +
+             "Corregí la columna Banco del archivo (los valores válidos son Banistmo, STG y Banco General) y volvé a subirlo.",
+      fuente: "Resumen en tránsito del mes anterior"
+    });
+  }
   // Sin estados de cuenta no hay contra qué cotejar: TODAS las partidas salen como pendientes y ese
   // resultado se arrastra al resumen del mes siguiente. Hay que decirlo, no dejarlo pasar por bueno.
   var hayEstados = Object.keys(estados).some(function(b){ return estados[b] && estados[b].length; });
