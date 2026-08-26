@@ -2285,6 +2285,55 @@ test("un asiento ya registrado se marca REGISTRADO", () => {
   STATE.estados = null; STATE.diarioCaja = null;
 });
 
+test("cada casilla dice de donde sacar su archivo", () => {
+  // El nombre de la casilla usa el vocabulario del sistema de origen ("Navegador"), no el de quien la usa.
+  // Sin la instruccion de exportacion, alguien que no conoce el circuito no puede ni empezar.
+  STATE.files = {};
+  ["transitoPrevio","reporte","diarioCaja","estBanistmo","estStg","estBancoGeneral","retVisa",
+   "diarioBanistmo","diarioStg","diarioBancoGeneral"].forEach(function(k){
+    if (!DE_DONDE[k]) throw new Error("falta la instruccion de " + k);
+    const h = dzHtml(k, "x", "y");
+    if (h.indexOf("¿De dónde saco este archivo?") < 0) throw new Error("la casilla " + k + " no la muestra");
+  });
+  // Los estados de cuenta avisan del recorte de fechas: fue causa real de diferencias falsas en febrero.
+  ["estBanistmo","estStg","estBancoGeneral"].forEach(function(k){
+    if (!/último día del mes/.test(DE_DONDE[k])) throw new Error(k + " no avisa del rango de fechas");
+  });
+});
+
+test("la guia de inicio explica el ciclo completo", () => {
+  const g = guiaInicioHtml();
+  eq((g.match(/<li>/g) || []).length >= 5, true, "los 5 pasos del ciclo");
+  // Los tres conceptos que hay que entender si o si para no malinterpretar los resultados.
+  ["En tránsito", "último día del mes", "Nada se guarda"].forEach(function(t){
+    if (g.indexOf(t) < 0) throw new Error("a la guia le falta: " + t);
+  });
+});
+
+test("el reverso esconde el debito/credito hasta confirmar la revision", () => {
+  // Un reverso anula un asiento ya registrado. Quien no tiene criterio contable no deberia poder copiar
+  // el debito/credito sin antes mirar de donde salio: si el error estaba en el informe y no en la
+  // contabilidad, reversar lo empeora.
+  const rev = asientoDelHallazgo({ clase: "diff", banco: "STG", fecha: "2026-02-02", monto: -556.51,
+    texto: "Diferencia STG 2026-02-02: reporte de cajeras B/ 1,094.72 vs. diario Caja General" }, "paso1");
+  const h = asientoHallazgoHtml(rev, "paso1");
+  if (h.indexOf("Revisá esto antes de tocar nada") < 0) throw new Error("no encabeza con la advertencia");
+  if (h.indexOf("<details") < 0) throw new Error("el detalle del reverso deberia ir plegado");
+  // Los pasos de revision del Paso 1 estan y son concretos.
+  if (h.indexOf("informe de caja") < 0) throw new Error("no dice que revisar");
+  eq((h.match(/<li>/g) || []).length, QUE_REVISAR.paso1.length, "un punto por cada cosa a revisar");
+  // El debito/credito existe, pero DENTRO del details.
+  const iDet = h.indexOf("<details"), iDeb = h.indexOf("Débito");
+  if (!(iDeb > iDet)) throw new Error("el débito quedó fuera del plegado");
+
+  // Un asiento que NO es reverso se muestra directo, sin plegar: no hay nada que confirmar.
+  const dir = asientoDelHallazgo({ clase: "diff", banco: "STG", fecha: "2026-02-05", monto: 149.73,
+    texto: "Diferencia STG 2026-02-05: reporte de cajeras B/ 202.12 vs. diario Caja General" }, "paso1");
+  const h2 = asientoHallazgoHtml(dir, "paso1");
+  if (h2.indexOf("<details") >= 0) throw new Error("un asiento directo no debe ir plegado");
+  if (h2.indexOf("Asiento que falta registrar") < 0) throw new Error("le falta el titulo");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

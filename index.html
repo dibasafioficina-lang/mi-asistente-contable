@@ -133,6 +133,27 @@
   .stage h3 .tag{font-family:"Mulish",sans-serif;font-size:11px;font-weight:800;letter-spacing:.4px;
     background:var(--brand-light);color:var(--brand-dark);padding:4px 10px;border-radius:999px}
   .stage p.desc{font-size:13.5px;color:var(--slate);margin-bottom:16px}
+  .guia{background:#fff;border:1px solid var(--line);border-radius:16px;padding:0;margin-bottom:22px;overflow:hidden;
+    box-shadow:0 8px 22px rgba(158,104,126,.07)}
+  .guia>summary{cursor:pointer;padding:15px 20px;font-size:14.5px;color:var(--heading);background:var(--brand-lighter);
+    list-style:none;user-select:none}
+  .guia>summary::-webkit-details-marker{display:none}
+  .guia>summary::before{content:"▸ ";color:var(--brand-dark);font-weight:800}
+  .guia[open]>summary::before{content:"▾ "}
+  .guia-cuerpo{padding:16px 20px 18px}
+  .guia-int{font-size:13.5px;color:var(--slate);line-height:1.6;margin-bottom:14px}
+  .guia-pasos{margin:0 0 14px 18px;padding:0}
+  .guia-pasos li{font-size:13.5px;color:var(--slate);line-height:1.6;margin-bottom:9px}
+  .guia-ojo{background:#FBF7F9;border:1px solid #EEE1E7;border-radius:12px;padding:12px 14px}
+  .guia-ojo>b{font-size:12.5px;color:var(--heading)}
+  .guia-ojo ul{margin:7px 0 0 16px;padding:0}
+  .guia-ojo li{font-size:12.5px;color:var(--slate);line-height:1.55;margin-bottom:6px}
+  .dz-ayuda{margin-top:5px}
+  .dz-ayuda>summary{cursor:pointer;font-size:11.5px;color:var(--brand);font-weight:700;list-style:none;user-select:none}
+  .dz-ayuda>summary::-webkit-details-marker{display:none}
+  .dz-ayuda>summary::before{content:"? ";font-weight:800}
+  .dz-ayuda>div{font-size:11.5px;color:var(--slate);line-height:1.5;margin-top:5px;background:#FBF7F9;
+    border-radius:8px;padding:7px 9px}
   .dropzones{display:grid;gap:14px}
   .dz-grid2{grid-template-columns:1fr 1fr}
   .dropzones.grid2{display:grid;grid-template-columns:1fr 1fr}
@@ -274,6 +295,17 @@
   .fas-fila{display:flex;gap:10px;font-size:12px;padding:1px 0;color:var(--slate)}
   .fas-fila span{min-width:58px;flex-shrink:0}
   .fas-fila b{color:var(--heading);font-weight:700}
+  .fas.fas-ojo{background:#FDF6EC;border-color:#F0DCC2}
+  .fas-ojo .fas-tit{color:#8A6534}
+  .fas-lista{margin:0 0 8px 16px;padding:0}
+  .fas-lista li{font-size:12px;color:var(--slate);line-height:1.5;margin-bottom:4px}
+  .fas-det>summary{cursor:pointer;font-size:11.5px;font-weight:700;color:#8A6534;list-style:none;user-select:none;
+    background:#F7EEDF;border-radius:7px;padding:6px 9px}
+  .fas-det>summary::-webkit-details-marker{display:none}
+  .fas-det>summary::before{content:"▸ "}
+  .fas-det[open]>summary::before{content:"▾ "}
+  .fas-det-cuerpo{padding-top:7px}
+  .fas-aviso{font-size:11.5px;color:#8A6534;background:#F7EEDF;border-radius:7px;padding:6px 9px;margin-bottom:6px;line-height:1.45}
   .as-tit{font-size:13px;font-weight:800;color:#4A3C63;margin-bottom:6px}
   .as-tit b{font-family:"Mulish";white-space:nowrap}
   .as-linea{display:flex;gap:10px;font-size:12px;padding:2px 0;color:var(--slate)}
@@ -507,7 +539,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.17";
+var APP_VERSION="2026.09.18";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4395,6 +4427,21 @@ function renderMenu(){
   });
 }
 
+/* ---- De donde sale cada archivo ----
+   El nombre de la casilla usa el vocabulario del sistema de origen ("Navegador"), no el de quien va a
+   usar esto. Sin la instruccion de exportacion, alguien que no conozca el circuito no puede ni empezar. */
+var DE_DONDE = {
+  transitoPrevio: "Lo genera esta misma app. Es el Excel que descargaste al cerrar el mes pasado con el botón «Descargar resumen en tránsito». Si es el primer mes que conciliás, armalo a mano con las columnas Fecha, Banco, Monto, Concepto y Comprobante.",
+  reporte: "Es el informe de caja que llena la tienda: una fila por día y cajera, con lo cobrado por cada método de pago. La 2ª pestaña lleva el desglose de los cheques uno por uno.",
+  diarioCaja: "Del sistema contable: Navegador de Contabilidad → cuenta [1.1.8] Caja General → el mes completo → Exportar a Excel. No borres las filas de Balance Inicial ni Balance Final: de ahí sale el control del saldo.",
+  estBanistmo: "De la banca en línea de Banistmo: estado de cuenta del mes en Excel. Pedilo <b>del día 1 al último día del mes</b>, ni un día más — si trae movimientos del mes siguiente aparecen como diferencias que no existen.",
+  estStg: "De la banca en línea de St. Georges: estado de cuenta del mes en Excel, del día 1 al último día del mes.",
+  estBancoGeneral: "De la banca en línea de Banco General: estado de cuenta del mes en Excel, del día 1 al último día del mes. Es donde compensa el Yappy.",
+  retVisa: "Del portal de VISA: el informe de retenciones del mes, con el detalle por transacción. Sirve para cuadrar lo que el banco acredita NETO (la venta menos la retención).",
+  diarioBanistmo: "Del sistema contable: Navegador de Contabilidad → cuenta del banco Banistmo → el mes completo → Exportar a Excel.",
+  diarioStg: "Del sistema contable: Navegador de Contabilidad → cuenta de St. Georges → el mes completo → Exportar a Excel.",
+  diarioBancoGeneral: "Del sistema contable: Navegador de Contabilidad → cuenta de Banco General → el mes completo → Exportar a Excel."
+};
 function dzHtml(key, label, esperado){
   var f = STATE.files[key];
   return '<div class="dz'+(f?" filled":"")+'" data-key="'+key+'">' +
@@ -4402,6 +4449,7 @@ function dzHtml(key, label, esperado){
     '<div class="info">' +
       '<div class="lbl">'+label+'</div>' +
       '<div class="expected">Archivo esperado: <b>'+esperado+'</b></div>' +
+      (DE_DONDE[key] ? '<details class="dz-ayuda"><summary>¿De dónde saco este archivo?</summary><div>'+DE_DONDE[key]+'</div></details>' : '') +
       '<div class="sub">'+(f?("Subido: "+f.name):"Sin subir · arrastra el Excel aquí o usa el botón")+'</div>' +
     '</div>' +
     '<label class="btn-sel">'+(f?"Cambiar":"Subir")+'<input type="file" accept=".xlsx,.xls" data-key="'+key+'"></label>' +
@@ -4443,11 +4491,36 @@ function stageRunHtml(pasoKey){
   '</div>';
 }
 
+/* ---- Guia de inicio ----
+   Quien abre esto por primera vez ve diez casillas de archivos y ningun orden. La guia explica el ciclo
+   completo del mes en el orden en que se hace, con el vocabulario de quien lo va a hacer. Va plegada:
+   estorba a quien ya sabe, y esta a un clic para quien no. */
+function guiaInicioHtml(){
+  var abierta = !leerPrefs().guiaVista;   // la primera vez se abre sola
+  return '<details class="guia" id="guiaInicio"'+(abierta?" open":"")+'>' +
+    '<summary><b>¿Primera vez acá?</b> Cómo funciona la conciliación del mes, en 5 pasos</summary>' +
+    '<div class="guia-cuerpo">' +
+      '<p class="guia-int">Esta herramienta compara lo que <b>la tienda dice que cobró</b>, lo que <b>la contabilidad registró</b> y lo que <b>el banco realmente recibió</b>. Cuando los tres coinciden, el mes cuadra. Cuando no, te dice exactamente qué falta y qué asiento hacer.</p>' +
+      '<ol class="guia-pasos">' +
+        '<li><b>Juntá los archivos del mes.</b> Son hasta 10 Excel. Cada casilla tiene un «¿De dónde saco este archivo?» que te dice de qué sistema exportarlo. Los marcados como opcionales podés dejarlos vacíos.</li>' +
+        '<li><b>Empezá por el resumen del mes pasado.</b> Es el archivo del Paso 0: lo descargaste vos al cerrar el mes anterior. Sin él, la app no sabe qué venía pendiente y va a marcar como diferencias cosas que ya estaban resueltas.</li>' +
+        '<li><b>Subí todo y ejecutá.</b> Los pasos van encadenados: si uno no cuadra, los siguientes se bloquean, porque revisarlos con datos que ya sabemos que están mal solo genera ruido.</li>' +
+        '<li><b>Resolvé lo que salga en rojo.</b> Cada diferencia trae el asiento que hay que registrar: qué cuenta va al débito, cuál al crédito y por cuánto. Registralo en el sistema contable, volvé a exportar el archivo corregido, subilo y ejecutá otra vez.</li>' +
+        '<li><b>Cerrá el mes.</b> Cuando no quedan diferencias, bajá el <b>resumen en tránsito</b> con el botón del final y guardalo: ése es el archivo con el que arranca el mes siguiente.</li>' +
+      '</ol>' +
+      '<div class="guia-ojo"><b>Tres cosas que conviene saber:</b><ul>' +
+        '<li><b>«En tránsito»</b> es dinero que la tienda ya depositó y el banco todavía no acreditó. No es un error: se arrastra al mes siguiente hasta que aparezca en el estado de cuenta. Si una partida se arrastra meses, ahí sí hay que averiguar si el depósito llegó a hacerse.</li>' +
+        '<li><b>Los estados de cuenta van del día 1 al último día del mes.</b> Si traen días del mes siguiente, esos movimientos salen como diferencias que en realidad no existen.</li>' +
+        '<li><b>Nada se guarda ni se envía a ningún lado.</b> Los archivos se leen dentro de tu navegador y se descartan al cerrar la pestaña.</li>' +
+      '</ul></div>' +
+    '</div></details>';
+}
 function renderModulo1(){
   app.innerHTML =
     headerHtml() +
     '<div class="crumb"><button id="backBtn">← Menú</button><span>/</span><span>Conciliador Caja y Banco</span><button class="print-btn" id="printBtn1">🖨 Imprimir</button></div>' +
 
+    guiaInicioHtml() +
     '<div class="stage"><h3><span class="tag">PASO 0</span> Arranque de mes — partidas en tránsito del mes anterior <span class="opt-badge" style="background:#B56B86;color:#fff">obligatorio</span></h3>' +
     '<p class="desc">Su único archivo es el resumen de partidas en tránsito que generó este módulo al cerrar el mes anterior. Valida cuáles de esas partidas ya compensaron usando los estados de cuenta del Paso 2 (si están); las que no, quedan en tránsito. <b>Es obligatorio y no se ejecuta solo: se corre automáticamente junto con el Paso 1.</b></p>' +
     '<div class="dropzones">' +
@@ -4592,7 +4665,7 @@ function renderResultados(){
       // esc(): el texto lleva descripciones tomadas del Excel. Sin escapar, una celda con HTML se ejecuta
       // al renderizar y puede ocultar una diferencia de la pantalla.
       '<div class="ftxt">'+esc(item.texto)+'<span class="src">'+esc(item.fuente)+'</span>' +
-        asientoHallazgoHtml(asientoDelHallazgo(item, p.key)) + '</div>' +
+        asientoHallazgoHtml(asientoDelHallazgo(item, p.key), p.key) + '</div>' +
       '<div class="famt">'+montoTxt+'</div></div>';
   }
   // Fila de subtotal (alineada con la columna de montos, con espaciador de la casilla).
@@ -5281,16 +5354,38 @@ function asientoDelHallazgo(item, pasoKey){
   }
   return null;
 }
-function asientoHallazgoHtml(a){
+// Que mirar antes de reversar, segun el paso. Un reverso borra un asiento que alguien registro: si el
+// error estaba en el informe y no en la contabilidad, reversar lo empeora.
+var QUE_REVISAR = {
+  paso1: ["Buscá ese día en el informe de caja y sumá lo que reportó cada cajera para ese banco.",
+          "Compará ese total con lo que muestra el navegador de Caja General del mismo día.",
+          "Si al informe le falta una venta, se corrige el informe y se vuelve a exportar: no hace falta ningún asiento.",
+          "Solo si el informe está bien y el asiento contable sobra, corresponde el reverso."],
+  paso2: ["Buscá el importe en el estado de cuenta del banco, unos días antes y después de la fecha del depósito.",
+          "Fijate si el banco lo acreditó partido en varias líneas: la suma puede estar, aunque no el monto exacto.",
+          "Si es un depósito de fin de mes, es normal que todavía no aparezca: queda en tránsito y compensa el mes que viene.",
+          "Solo si el depósito nunca se hizo corresponde el reverso."]
+};
+function asientoHallazgoHtml(a, pasoKey){
   if(!a) return "";
-  return '<div class="fas">' +
-    '<div class="fas-tit">' + (a.revisarPrimero ? "Qué revisar y, si corresponde, qué registrar" : "Asiento que falta registrar") + '</div>' +
-    '<div class="fas-por">' + esc(a.porque) + '</div>' +
+  var detalle =
     '<div class="fas-fila"><span>Fecha</span><b>' + esc(a.fecha) + '</b></div>' +
     '<div class="fas-fila"><span>Débito</span><b>' + esc(a.debito) + ' · B/ ' + fmt(a.monto) + '</b></div>' +
     '<div class="fas-fila"><span>Crédito</span><b>' + esc(a.credito) + ' · B/ ' + fmt(a.monto) + '</b></div>' +
-    '<div class="fas-fila"><span>Concepto</span><b>' + esc(a.concepto) + '</b></div>' +
-  '</div>';
+    '<div class="fas-fila"><span>Concepto</span><b>' + esc(a.concepto) + '</b></div>';
+  if(!a.revisarPrimero){
+    return '<div class="fas"><div class="fas-tit">Asiento que falta registrar</div>' +
+      '<div class="fas-por">' + esc(a.porque) + '</div>' + detalle + '</div>';
+  }
+  // Reverso: el detalle del asiento queda detras de la revision. Quien no tiene criterio contable no
+  // deberia poder copiar un debito/credito que anula un asiento sin antes mirar de donde salio.
+  var pasos = QUE_REVISAR[pasoKey] || [];
+  return '<div class="fas fas-ojo"><div class="fas-tit">Revisá esto antes de tocar nada</div>' +
+    '<div class="fas-por">' + esc(a.porque) + '</div>' +
+    (pasos.length ? '<ol class="fas-lista">' + pasos.map(function(p){ return '<li>' + esc(p) + '</li>'; }).join("") + '</ol>' : "") +
+    '<details class="fas-det"><summary>Ya lo revisé y el asiento sobra — mostrame el reverso</summary>' +
+    '<div class="fas-det-cuerpo"><div class="fas-aviso">Un reverso anula un asiento ya registrado. Registralo solo si confirmaste los puntos de arriba.</div>' +
+    detalle + '</div></details></div>';
 }
 function rojasAbiertas(){
   var n = 0;
