@@ -2393,6 +2393,43 @@ test("el arrastre de meses anteriores sale del residuo, en las dos direcciones",
   STATE.transitoPrevio = null; STATE.diarioCaja = null;
 });
 
+test("avisa cuando al navegador de Caja General le faltan lineas", () => {
+  // Un deposito tiene dos lados con el mismo comprobante: debito al banco y credito a Caja General. Si el
+  // navegador se exporto filtrado, falta un lado y el Paso 1 marca como "asiento que falta registrar"
+  // algo que SI esta registrado — y encima sugiere un asiento que ya existe. Paso en febrero de 2026 con
+  // el ME-00000001876 (3,571.60) y el ME-00000001877 (2,662.52).
+  const caja = [
+    { fecha: "2026-02-27", debito: 3853.89, credito: 0, descripcion: "REPORTE DE VENTA DEL 27/02/2026", referencia: "ME-00000001876", fila: 90 }
+  ];
+  const banistmo = [
+    { fecha: "2026-02-27", debito: 1463.08, credito: 0, descripcion: "DEPOSITO BANISTMO CK DEL 27/02/2026", referencia: "ME-00000001876", fila: 5 },
+    { fecha: "2026-02-27", debito: 2108.52, credito: 0, descripcion: "DEPOSITO BANISTMO /VISA/CLAVE DEL 27/02/2026", referencia: "ME-00000001876", fila: 6 },
+    { fecha: "2026-02-28", debito: 2662.52, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 28/02/2026", referencia: "ME-00000001877", fila: 7 }
+  ];
+  const f = integridadComprobantes(caja, { Banistmo: banistmo });
+  eq(f.length, 2, "los dos comprobantes tienen el lado del banco y no el de Caja General");
+  cerca(f[0].falta + f[1].falta, 6234.12);
+  eq(f[1].ausente, true, "el ME-1877 no aparece en absoluto");
+  eq(f[0].ausente, false, "el ME-1876 aparece, pero sin sus creditos");
+  const h = integridadHtml(f);
+  ["ME-00000001876", "ME-00000001877", "6,234.12", "volvé a exportar"].forEach(function(t){
+    if (h.toLowerCase().indexOf(t.toLowerCase()) < 0) throw new Error("al aviso le falta: " + t);
+  });
+
+  // Si el comprobante SI tiene creditos en Caja General, la diferencia puede ser legitima (hay depositos
+  // que no vienen de Caja General). Ahi no se alarma: en enero de 2026 eso marcaba dos correctos.
+  const caja2 = caja.concat([{ fecha: "2026-02-27", debito: 0, credito: 3571.60, descripcion: "DEPOSITO BANISTMO DEL 27/02/2026", referencia: "ME-00000001876", fila: 91 }]);
+  const f2 = integridadComprobantes(caja2, { Banistmo: banistmo.slice(0, 2) });
+  eq(f2.length, 0, "con el credito puesto, no hay nada que denunciar");
+  const caja3 = [{ fecha: "2026-01-14", debito: 0, credito: 1122.79, descripcion: "DEPOSITO", referencia: "ME-1837", fila: 3 }];
+  const stg3 = [{ fecha: "2026-01-14", debito: 1197.79, credito: 0, descripcion: "DEPOSITO DEL DIA 14", referencia: "ME-1837", fila: 4 }];
+  eq(integridadComprobantes(caja3, { STG: stg3 }).length, 0, "una diferencia parcial no se denuncia");
+
+  // Sin navegador de Caja General no hay nada que comparar.
+  eq(integridadComprobantes(null, { Banistmo: banistmo }).length, 0);
+  eq(integridadHtml([]), "");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

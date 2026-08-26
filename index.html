@@ -517,6 +517,7 @@ var STATE = {
   saldoCajaGeneral:null,
   transitoPrevio:null,
   diarioCaja:null,
+  integridad:null,
   estados:null,
   chequesDetalle:null,
   retVisaDetalle:null,
@@ -539,7 +540,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.19";
+var APP_VERSION="2026.09.20";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2998,6 +2999,66 @@ function mesEnNombre(nombre){
   return mes;
 }
 // Lee TODOS los archivos cargados y determina el período de cada uno por las fechas de sus registros.
+/* ---- Control de integridad entre archivos ----
+   Un asiento de deposito tiene dos lados: debito al banco y credito a Caja General, los dos bajo el mismo
+   comprobante ME-. Si el navegador de Caja General se exporto filtrado o se le borraron filas a mano,
+   falta un lado y el cotejo del Paso 1 marca como "asiento faltante" algo que si esta registrado — con el
+   agravante de que sugiere un asiento que ya existe. Paso en febrero de 2026: el ME-00000001876 aparecia
+   en Caja General solo con la venta, sin sus depositos por 3,571.60, y el ME-00000001877 no aparecia del
+   todo (2,662.52), mientras el diario de Banistmo tenia los dos completos.
+   Se compara el TOTAL de depositos del comprobante en todos los bancos contra el TOTAL de creditos del
+   mismo comprobante en Caja General: que el credito sea mayor no es problema (lleva descargos y ajustes),
+   que sea MENOR significa que faltan lineas. */
+function integridadComprobantes(diarioCaja, diariosBanco){
+  function refME(r){ var s = String(r==null?"":r).trim(); return /^ME-/i.test(s) ? s : null; }
+  if(!diarioCaja || !diarioCaja.length) return [];
+  var enCaja = {}, existeEnCaja = {};
+  diarioCaja.forEach(function(x){
+    var r = refME(x.referencia); if(!r) return;
+    existeEnCaja[r] = true;
+    enCaja[r] = Math.round(((enCaja[r]||0) + x.credito)*100)/100;
+  });
+  var depos = {}, bancosDe = {};
+  Object.keys(diariosBanco||{}).forEach(function(banco){
+    (diariosBanco[banco]||[]).forEach(function(x){
+      if(!(x.debito > 0)) return;
+      if(normTxt(x.descripcion).indexOf("DEPOSITO") === -1) return;
+      var r = refME(x.referencia); if(!r) return;
+      depos[r] = Math.round(((depos[r]||0) + x.debito)*100)/100;
+      (bancosDe[r] = bancosDe[r] || {})[banco] = true;
+    });
+  });
+  var out = [];
+  Object.keys(depos).sort().forEach(function(r){
+    // Solo se denuncia lo INEQUIVOCO: el comprobante tiene depositos en el banco y en Caja General no
+    // tiene NI UN credito. Si tiene algunos, la diferencia puede ser legitima —hay depositos que no vienen
+    // de Caja General, como el ingreso de otra cuenta— y avisar ahi seria alarmar sin fundamento: en enero
+    // de 2026 eso marcaba dos comprobantes por 83.15 que estaban correctos.
+    if((enCaja[r]||0) > 0.03) return;
+    var falta = depos[r];
+    out.push({ ref:r, deposito:depos[r], enCaja:(enCaja[r]||0), falta:falta,
+               ausente:!existeEnCaja[r], bancos:Object.keys(bancosDe[r]||{}).sort() });
+  });
+  return out;
+}
+function integridadHtml(faltantes){
+  if(!faltantes || !faltantes.length) return "";
+  var total = Math.round(faltantes.reduce(function(a,x){ return a+x.falta; },0)*100)/100;
+  var h = '<div class="per-panel per-grave"><div class="per-title">⛔ Al navegador de Caja General le faltan líneas</div>' +
+    '<p class="per-txt">Un depósito se registra con dos lados: <b>débito al banco</b> y <b>crédito a Caja General</b>, los dos con el ' +
+    'mismo comprobante. Estos comprobantes tienen el lado del banco pero no el de Caja General, por <b>B/ '+fmt(total)+'</b> en total. ' +
+    'El asiento existe: lo que falta es el archivo. <b>Volvé a exportar el navegador de Caja General del mes completo, sin filtros ni filas borradas.</b></p>' +
+    '<table class="per-tabla"><tbody>';
+  faltantes.forEach(function(x){
+    h += '<tr class="per-mal"><td>✗ <b>'+esc(x.ref)+'</b>' +
+      '<div class="per-det">Depósitos a '+esc(x.bancos.join(", "))+' por B/ '+fmt(x.deposito)+'. ' +
+      (x.ausente ? 'El comprobante <b>no aparece</b> en el navegador de Caja General.'
+                 : 'En Caja General solo hay B/ '+fmt(x.enCaja)+' acreditados con ese comprobante.') + '</div></td>' +
+      '<td class="per-rango">faltan<br>B/ '+fmt(x.falta)+'</td></tr>';
+  });
+  return h + '</tbody></table><p class="per-nota">Mientras falten esas líneas, el Paso 1 va a marcar como ' +
+    '“asiento que falta registrar” algo que ya está registrado, y el saldo de Caja General va a salir más alto de lo que es.</p></div>';
+}
 function diagnosticarPeriodos(raws){
   function parse(fn){ try{ return fn(); }catch(e){ return null; } }
   var fuentes = [];
@@ -3224,6 +3285,15 @@ function ejecutarConciliacion(){
       // Antes de conciliar nada: verificar que los archivos sean del mismo período. Un estado de cuenta
       // exportado con el rango equivocado genera decenas de hallazgos falsos que parecen reales.
       STATE.periodos = diagnosticarPeriodos(raws);
+      // Integridad entre archivos: si al navegador de Caja General le faltan lineas, todo lo que sigue
+      // se calcula sobre datos incompletos.
+      try{
+        var dbk = {};
+        if(raws.diarioBanistmo) dbk["Banistmo"] = parseDiario(raws.diarioBanistmo, null);
+        if(raws.diarioStg) dbk["STG"] = parseDiario(raws.diarioStg, null);
+        if(raws.diarioBancoGeneral) dbk["Banco General"] = parseDiario(raws.diarioBancoGeneral, null);
+        STATE.integridad = integridadComprobantes(raws.diarioCaja ? parseDiario(raws.diarioCaja,"Caja General") : null, dbk);
+      }catch(e){ STATE.integridad = []; }
       // Paso 0 OBLIGATORIO: se corre primero. Si falta o no cuadra, se bloquean las conciliaciones.
       STATE.results.paso0 = computePasoResult("paso0", raws, opts);
       if(!pasoCuadrado("paso0")){
@@ -4684,6 +4754,7 @@ function renderResultados(){
     '<button class="btn-plegar" id="btnPlegarTodos" type="button"></button>' +
     '<button class="btn-export" id="exportBtn">Descargar checklist (Excel)</button></span></div>';
   html += periodosHtml(STATE.periodos); // primero: si un archivo es de otro mes, nada de lo demás es confiable
+  html += integridadHtml(STATE.integridad);   // y si a un archivo le faltan lineas, tampoco
   // El total del resumen del Paso 0 tiene que ser el saldo inicial de Caja General. Va ACÁ ARRIBA y no
   // dentro del bloque del Paso 0: cuando la caja cuadra, los pasos sin diferencias no se dibujan y la
   // alerta quedaría invisible justo en el caso en que hay que verla.
