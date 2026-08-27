@@ -540,7 +540,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.24";
+var APP_VERSION="2026.09.25";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2351,6 +2351,20 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(usarDetalleCheques && esChequeDesc(dep.descripcion)) return;
       var pool = bancoCred[banco];
       var objetivo = dep.credito;
+      // 0) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo: no tiene
+      // contrapartida propia en el estado, porque las lineas que le corresponden ya las consumio el Paso 0
+      // al ver compensar esas partidas. Tiene que ir ANTES de buscar match. Dejado para el final, el
+      // matching le adjudicaba lineas de OTROS depositos y se las comia: en febrero de 2026 el descargo de
+      // 1,354.25 se llevo la remision V/Mc del 2-feb, y sin esa linea el acumulado de VISA del mes ya no
+      // podia cuadrar — 4,148.70 salian "en transito" habiendo compensado completos.
+      // Tambien va antes de la regla de fin de mes, que se tragaba los descargos fechados el ultimo dia.
+      var dsc = reconocerDescargo(objetivo, dep.fecha, banco, dep.descripcion, poolDescargo, tolerancia);
+      if(dsc){
+        var refD = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
+        hallazgos.push(hallazgoDescargo(banco, dep.fecha, objetivo, dep.descripcion, dsc, refD,
+          "Resumen en transito del mes anterior / Diario Caja General"));
+        return;
+      }
       // 1) match directo (1:1 o combinación) dentro de la ventana. Un depósito POR TARJETA se busca solo
       // entre las remisiones de su método: compensa en una remisión V/Mc o Clave, nunca en un pago de
       // certificado ni en un ACH. Sin esa restricción el motor arma combinaciones que cuadran de pura
@@ -2459,14 +2473,6 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         desglose.map(function(p){ return p.metodo + " B/ " + fmt(p.monto); }).join(" + ") + "." : "";
       var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
       var concepto = String(dep.descripcion||"").trim();
-      // 3-bis) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo. Va antes de
-      // la regla de fin de mes: el descargo suele fecharse el ultimo dia y esa regla se lo tragaba.
-      var dsc = reconocerDescargo(objetivo, dep.fecha, banco, dep.descripcion, poolDescargo, tolerancia);
-      if(dsc){
-        hallazgos.push(hallazgoDescargo(banco, dep.fecha, objetivo, dep.descripcion, dsc, refRaw,
-          "Resumen en transito del mes anterior / Diario Caja General"));
-        return;
-      }
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
       if(ultimoDia && dep.fecha===ultimoDia){
         hallazgos.push({

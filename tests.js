@@ -2617,6 +2617,34 @@ test("una venta sin deposito queda en transito y viaja al mes siguiente", () => 
   STATE.diarioCaja = null;
 });
 
+
+test("el descargo se reconoce ANTES de buscarle contrapartida en el banco", () => {
+  // Un descargo no tiene linea propia en el estado: las que le corresponden ya las consumio el Paso 0.
+  // Buscandole match primero, el motor le adjudicaba lineas de OTROS depositos. En febrero de 2026 el
+  // descargo de 1,354.25 se llevo la remision V/Mc del 2-feb (759.45) y con esa linea consumida el
+  // acumulado de VISA del mes ya no podia cuadrar: 4,148.70 salian "en transito" habiendo compensado.
+  const caja = [
+    // El asiento de descargo. Su concepto no dice "descargo" -- viene escrito con las palabras de quien lo
+    // digito -- asi que se reconoce por sus partidas, no por su texto.
+    { fecha: "2026-02-02", referencia: "ME-1855", debito: 0, credito: 759.45, descripcion: "se registra lo que quedo en circulacion en enero STG", fila: 2 },
+    { fecha: "2026-02-28", referencia: "ME-1877", debito: 0, credito: 500.00, descripcion: "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 28 DE FEBRERO 2026", fila: 3 }
+  ];
+  const estStg = [
+    { fecha: "2026-02-02", descripcion: "Remisión V/Mc 016005605 Liq. No. 3770756", debito: 0, credito: 759.45, fila: 2 },
+    { fecha: "2026-02-12", descripcion: "Remisión V/Mc 016005605 Liq. No. 3781020", debito: 0, credito: 480.00, fila: 3 }
+  ];
+  // El Paso 0 dice que la partida de 759.45 de enero ya compenso: eso convierte al asiento en descargo.
+  const transitoPrevio = [{ banco: "STG", fecha: "2026-01-31", monto: 759.45, concepto: "DEPOSITO POR TARJETA VISA STG DEL 31/01/2026" }];
+  const retVisaDia = { "2026-02-12": 20.00 };
+  const h = paso2(caja, [], estStg, null, retVisaDia, null, 7, 0.01, null, transitoPrevio);
+  const desc = h.filter(function(x){ return String(x.concepto||"").indexOf("Descargo") >= 0; });
+  eq(desc.length, 1, "el asiento de enero se reconoce como descargo");
+  // Y la remision del 2-feb queda libre, asi que el acumulado de VISA cuadra contra su neto (500 - 20 = 480).
+  const transito = h.filter(function(x){ return esEnTransito(x) && String(x.concepto||"").indexOf("VISA STG DEL 1 AL") >= 0; });
+  eq(transito.length, 0, "el acumulado del mes no queda en transito: compenso contra las remisiones");
+  eq(contarRojas(h), 0, "y no deja diferencias");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
