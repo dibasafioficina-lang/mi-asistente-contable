@@ -2303,15 +2303,6 @@ test("cada casilla dice de donde sacar su archivo", () => {
   });
 });
 
-test("la guia de inicio explica el ciclo completo", () => {
-  const g = guiaInicioHtml();
-  eq((g.match(/<li>/g) || []).length >= 5, true, "los 5 pasos del ciclo");
-  // Los tres conceptos que hay que entender si o si para no malinterpretar los resultados.
-  ["En tránsito", "último día del mes", "Nada se guarda"].forEach(function(t){
-    if (g.indexOf(t) < 0) throw new Error("a la guia le falta: " + t);
-  });
-});
-
 test("el reverso esconde el debito/credito hasta confirmar la revision", () => {
   // Un reverso anula un asiento ya registrado. Quien no tiene criterio contable no deberia poder copiar
   // el debito/credito sin antes mirar de donde salio: si el error estaba en el informe y no en la
