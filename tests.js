@@ -2713,6 +2713,157 @@ test("lo que sale del cierre vuelve a entrar con su estado, mes tras mes", () =>
   eq(por(238.55).creditoCG, "hecho", "lo ya acreditado no se olvida al pasar otro mes");
 });
 
+test("las erratas de una y dos letras se corrigen, pero solo hacia palabras clave y sin ambiguedad", () => {
+  // Marzo de 2026: "Banismto" dejo 1,643.08 sin banco y el Paso 1 no pudo reconocer el descargo.
+  eq(clasificarBancoPorTexto("deposito Banismto ck 1463.08 del 27/2/2026"), "Banistmo", "dos letras invertidas");
+  eq(clasificarBancoPorTexto("DEPOSITO BANISTOM"), "Banistmo");
+  if (normTxt("DEPSOITO DE BANISTMO").indexOf("DEPOSITO") < 0) throw new Error("DEPSOITO no se corrigio");
+  eq(normTxt("RETENSIONN DEL MES"), "RETENCION DEL MES", "dos letras en una palabra de 10");
+  eq(normTxt("REMISON V/MC"), "REMISION V/MC");
+  eq(normTxt("COMISION"), "COMISION", "una palabra clave exacta nunca se toca");
+  // Resguardos: corregir mal mueve plata de lugar.
+  eq(normTxt("YESENIA BLANCO"), "YESENIA BLANCO", "palabras de menos de 6 letras quedan exactas");
+  eq(normTxt("CARLOS PEREZ"), "CARLOS PEREZ", "un nombre no se vuelve CARGOS");
+  eq(normTxt("deposito omitido"), "DEPOSITO OMITIDO", "OMITIDO no es EMITIDO");
+  eq(normTxt("debido a"), "DEBIDO A", "DEBIDO no es DEBITO");
+  eq(normTxt("VETA"), "VETA");
+});
+
+test("la fecha de origen se lee del texto del asiento", () => {
+  eq(fechaOrigenEnTexto("deposito Banistmo tarjeta visa 28/2", "2026-03-01"), "2026-02-28");
+  eq(fechaOrigenEnTexto("deposito Banismto ck 1463.08 del 27/2/2026", "2026-03-01"), "2026-02-27");
+  eq(fechaOrigenEnTexto("deposito Banismto ck 90.00 y 90.00 28/2", "2026-03-01"), "2026-02-28", "los importes no son fechas");
+  eq(fechaOrigenEnTexto("DEPOSITO BRINKS DEL 01/03/2026", "2026-03-01"), null, "la fecha del propio mes no es de origen");
+  eq(fechaOrigenEnTexto("deposito del 30/12", "2026-01-02"), "2025-12-30", "cruza el año");
+});
+
+function lineaCG(fecha, desc, credito){ return { fecha: fecha, debito: 0, credito: credito, descripcion: desc, referencia: "ME-00000001878", fila: 1 }; }
+
+test("el descargo repartido por medio de pago se reconoce (1-mar-2026, Banistmo, -4,591.04)", () => {
+  const reporte = [
+    { fecha: "2026-03-01", banco: "Banistmo", metodo: "VISA", monto: 1040.29, cajera: "G" },
+    { fecha: "2026-03-01", banco: "Banistmo", metodo: "CLAVE", monto: 752.77, cajera: "G" },
+    { fecha: "2026-03-01", banco: "Banistmo", metodo: "CHEQUE", monto: 90.00, cajera: "G" }
+  ];
+  const cg = [
+    lineaCG("2026-03-01", "DEPOSITO DE BANISTMO CK DEL 01/03/2026", 90.00),
+    lineaCG("2026-03-01", "DEPOSITO POR TARJETA VISA BANISTMO DEL 01/03/2026", 1793.06),
+    lineaCG("2026-03-01", "deposito Banistmo tarjeta visa 28/2", 1013.53),
+    lineaCG("2026-03-01", "deposito Banistmo tarjeta clave 28/2", 1468.99),
+    lineaCG("2026-03-01", "deposito Banismto ck 90.00 y 90.00 28/2", 180.00),
+    lineaCG("2026-03-01", "deposito Banismto ck 1463.08 del 27/2/2026", 1463.08),
+    lineaCG("2026-03-01", "deposito Banistmo tarjeta visa 27/2", 1124.69),
+    lineaCG("2026-03-01", "deposito Banistmo tarjeta clave 27/2", 983.83)
+  ];
+  const transito = [
+    { fecha: "2026-02-27", banco: "Banistmo", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito" },
+    { fecha: "2026-02-28", banco: "Banistmo", monto: 2662.52, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito" }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-03-01", transito);
+  eq(contarRojas(h), 0, "la diferencia de -4,591.04 era el descargo");
+  const d = h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); });
+  eq(d.length, 2, "un descargo por cada partida de febrero");
+  const por = function(m){ return d.filter(function(x){ return Math.abs(x.monto - m) < 0.005; })[0]; };
+  eq(por(3571.60).lineas.length, 3, "ck + visa + clave del 27-feb");
+  eq(por(2662.52).lineas.length, 3, "ck + visa + clave del 28-feb");
+  if (por(3571.60).texto.indexOf("suman B/ 3,571.60") < 0) throw new Error("el texto debe decir que las lineas suman la partida");
+});
+
+test("un descargo que cita su fecha pero no suma lo mismo queda a la vista con aviso (1-mar-2026, STG)", () => {
+  const cg = [
+    lineaCG("2026-03-01", "deposito brinks St georges 27/2", 280.00),
+    lineaCG("2026-03-01", "deposito efectivo St georges 27/2", 2.32)
+  ];
+  const transito = [{ fecha: "2026-02-27", banco: "STG", monto: 282.29, concepto: "Depósito pendiente de identificar", sentido: "credito" }];
+  const h = paso1([], cg, null, 0.01, [], "2026-03-01", transito);
+  const av = h.filter(function(x){ return x.clase === "aviso" && /no coincide/.test(x.concepto || ""); });
+  eq(av.length, 1, "aviso de descargo que no coincide");
+  if (av[0].texto.indexOf("diferencia B/ 0.03") < 0) throw new Error("el aviso debe decir la diferencia: " + av[0].texto);
+  eq(contarRojas(h), 1, "la diferencia real sigue en el cotejo");
+});
+
+test("el desglose por medio de pago viaja en el resumen y reconoce un descargo sin fecha en el texto", () => {
+  const partes = [{ metodo: "CHEQUE", monto: 1463.08 }, { metodo: "VISA", monto: 1124.69 }, { metodo: "CLAVE", monto: 983.83 }];
+  // Ida y vuelta por el Excel del cierre.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 3571.60, fechaFinal: "2026-02-28" };
+  STATE.results = { paso1: [{ clase: "en_transito", motivo: "depósito de fin de mes — el crédito se registra al compensar", banco: "Banistmo",
+    fecha: "2026-02-27", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", comprobante: "", partes: partes, texto: "x" }] };
+  let libro = null;
+  const orig = XLSX.writeFile;
+  XLSX.writeFile = function(wb){ libro = wb; };
+  try { exportarEnTransito(); } finally { XLSX.writeFile = orig; }
+  const tr = parseTransitoPrevio(XLSX.utils.sheet_to_json(libro.Sheets["En transito"], { header: 1, raw: true }));
+  eq(tr.length, 1);
+  eq((tr[0].partes || []).length, 3, "el desglose vuelve a entrar");
+  eq(tr[0].partes[0].metodo, "CHEQUE");
+  cerca(tr[0].partes[0].monto, 1463.08);
+
+  // Lineas SIN fecha de origen y un transito con otra combinacion posible (2,108.52 + 1,463.08 = 3,571.60):
+  // sin el desglose seria adivinar; con el desglose es exacto.
+  const cg = [
+    lineaCG("2026-03-02", "DEPOSITO POR TARJETA VISA BANISTMO", 1124.69),
+    lineaCG("2026-03-02", "DEPOSITO POR TARJETA CLAVE BANISTMO", 983.83),
+    lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 1463.08)
+  ];
+  const transito = [
+    { fecha: "2026-02-27", banco: "Banistmo", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito", partes: partes },
+    { fecha: "2026-02-20", banco: "Banistmo", monto: 2108.52, concepto: "deposito en transito", sentido: "credito" },
+    { fecha: "2026-02-21", banco: "Banistmo", monto: 1463.08, concepto: "cheque en transito", sentido: "credito" }
+  ];
+  const h = paso1([], cg, null, 0.01, [], "2026-03-01", transito);
+  eq(contarRojas(h), 0);
+  const d = h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); });
+  eq(d.length, 1, "un solo descargo");
+  eq(d[0].partidas.length, 1, "descarga la partida del desglose, no la otra combinacion");
+  cerca(d[0].partidas[0].monto, 3571.60);
+});
+
+test("el excedente del dia sin fecha ni desglose solo se da por descargo si la combinacion es unica", () => {
+  const cg = [lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 500.00), lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 300.00)];
+  // Unica: 800 = 800.
+  const unica = paso1([], cg, null, 0.01, [], "2026-03-01",
+    [{ fecha: "2026-02-10", banco: "Banistmo", monto: 800.00, concepto: "cheque en transito", sentido: "credito" }]);
+  eq(contarRojas(unica), 0, "una sola combinacion posible: descargo");
+  // Ambigua: 800 = 800 o 500 + 300 de otras partidas. Queda como diferencia para que se revise.
+  const cg2 = [lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 450.00), lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 350.00)];
+  const ambigua = paso1([], cg2, null, 0.01, [], "2026-03-01", [
+    { fecha: "2026-02-10", banco: "Banistmo", monto: 800.00, concepto: "cheque en transito", sentido: "credito" },
+    { fecha: "2026-02-11", banco: "Banistmo", monto: 500.00, concepto: "cheque en transito", sentido: "credito" },
+    { fecha: "2026-02-12", banco: "Banistmo", monto: 300.00, concepto: "cheque en transito", sentido: "credito" }
+  ]);
+  eq(contarRojas(ambigua) > 0, true, "dos combinaciones posibles: no se adivina");
+});
+
+test("el Paso 2 aparta el descargo repartido en varias lineas antes de conciliar", () => {
+  const caja = [
+    { fecha: "2026-03-01", referencia: "ME-00000001878", debito: 0, credito: 1013.53, descripcion: "deposito Banistmo tarjeta visa 28/2", fila: 2 },
+    { fecha: "2026-03-01", referencia: "ME-00000001878", debito: 0, credito: 1468.99, descripcion: "deposito Banistmo tarjeta clave 28/2", fila: 3 },
+    { fecha: "2026-03-01", referencia: "ME-00000001878", debito: 0, credito: 180.00, descripcion: "deposito Banismto ck 90.00 y 90.00 28/2", fila: 4 }
+  ];
+  const transitoPrevio = [{ banco: "Banistmo", fecha: "2026-02-28", monto: 2662.52, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito" }];
+  const h = paso2(caja, [], [], null, {}, null, 7, 0.01, null, transitoPrevio);
+  const desc = h.filter(function(x){ return /Descargo/.test(x.concepto || ""); });
+  eq(desc.length, 1, "un descargo");
+  eq(desc[0].lineas.length, 3);
+  eq(h.filter(function(x){ return esEnTransito(x) || x.clase === "diff"; }).length, 0, "sus lineas no quedan en transito ni como diferencia");
+});
+
+test("no se avisa 'descargo que no coincide' de lineas que otro reconocimiento si explico", () => {
+  // Cita una sola fecha (31/01) pero descarga partidas de dos fechas: no cuadra por fecha de origen y si por
+  // partidas. Paso en febrero de 2026 con el asiento de 1,354.25: el aviso salia aunque el descargo se reconocia.
+  const cg = [lineaCG("2026-02-02", "DESCARGO DEPOSITOS BRINKS STG AL 31/01", 450.00)];
+  const transito = [
+    { fecha: "2026-01-31", banco: "STG", monto: 100.00, concepto: "DEPOSITO BRINKS", sentido: "credito" },
+    { fecha: "2026-01-29", banco: "STG", monto: 350.00, concepto: "DEPOSITO BRINKS", sentido: "credito" }
+  ];
+  const h = paso1([], cg, null, 0.01, [], "2026-02-01", transito);
+  eq(h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 1, "se reconoce por sus partidas");
+  eq(h.filter(function(x){ return x.clase === "aviso" && /no coincide/.test(x.concepto || ""); }).length, 0, "sin aviso falso");
+  eq(contarRojas(h), 0);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
