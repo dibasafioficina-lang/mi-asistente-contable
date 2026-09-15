@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.28";
+var APP_VERSION="2026.09.29";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -992,6 +992,7 @@ function parseReporteConsolidado(rows){
   function etiquetaCol(v){ return String(v||"").replace(/\s+/g," ").trim(); }
   var mapCols = [];
   var colsFuera = [];   // columnas con venta que no entran al cotejo por banco (se reportan en el Paso 1)
+  var colsEfectivo = []; // Efectivo Brink y Efectivo Ventanilla: se cotejan contra Caja General en el Paso 1
 
   // Intento (a): dos filas de encabezado, con rellenado hacia adelante de la fila de grupo (celdas combinadas)
   var groupRow = rows[subIdx-1] || [];
@@ -1022,6 +1023,11 @@ function parseReporteConsolidado(rows){
     if(!metodo){
       // Sin método reconocido tampoco se descarta en silencio: Caja General es la cuenta puente de TODA
       // la venta, así que una columna con monto que nadie mira es un hueco. Se anota para reportarla.
+      // Efectivo Brink y Efectivo Ventanilla no son un metodo por banco, pero se cotejan contra Caja General.
+      if(textoCol.indexOf("EFECTIVO")!==-1 && /BRINK|VENTANILLA/.test(sub)){
+        colsEfectivo.push({ col:i, tipo: sub.indexOf("BRINK")!==-1 ? "BRINK" : "VENTANILLA" });
+        continue;
+      }
       if(!/FALTANTE|SOBRANTE|FECHA|EMPRESA|CAJERA/.test(sub)) colsFuera.push({col:i, etiqueta:etiquetaCol(subRow[i])});
       continue;
     }
@@ -1059,7 +1065,7 @@ function parseReporteConsolidado(rows){
   }
 
   var meses = mesesDominantesReporte(rows, cFecha, subIdx+1);
-  var out = [];
+  var out = [], efectivo = [];
   var lastIso = null;
   for(var r=subIdx+1;r<rows.length;r++){
     var row = rows[r];
@@ -1085,10 +1091,15 @@ function parseReporteConsolidado(rows){
       }
     });
     colsFuera.forEach(function(c){ c.total = Math.round(((c.total||0) + money(row[c.col]))*100)/100; });
+    colsEfectivo.forEach(function(c){
+      var v = money(row[c.col]);
+      if(v) efectivo.push({ fecha:iso, cajera:cajera, tipo:c.tipo, monto:v, fila:r+1 });
+    });
   }
   // Se adjunta al resultado (como .hojas en readWorkbook) para que el Paso 1 las reporte sin cambiar la
   // firma de la función ni el resto de los llamadores.
   out.sinMapear = colsFuera.filter(function(c){ return Math.abs(c.total||0) > 0.005; });
+  if(colsEfectivo.length) out.efectivo = efectivo;   // solo si el informe trae las columnas de efectivo
   return out;
 }
 
@@ -1854,6 +1865,60 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
 
   // Reconciliación de los depósitos acumulados por rango: el monto que registró el sistema vs. la suma
   // de los depósitos diarios de ese método+banco del reporte dentro del rango (los días "cubiertos").
+  /* ---- Efectivo de la cajera contra Caja General ----
+     El efectivo no nombra banco en Caja General ("DEPOSITO BRINKS DEL 01/03/2026", "DEPOSITO DEL 01/03/2026"),
+     asi que el cotejo por banco no lo veia: el efectivo reportado solo aparecia en el Paso 3, desde el
+     navegador del banco, y un Brinks entregado que nunca se asento recien salia al cierre. En marzo de 2026
+     quedaban fuera B/ 9,067.00. Aca se compara por dia: Efectivo Brink + Efectivo Ventanilla del informe
+     contra los creditos de efectivo sin banco de Caja General. Las lineas que citan una fecha de otro mes
+     no son el efectivo del dia (son descargo). El Paso 2 hereda estas lineas y las busca en el banco. */
+  if(reporte && Array.isArray(reporte.efectivo)){
+    var efDec = { firmaCaja: firmaDiario(diarioCaja), banco: null, filas: {} };
+    var votosEf = {};
+    diarioCaja.forEach(function(x){ var b = clasificarBancoPorTexto(x.descripcion); if(x.credito>0 && b && esBrinks(x.descripcion)) votosEf[b] = (votosEf[b]||0) + 1; });
+    (transitoPrevio||[]).forEach(function(t){ var n = normTxt(t.concepto); if(t.banco && (esBrinks(n) || n.indexOf("EFECTIVO")!==-1)) votosEf[t.banco] = (votosEf[t.banco]||0) + 1; });
+    var bancosEf = Object.keys(votosEf).sort(function(a, b){ return votosEf[b] - votosEf[a]; });
+    efDec.banco = bancosEf.length ? bancosEf[0] : null;
+    var lineasEf = diarioCaja.filter(function(x){
+      return x.credito>0 && !clasificarBancoPorTexto(x.descripcion) && esDepositoEfectivo(x.descripcion) && !fechaOrigenEnTexto(x.descripcion, x.fecha);
+    });
+    var fechasEf = {};
+    reporte.efectivo.forEach(function(e){ fechasEf[e.fecha] = true; });
+    lineasEf.forEach(function(x){ fechasEf[x.fecha] = true; efDec.filas[x.fila] = true; });
+    Object.keys(fechasEf).sort().forEach(function(f){
+      var delDia = reporte.efectivo.filter(function(e){ return e.fecha === f; });
+      var ls = lineasEf.filter(function(x){ return x.fecha === f; });
+      var brink = Math.round(delDia.filter(function(e){ return e.tipo === "BRINK"; }).reduce(function(a, e){ return a + e.monto; }, 0)*100)/100;
+      var vent = Math.round(delDia.filter(function(e){ return e.tipo === "VENTANILLA"; }).reduce(function(a, e){ return a + e.monto; }, 0)*100)/100;
+      var a = Math.round((brink + vent)*100)/100;
+      var b = Math.round(ls.reduce(function(s2, x){ return s2 + x.credito; }, 0)*100)/100;
+      var diffEf = Math.round((a - b)*100)/100;
+      if(Math.abs(diffEf) <= tolerancia) return;
+      var det = [brink > 0 ? "Brink B/ " + fmt(brink) : "", vent > 0 ? "Ventanilla B/ " + fmt(vent) : ""].filter(Boolean).join(" + ");
+      var enCaja = ls.length ? " (" + ls.map(function(x){ return "\"" + String(x.descripcion||"").trim() + "\" B/ " + fmt(x.credito); }).join("; ") + ")" : "";
+      if(diffEf > tolerancia && esFinDeMesP1(f)){
+        hallazgos.push({
+          fecha:f, banco:efDec.banco || "", monto:diffEf, clase:"en_transito",
+          concepto:"Efectivo de fin de mes reportado por la cajera", comprobante:"",
+          partes: [{ metodo:"EFECTIVO BRINK", monto:brink }, { metodo:"EFECTIVO VENTANILLA", monto:vent }].filter(function(p){ return p.monto > 0; }),
+          motivo:"efectivo de fin de mes sin crédito en Caja General",
+          texto: "Efectivo " + f + ": la cajera reportó B/ " + fmt(a) + (det ? " (" + det + ")" : "") + " y Caja General " +
+                 (b > 0 ? "acreditó B/ " + fmt(b) + enCaja : "no tiene su crédito") + ". Es de los últimos días del mes: queda en tránsito y viaja al resumen del próximo mes." +
+                 (efDec.banco ? "" : " No se pudo deducir el banco del efectivo: completalo en el resumen en tránsito.") + comprobanteTxt(f),
+          fuente: "Reporte consolidado de caja (efectivo) / Diario Caja General"
+        });
+        return;
+      }
+      hallazgos.push({
+        fecha:f, banco:"", monto:diffEf, clase:"diff", concepto:"Efectivo", comprobante:"",
+        texto: "Efectivo " + f + ": la cajera reportó B/ " + fmt(a) + (det ? " (" + det + ")" : "") + " y Caja General acreditó B/ " + fmt(b) +
+               enCaja + " (dif. B/ " + fmt(diffEf) + ")." + comprobanteTxt(f),
+        fuente: "Reporte consolidado de caja (efectivo) / Diario Caja General"
+      });
+    });
+    decisiones().efectivo = efDec;   // el Paso 2 hereda estas lineas y las busca en el estado de cuenta
+  }
+
   batches.forEach(function(b){
     var diff = Math.round((b.cubierto - b.monto)*100)/100;
     if(Math.abs(diff) > tolerancia){
@@ -1956,6 +2021,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     });
   }
   // Último: las diferencias que se cancelan entre sí no son plata faltante, son plata mal ubicada.
+  guardarDecisionDescargos(diarioCaja, transitoPrevio, descargos);   // los Pasos 2 y 3 heredan esta decision
   return colapsarCompensados(hallazgos, tolerancia);
 }
 
@@ -1984,6 +2050,35 @@ function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
 // Depósito de EFECTIVO del diario: el camión de valores (Brinks) o el que se lleva a ventanilla
 // ("DEPOSITO DEL 09/6/2026"). Se distingue de los depósitos por tarjeta (VISA/CLAVE/Yappy), de los ACH y
 // de los cheques, porque solo el efectivo se comporta como se describe en consolidarEfectivoDelDia.
+/* ---- Efectivo: la combinacion mas cercana, no la primera ----
+   El estado de cuenta viene ordenado de la fecha mas nueva a la mas vieja, asi que la primera combinacion
+   que suma es la mas LEJANA. En junio de 2026 el efectivo del 13 (869.90) se llevo los 4.90 del 19 —que
+   eran del 17— teniendo los suyos el 15, y el 17 quedo sin compensar. Se elige la combinacion (hasta 3
+   lineas) cuya linea mas lejana esta mas cerca; a igualdad, la de menor distancia total. */
+function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
+  var idx = [];
+  for(var i=0;i<pool.length;i++){
+    var e = pool[i];
+    if(e.usado || e.fecha < fecha) continue;
+    var d = distanciaBancaria(fecha, e.fecha);
+    if(d <= ventanaDias) idx.push({ i:i, d:d, m:montoConc(e) });
+  }
+  var mejor = null;
+  function probar(sel){
+    var suma = 0, max = 0, tot = 0;
+    sel.forEach(function(x){ suma += x.m; if(x.d > max) max = x.d; tot += x.d; });
+    if(Math.abs(suma - objetivo) > tolerancia) return;
+    if(!mejor || max < mejor.max || (max === mejor.max && tot < mejor.tot)) mejor = { sel:sel.map(function(x){ return x.i; }), max:max, tot:tot };
+  }
+  for(var a=0;a<idx.length;a++){
+    probar([idx[a]]);
+    for(var b=a+1;b<idx.length;b++){
+      probar([idx[a], idx[b]]);
+      for(var c=b+1;c<idx.length;c++) probar([idx[a], idx[b], idx[c]]);
+    }
+  }
+  return mejor ? mejor.sel : null;
+}
 function esDepositoEfectivo(desc){
   var n = normTxt(desc);
   if(n.indexOf("DEPOSITO")===-1 && !esBrinks(desc)) return false;
@@ -2410,6 +2505,93 @@ function desgloseDelInforme(reporte, fecha, banco, monto, tolerancia){
    - Convencion: si el concepto dice DESCARGO, se acepta contra cualquier partida del transito previo
      (la etiqueta es intencion explicita); si ni asi coincide, se avisa en vez de callar. */
 function esDescargoDesc(desc){ return normTxt(desc).indexOf("DESCARGO")!==-1; }
+/* ---- Una sola casa por comparacion ----
+   Cada pregunta contable se decide en UN paso y los siguientes heredan la decision en vez de volver a
+   leer los archivos y decidir otra vez por su cuenta. Antes el transito anterior se cotejaba en los Pasos
+   0, 2 y 3; el descargo se reconocia con reglas distintas en los Pasos 1, 2 y 3; y la VISA se asignaba en
+   tres lugares sin compartir resultado. Dos pasos podian contradecirse sobre la misma linea.
+     transito anterior ⇄ estados .......... Paso 0  → lo heredan los Pasos 2 y 3
+     descargo del transito ................ Paso 1  → lo heredan los Pasos 2 y 3
+     efectivo de la cajera ⇄ Caja General . Paso 1  → el Paso 2 lo busca en el banco
+     que remision VISA pago cada venta .... Paso 2  → el Paso 4 controla contra esa asignacion
+   Cada decision guarda la FIRMA de los archivos con que se tomo. Si un paso recibe otros archivos (se
+   cambio un Excel, o una prueba llama al paso suelto) no usa una decision vieja: decide por su cuenta. */
+function firmaFilas(rows){
+  var n = 0, cr = 0, db = 0, fmin = "", fmax = "";
+  (rows||[]).forEach(function(x){
+    n++; cr += Math.round((+x.credito||0)*100); db += Math.round((+x.debito||0)*100);
+    var f = x.fecha || ""; if(f && (!fmin || f < fmin)) fmin = f; if(f > fmax) fmax = f;
+  });
+  return n + "|" + cr + "|" + db + "|" + fmin + "|" + fmax;
+}
+function firmaEstado(rows){ return firmaFilas(rows); }
+function firmaDiario(rows){ return firmaFilas(rows); }
+function firmaTransito(items){
+  return (items||[]).map(function(t){ return (t.banco||"") + "|" + (t.fecha||"") + "|" + Math.round((+t.monto||0)*100); }).join(";");
+}
+function decisiones(){ if(!STATE.decisiones) STATE.decisiones = {}; return STATE.decisiones; }
+// Paso 0: que partidas compensaron y con que lineas (banco + fila) de cada estado de cuenta.
+function guardarDecisionTransito(transitoPrevio, estados, res){
+  var firmas = {};
+  Object.keys(estados).forEach(function(b){ firmas[b] = firmaEstado(estados[b]||[]); });
+  function copia(ch){
+    return { fecha:ch.fecha, fechaOrig:ch.fechaOrig, monto:ch.monto, concepto:ch.concepto, comprobante:ch.comprobante,
+             sentido:ch.sentido, creditoCG:ch.creditoCG, partes:ch.partes, banco:ch.banco,
+             compensoEn: ch.compensoEn ? { fecha: ch.compensoEn.fecha } : null };
+  }
+  decisiones().transito = { firmaTransito: firmaTransito(transitoPrevio), firmas: firmas, consumidas: res.consumidas || {},
+    compensadas: res.compensadas.map(copia), pendientes: res.pendientes.map(copia), fechasRaras: res.fechasRaras || [] };
+}
+// Pasos 2 y 3: heredan lo que decidio el Paso 0. Si los archivos no son los mismos, cotejan por su cuenta.
+function transitoDelPaso0(transitoPrevio, estados, tolerancia){
+  var dec = STATE.decisiones && STATE.decisiones.transito;
+  var vale = !!dec && dec.firmaTransito === firmaTransito(transitoPrevio) && Object.keys(estados).every(function(b){
+    var rows = estados[b];
+    return !rows || !rows.length || dec.firmas[b] === firmaEstado(rows);
+  });
+  if(!vale) return consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
+  Object.keys(estados).forEach(function(b){
+    var usadas = dec.consumidas[b] || {};
+    (estados[b]||[]).forEach(function(x){ if(usadas[x.fila]) x._transitoUsado = true; });
+  });
+  return { compensadas: dec.compensadas, pendientes: dec.pendientes, fechasRaras: dec.fechasRaras, heredado: true };
+}
+// Paso 1: que creditos de Caja General son descargo del transito, con sus lineas y partidas.
+function guardarDecisionDescargos(diarioCaja, transitoPrevio, lista){
+  decisiones().descargos = { firmaCaja: firmaDiario(diarioCaja), firmaTransito: firmaTransito(transitoPrevio),
+    lista: (lista||[]).map(function(dg){
+      return { banco:dg.banco, fecha:dg.fecha, monto:dg.monto, ref:dg.ref,
+        partidas:(dg.partidas||[]).map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
+        lineas:(dg.lineas||[]).map(function(l){ return { fecha:l.fecha, monto:l.monto, descripcion:l.descripcion, referencia:l.referencia }; }) };
+    }) };
+}
+function descargosHeredados(transitoPrevio, diarioCaja){
+  var dec = STATE.decisiones && STATE.decisiones.descargos;
+  if(!dec || !transitoPrevio || !transitoPrevio.length) return null;
+  if(dec.firmaTransito !== firmaTransito(transitoPrevio)) return null;
+  if(diarioCaja && dec.firmaCaja !== firmaDiario(diarioCaja)) return null;
+  return dec.lista;
+}
+// Ubica en un diario (Caja General o el del banco) las lineas de un descargo ya decidido. Devuelve las filas
+// halladas; si no estan todas, no marca ninguna.
+function marcarLineasHeredadas(filas, lineas, campo, marca){
+  var halladas = [];
+  var todas = (lineas||[]).every(function(l){
+    for(var i=0;i<filas.length;i++){
+      var x = filas[i];
+      if(x[marca] || halladas.indexOf(x) !== -1 || x.fecha !== l.fecha || Math.abs((x[campo]||0) - l.monto) > 0.005) continue;
+      var r1 = String(x.referencia==null ? "" : x.referencia).trim(), r2 = String(l.referencia==null ? "" : l.referencia).trim();
+      if(/^ME-/i.test(r1) && /^ME-/i.test(r2) && r1 !== r2) continue;
+      halladas.push(x);
+      return true;
+    }
+    return false;
+  });
+  if(!todas || !halladas.length) return [];
+  halladas.forEach(function(x){ x[marca] = true; });
+  return halladas;
+}
+function refME(ref){ var r = String(ref==null ? "" : ref).trim(); return /^ME-/i.test(r) ? r : ""; }
 /* ---- Fecha de origen escrita en la descripcion ----
    El descargo del transito se asienta con la fecha del dia en que se registra (1-mar), bajo el mismo
    comprobante que las ventas de ese dia. Lo unico que dice que es de febrero es el texto: "tarjeta visa 28/2",
@@ -2422,6 +2604,9 @@ function fechaOrigenEnTexto(desc, fechaAsiento){
   while((m = re.exec(String(desc)))){
     var dia = parseInt(m[2],10), mes = parseInt(m[3],10);
     if(dia < 1 || dia > 31 || mes < 1 || mes > 12) continue;
+    // "DEPOSITO BRINKS DEL 02/01/2025" en un asiento del 02-ene-2026: es el propio dia con el año mal
+    // tecleado, no una venta de otro mes. Tomarla como origen sacaba el efectivo del dia del cotejo.
+    if(dia === parseInt(String(fechaAsiento).slice(8,10),10) && mes === ma) continue;
     var y = m[4] ? parseInt(m[4],10) : (mes > ma ? ya - 1 : ya);
     if(y < 100) y += 2000;
     var iso = y + "-" + String(mes).padStart(2,"0") + "-" + String(dia).padStart(2,"0");
@@ -2590,30 +2775,46 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
   // Las líneas del estado que compensan partidas en tránsito del mes anterior (Paso 0) se apartan antes de
   // conciliar: su asiento es del mes pasado. Si no, un depósito de este mes podría engancharse con ellas
   // por coincidencia de importe y dejar huérfano el movimiento que sí le correspondía.
-  var consumo = (transitoPrevio && transitoPrevio.length) ? consumirTransitoPrevio(transitoPrevio, estados, tolerancia) : null;
+  var consumo = (transitoPrevio && transitoPrevio.length) ? transitoDelPaso0(transitoPrevio, estados, tolerancia) : null;
   var poolDescargo = poolParaDescargos(transitoPrevio, consumo && consumo.compensadas);
 
   // Créditos del banco por banco, con flag .usado (excluye ABORTED y lo consumido por el Paso 0).
   var bancoCred = {};
   Object.keys(estados).forEach(function(b){
     bancoCred[b] = (estados[b]||[]).filter(function(x){ return x.credito>0 && !x._transitoUsado && normTxt(x.descripcion).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, usado:false}; });
+      .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, fila:x.fila, usado:false}; });
   });
 
   // Último día del mes: lo que entra ese día queda en tránsito para el mes siguiente (no compensa aún).
   var ultimoDia = ultimoDiaMes(diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; }).map(function(x){ return x.fecha; }));
+  var heredadosP2 = descargosHeredados(transitoPrevio, diarioCaja);
 
   Object.keys(estados).forEach(function(banco){
     var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
     // Descargo repartido en varias lineas que citan su fecha de origen: se aparta entero antes de conciliar,
     // igual que el descargo de una sola linea (ver el punto 0 de abajo).
-    descargosPorFechaOrigen(cajaDep.map(function(x){ return { fecha:x.fecha, monto:x.credito, descripcion:x.descripcion, referencia:x.referencia, src:x }; }),
-                            poolDescargo, banco, tolerancia, "usadoDescargo").hechos.forEach(function(g){
-      g.lineas.forEach(function(l){ l.src._descargo = true; });
-      var refG = g.lineas.map(function(l){ return String(l.referencia==null?"":l.referencia).trim(); }).filter(function(r){ return /^ME-/i.test(r); })[0] || "";
-      hallazgos.push(hallazgoDescargo(banco, g.fecha, g.monto, g.lineas[0].descripcion, { partidas:g.partidas }, refG,
-        "Resumen en transito del mes anterior / Diario Caja General", g.lineas));
-    });
+    if(heredadosP2){
+      // El Paso 1 ya decidio que creditos son descargo: aca solo se ubican y se apartan.
+      heredadosP2.filter(function(dg){ return dg.banco === banco; }).forEach(function(dg){
+        if(!marcarLineasHeredadas(cajaDep, dg.lineas, "credito", "_descargo").length) return;
+        dg.partidas.forEach(function(p){
+          for(var i=0;i<poolDescargo.length;i++){
+            var q = poolDescargo[i];
+            if(!q.usadoDescargo && q.banco===p.banco && q.fecha===p.fecha && Math.abs(q.monto - p.monto) < 0.005){ q.usadoDescargo = true; break; }
+          }
+        });
+        hallazgos.push(hallazgoDescargo(banco, dg.fecha, dg.monto, dg.lineas[0].descripcion, { partidas:dg.partidas }, refME(dg.ref),
+          "Paso 1 (descargo decidido ahí) / Diario Caja General", dg.lineas));
+      });
+    } else {
+      descargosPorFechaOrigen(cajaDep.map(function(x){ return { fecha:x.fecha, monto:x.credito, descripcion:x.descripcion, referencia:x.referencia, src:x }; }),
+                              poolDescargo, banco, tolerancia, "usadoDescargo").hechos.forEach(function(g){
+        g.lineas.forEach(function(l){ l.src._descargo = true; });
+        var refG = g.lineas.map(function(l){ return String(l.referencia==null?"":l.referencia).trim(); }).filter(function(r){ return /^ME-/i.test(r); })[0] || "";
+        hallazgos.push(hallazgoDescargo(banco, g.fecha, g.monto, g.lineas[0].descripcion, { partidas:g.partidas }, refG,
+          "Resumen en transito del mes anterior / Diario Caja General", g.lineas));
+      });
+    }
     cajaDep.forEach(function(dep){
       if(dep._descargo) return;
       // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
@@ -2627,7 +2828,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // 1,354.25 se llevo la remision V/Mc del 2-feb, y sin esa linea el acumulado de VISA del mes ya no
       // podia cuadrar — 4,148.70 salian "en transito" habiendo compensado completos.
       // Tambien va antes de la regla de fin de mes, que se tragaba los descargos fechados el ultimo dia.
-      var dsc = reconocerDescargo(objetivo, dep.fecha, banco, dep.descripcion, poolDescargo, tolerancia);
+      var dsc = heredadosP2 ? null : reconocerDescargo(objetivo, dep.fecha, banco, dep.descripcion, poolDescargo, tolerancia);
       if(dsc){
         var refD = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
         hallazgos.push(hallazgoDescargo(banco, dep.fecha, objetivo, dep.descripcion, dsc, refD,
@@ -2722,17 +2923,21 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             if(c){
               c.forEach(function(k){
                 var idx = pool.indexOf(poolP[k]);   // poolP puede ser un subconjunto: se marca en el pool real
-                if(idx>=0){ pool[idx].usado = true; idxs.push(idx); }
+                if(idx>=0){ pool[idx].usado = true; pool[idx].asignadoA = dep.fecha; idxs.push(idx); }
               });
               halladasN++;
             }
             else todas = false;
           });
           if(todas){ partesHalladas = desglose; }
-          else { idxs.forEach(function(i){ pool[i].usado = false; }); } // revertir: o cotejan todas, o ninguna
+          else { idxs.forEach(function(i){ pool[i].usado = false; delete pool[i].asignadoA; }); } // revertir: o cotejan todas, o ninguna
         }
       }
-      if(combo){ combo.forEach(function(i){ pool[i].usado = true; }); return; } // cuadrado
+      if(combo){
+        // A que venta pago cada linea: el Paso 4 no puede volver a usar una remision que ya pago otra venta.
+        combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion) ? "rango" : dep.fecha; });
+        return;
+      } // cuadrado
       if(partesHalladas) return; // coteja: el banco lo reflejó separado, tal como lo desglosa el informe
 
       var ref = refComprobante(dep.referencia);
@@ -2857,6 +3062,66 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       });
     });
   }
+
+  /* ---- Efectivo: Caja General contra el banco ----
+     Hereda del Paso 1 que lineas de Caja General son el efectivo (no nombran banco) y las busca en el estado
+     con las mismas reglas que el Paso 3: primero cada partida por su importe, despues la suma del dia
+     (Brinks + ventanilla que el banco acredita consolidados), con rezago de hasta 10 dias habiles. Solo corre
+     con la decision del Paso 1: sin ella no hay forma de saber que lineas son el efectivo del dia. */
+  var efH = STATE.decisiones && STATE.decisiones.efectivo;
+  if(efH && efH.firmaCaja === firmaDiario(diarioCaja)){
+    var lineasEfP2 = diarioCaja.filter(function(x){ return x.credito>0 && efH.filas[x.fila]; });
+    if(lineasEfP2.length){
+      var bancoEf = (efH.banco && bancoCred[efH.banco]) ? efH.banco : null;
+      if(!bancoEf){
+        var conBrinks = Object.keys(bancoCred).filter(function(b){ return bancoCred[b].some(function(e){ return esBrinks(e.desc); }); });
+        bancoEf = conBrinks.length === 1 ? conBrinks[0] : null;
+      }
+      if(!bancoEf){
+        hallazgos.push({ fecha:"", banco:"", monto:0, clase:"aviso", concepto:"Efectivo sin banco", comprobante:"", motivo:"banco del efectivo desconocido",
+          texto:"No se pudo determinar a qué banco va el efectivo de Caja General (ningún asiento ni estado de cuenta lo indica sin ambigüedad), así que no se buscó en el banco.",
+          fuente:"Diario Caja General / Estados de cuenta" });
+      } else {
+        var poolEstEf = bancoCred[bancoEf].map(function(e){ return { fecha:e.fecha, monto:e.monto, descripcion:e.desc, usado:e.usado, ref:e }; });
+        var poolDiaEf = lineasEfP2.map(function(x){ return { fecha:x.fecha, monto:x.credito, descripcion:x.descripcion, usado:false, src:x }; });
+        consolidarEfectivoDelDia(poolDiaEf, poolEstEf, ventanaDias, tolerancia);
+        var candEf = poolEstEf.filter(function(e){ return !esRemisionVisa(e.descripcion) && !esRemisionClave(e.descripcion); });
+        poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var c = esBrinks(d.descripcion) ? buscarBrinks(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
+          if(!c) c = combinacionMasCercana(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
+          if(c){ c.forEach(function(i){ candEf[i].usado = true; }); d.usado = true; }
+        });
+        poolEstEf.forEach(function(e){ if(e.usado) e.ref.usado = true; });
+        poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var desc = String(d.descripcion||"").trim(), refE = refME(d.src.referencia);
+          var finMes = ultimoDia && d.fecha <= ultimoDia && daysBetween(d.fecha, ultimoDia) <= 5;
+          if(finMes){
+            // Como parte "EFECTIVO": el navegador del banco suele traer ese mismo asiento partido (320.00 + 1.12
+            // del 321.12 del 29-jun-2026) y sin esto el resumen lo sumaba dos veces.
+            hallazgos.push({ fecha:d.fecha, banco:bancoEf, monto:d.monto, clase:"en_transito", concepto:desc, comprobante:refE,
+              partes:[{ metodo:"EFECTIVO", monto:d.monto }],
+              motivo:"efectivo de fin de mes",
+              texto: bancoEf + " " + d.fecha + ": el efectivo de B/ " + fmt(d.monto) + " (\"" + desc + "\") es de los últimos días del mes y todavía no aparece en el estado de cuenta — queda en tránsito." + refComprobante(d.src.referencia),
+              fuente: "Diario Caja General / Estado de cuenta " + bancoEf });
+            return;
+          }
+          hallazgos.push({ fecha:d.fecha, banco:bancoEf, monto:d.monto, clase:"diff", concepto:desc, comprobante:refE,
+            texto: bancoEf + " " + d.fecha + ": el efectivo de B/ " + fmt(d.monto) + " (\"" + desc + "\") que Caja General acreditó no aparece en el estado de cuenta de " + bancoEf +
+                   " dentro de 10 días hábiles." + refComprobante(d.src.referencia),
+            fuente: "Diario Caja General / Estado de cuenta " + bancoEf });
+        });
+      }
+    }
+  }
+
+  // Remisiones VISA de STG y la venta a la que quedaron asignadas: el Paso 4 controla contra esto.
+  if(estStg){
+    var asignadas = {};
+    (bancoCred["STG"]||[]).forEach(function(e){ if(e.usado && e.asignadoA && e.fila != null && esRemisionVisa(e.desc)) asignadas[e.fila] = e.asignadoA; });
+    decisiones().remisiones = { firma: firmaEstado(estStg), asignadas: asignadas };
+  }
   return hallazgos;
 }
 
@@ -2866,7 +3131,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
 // Marca `_chqUsado` en las filas emparejadas para que conciliarBancoEstado no las vea, y empuja los
 // cheques del diario que no clarearon como "en tránsito". Los cheques del Paso 0 que no clarean NO se
 // reportan acá (los reporta el Paso 0). Deja los depósitos sin emparejar para el flujo normal.
-function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, tolerancia, banco, hallazgos, poolDescargo){
+function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, tolerancia, banco, hallazgos, poolDescargo, soloSinBanco){
   var VENTANA = 366;
   var ckDiario = (diario||[]).filter(function(x){ return x.debito>0 && !x._chqUsado && esChequeDesc(x.descripcion) && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; });
   var depos = (estado||[]).filter(function(x){ return x.credito>0 && !x._transitoUsado && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; });
@@ -2875,7 +3140,7 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
   ckDiario.forEach(function(x){
     if(ultimoDia && x.fecha===ultimoDia){ // último día → en tránsito para el mes siguiente
       // Salvo que sea el asiento de DESCARGO del transito previo (suele fecharse el ultimo dia).
-      var dscU = poolDescargo ? reconocerDescargo(x.debito, x.fecha, banco, x.descripcion, poolDescargo, tolerancia) : null;
+      var dscU = (poolDescargo && (!soloSinBanco || !clasificarBancoPorTexto(x.descripcion))) ? reconocerDescargo(x.debito, x.fecha, banco, x.descripcion, poolDescargo, tolerancia) : null;
       if(dscU){
         x._chqUsado = true;
         hallazgos.push(hallazgoDescargo(banco, x.fecha, x.debito, x.descripcion, dscU, "",
@@ -2906,7 +3171,7 @@ function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, toleranci
     if(c.usado || c.origen!=="diario") return;
     // Un descargo con concepto de cheque nunca clarea: su linea del estado la consumio el Paso 0.
     // Paso con el ME-1855 (los 6 cheques de enero, 1,324.90).
-    var dscC = poolDescargo ? reconocerDescargo(c.monto, c.fecha, banco, c.src.descripcion, poolDescargo, tolerancia) : null;
+    var dscC = (poolDescargo && (!soloSinBanco || !clasificarBancoPorTexto(c.src.descripcion))) ? reconocerDescargo(c.monto, c.fecha, banco, c.src.descripcion, poolDescargo, tolerancia) : null;
     if(dscC){
       c.src._chqUsado = true;
       hallazgos.push(hallazgoDescargo(banco, c.fecha, c.monto, c.src.descripcion, dscC, "",
@@ -2952,12 +3217,13 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
   if(transitoPrevio && transitoPrevio.length){
     var estadosPrev = {};
     cfgs.forEach(function(c){ estadosPrev[c.nombre] = c.estado; });
-    resPrev = consumirTransitoPrevio(transitoPrevio, estadosPrev, tolerancia);
+    resPrev = transitoDelPaso0(transitoPrevio, estadosPrev, tolerancia);
     pendientesPrev = resPrev.pendientes.map(function(p){ return {fecha:p.fechaOrig, banco:p.banco, monto:p.monto, concepto:p.concepto, comprobante:p.comprobante, sentido:p.sentido}; });
   }
   // Bordes de mes: el último día lo pendiente queda en tránsito al mes siguiente; el primer día lo del
   // estado de cuenta suele ser una compensación que venía en tránsito del mes anterior.
   var poolDescargoP3 = poolParaDescargos(transitoPrevio, resPrev && resPrev.compensadas);
+  var heredadosP3 = descargosHeredados(transitoPrevio, null);
   var todasFechas = [];
   cfgs.forEach(function(c){ (c.diario||[]).forEach(function(x){todasFechas.push(x.fecha);}); (c.estado||[]).forEach(function(x){todasFechas.push(x.fecha);}); });
   var ultimoDia = ultimoDiaMes(todasFechas), primerDia = primerDiaMes(todasFechas);
@@ -2965,14 +3231,34 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     // Pasada de cheques (diario CK + cheques del Paso 0 del mes anterior) vs depósitos del estado.
     // Así los cheques de meses anteriores ya compensados no salen como diferencia.
     // Descargo repartido en varias lineas del diario del banco que citan su fecha de origen.
-    descargosPorFechaOrigen((cfg.diario||[]).filter(function(x){ return x.debito>0; }).map(function(x){ return { fecha:x.fecha, monto:x.debito, descripcion:x.descripcion, referencia:x.referencia, src:x }; }),
-                            poolDescargoP3, cfg.nombre, tolerancia, "usadoDescargo").hechos.forEach(function(g){
-      g.lineas.forEach(function(l){ l.src._chqUsado = true; });
-      hallazgos.push(hallazgoDescargo(cfg.nombre, g.fecha, g.monto, g.lineas[0].descripcion, { partidas:g.partidas }, "",
-        "Resumen en transito del mes anterior / Diario " + cfg.nombre, g.lineas));
-    });
+    if(heredadosP3){
+      // El Paso 1 ya decidio que asientos son descargo: se ubican en el diario del banco y se apartan.
+      heredadosP3.filter(function(dg){ return dg.banco === cfg.nombre; }).forEach(function(dg){
+        if(!marcarLineasHeredadas(cfg.diario||[], dg.lineas, "debito", "_chqUsado").length) return;
+        dg.partidas.forEach(function(p){
+          for(var i=0;i<poolDescargoP3.length;i++){
+            var q = poolDescargoP3[i];
+            if(!q.usadoDescargo && q.banco===p.banco && q.fecha===p.fecha && Math.abs(q.monto - p.monto) < 0.005){ q.usadoDescargo = true; break; }
+          }
+        });
+        hallazgos.push(hallazgoDescargo(cfg.nombre, dg.fecha, dg.monto, dg.lineas[0].descripcion, { partidas:dg.partidas }, refME(dg.ref),
+          "Paso 1 (descargo decidido ahí) / Diario " + cfg.nombre, dg.lineas));
+      });
+    }
+    // Lo que NO nombra banco no lo pudo ver el Paso 1 (su cotejo es por el banco que dice el texto): ese
+    // descargo lo decide el Paso 3, que sabe de que banco es por el archivo. En junio de 2026 eran los
+    // asientos de 224.89 y 1,082.89. Lo que SI nombra banco ya lo decidio el Paso 1 y no se reabre: el
+    // cheque de 164.08 del 27-jun era un deposito del mes, no el descargo de otro 164.08 de mayo.
+    {
+      descargosPorFechaOrigen((cfg.diario||[]).filter(function(x){ return x.debito>0 && !x._chqUsado && (!heredadosP3 || !clasificarBancoPorTexto(x.descripcion)); }).map(function(x){ return { fecha:x.fecha, monto:x.debito, descripcion:x.descripcion, referencia:x.referencia, src:x }; }),
+                              poolDescargoP3, cfg.nombre, tolerancia, "usadoDescargo").hechos.forEach(function(g){
+        g.lineas.forEach(function(l){ l.src._chqUsado = true; });
+        hallazgos.push(hallazgoDescargo(cfg.nombre, g.fecha, g.monto, g.lineas[0].descripcion, { partidas:g.partidas }, "",
+          "Resumen en transito del mes anterior / Diario " + cfg.nombre, g.lineas));
+      });
+    }
     var prevChq = pendientesPrev.filter(function(t){ return t.banco===cfg.nombre; });
-    conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3);
+    conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3, !!heredadosP3);
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
@@ -2984,7 +3270,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       var desc = (f.descripcion||"").trim();
       var n = normTxt(desc);
       // Descargo del transito previo: antes que el motivo de fin de mes (suele fecharse el ultimo dia).
-      var dscF = reconocerDescargo(f.monto, f.fecha, cfg.nombre, desc, poolDescargoP3, tolerancia);
+      var dscF = (heredadosP3 && clasificarBancoPorTexto(desc)) ? null : reconocerDescargo(f.monto, f.fecha, cfg.nombre, desc, poolDescargoP3, tolerancia);
       if(dscF){
         hallazgos.push(hallazgoDescargo(cfg.nombre, f.fecha, f.monto, desc, dscF, "",
           "Resumen en transito del mes anterior / Diario " + cfg.nombre));
@@ -3071,7 +3357,11 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
 
 // Paso 4: Retenciones VISA (neto por dia) vs Remision V/Mc del estado de cuenta STG (ventana de dias)
 function paso4(retVisa, estStg, ventanaDias, tolerancia){
-  var remisiones = estStg.filter(function(x){ return normTxt(x.descripcion).indexOf("REMISION")!==-1 && normTxt(x.descripcion).indexOf("V/MC")!==-1; });
+  // El Paso 2 decidio que remision pago cada venta. Aca se controla el neto del informe contra ESA
+  // asignacion: una remision que ya pago otra venta, o que compenso transito del mes anterior, no cubre este dia.
+  var decR = STATE.decisiones && STATE.decisiones.remisiones;
+  var asign = (decR && decR.firma === firmaEstado(estStg)) ? decR.asignadas : null;
+  var remisiones = estStg.filter(function(x){ return !x._transitoUsado && normTxt(x.descripcion).indexOf("REMISION")!==-1 && normTxt(x.descripcion).indexOf("V/MC")!==-1; });
   var usadas = new Array(remisiones.length).fill(false);
   var hallazgos = [];
   retVisa.forEach(function(d){
@@ -3080,11 +3370,15 @@ function paso4(retVisa, estStg, ventanaDias, tolerancia){
     var mejor=-1, mejorDist=Infinity;
     remisiones.forEach(function(r, idx){
       if(usadas[idx]) return;
+      var asignadaA = asign ? asign[r.fila] : undefined;
+      if(asignadaA && asignadaA !== "rango" && asignadaA !== d.fecha) return;   // ya pago otra venta
       if(Math.abs(r.credito - d.neto) <= tolerancia){
         // El deposito bancario ocurre el mismo dia del cierre o hasta N dias despues, nunca antes.
         if(r.fecha < d.fecha) return;
         var dist = distanciaBancaria(d.fecha, r.fecha);
-        if(dist<=ventanaDias && dist<mejorDist){ mejor=idx; mejorDist=dist; }
+        var propia = asignadaA === d.fecha;                 // la que el Paso 2 le asigno a esta venta va primero
+        var orden = propia ? -1 : dist;
+        if((dist<=ventanaDias || propia) && orden<mejorDist){ mejor=idx; mejorDist=orden; }
       }
     });
     if(mejor>=0){ usadas[mejor]=true; }
@@ -5429,6 +5723,7 @@ function mismoMetodoParte(concepto, metodo){
   if(m.indexOf("VISA")!==-1) return c.indexOf("VISA")!==-1 || c.indexOf("V/MC")!==-1;
   if(m.indexOf("CLAVE")!==-1) return c.indexOf("CLAVE")!==-1;
   if(m.indexOf("YAPPY")!==-1) return c.indexOf("YAPPY")!==-1;
+  if(m.indexOf("EFECTIVO")!==-1) return esDepositoEfectivo(concepto);
   if(m.indexOf("ACH")!==-1) return c.indexOf("ACH")!==-1;
   return false;
 }
@@ -5450,7 +5745,10 @@ function yaCubiertoEnTransito(recolectado, it, paso){
   // saldo del dia anterior.
   for(var p=0;p<pool.length;p++){
     var prev = pool[p].ref;
-    if(!prev || !prev.partes || !prev.partes.length) continue;
+    // La venta sin deposito nunca es parte de otra partida: su calculo ya descuenta lo que el Paso 1 dejo en
+    // transito ese dia. Dejarla pasar por el desglose la hacia desaparecer: el 28-mar-2026 los 65.10 de venta
+    // sin deposito se "cubrian" con los 189.31 de efectivo que reporto la cajera y salian del resumen.
+    if(!prev || !prev.partes || !prev.partes.length || paso === "ventas") continue;
     if(String(prev.fecha||"") !== String(it.fecha||"")) continue;
     if(!prev._saldoPartes) prev._saldoPartes = prev.partes.map(function(x){ return x.monto; });
     for(var q=0;q<prev._saldoPartes.length;q++){
@@ -6709,6 +7007,7 @@ function ventanaTransito(item){
   return 15;                                       // efectivo, ventanilla, ACH, Yappy
 }
 function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
+  var consumidas = {};   // banco -> {fila:true}: las lineas del estado que compensaron partidas del transito
   // La ventana ya no es unica: la fija ventanaTransito segun el tipo de partida. En el Paso B los
   // candidatos vienen prefiltrados por su propia ventana, asi que aca alcanza con no volver a acotar.
   var VENTANA = 366;
@@ -6777,10 +7076,14 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       });
     });
     // Marca la fila real del estado: los Pasos 2 y 3 la saltan (su asiento es del mes anterior).
-    poolDeb.concat(credObjs).forEach(function(o){ if(o.usado && o.src) o.src._transitoUsado = true; });
+    poolDeb.concat(credObjs).forEach(function(o){
+      if(!o.usado || !o.src) return;
+      o.src._transitoUsado = true;
+      if(o.src.fila != null) (consumidas[banco] = consumidas[banco] || {})[o.src.fila] = true;
+    });
     chs.forEach(function(ch){ (ch.usado ? compensadas : pendientes).push(ch); });
   });
-  return {compensadas:compensadas, pendientes:pendientes, fechasRaras:fechasRaras};
+  return {compensadas:compensadas, pendientes:pendientes, fechasRaras:fechasRaras, consumidas:consumidas};
 }
 
 /* ---- Cuadre del Paso 0 contra el saldo inicial de Caja General ----
@@ -7017,6 +7320,7 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
     });
   }
   var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
+  guardarDecisionTransito(transitoPrevio || [], estados, res);   // los Pasos 2 y 3 heredan esta decision
   // Fechas imposibles en el resumen del Paso 0 (error de tecleo): se concilian igual, pero hay que avisar.
   res.fechasRaras.forEach(function(f){
     hallazgos.push({ fecha:f.item.fecha, banco:f.banco, monto:f.item.monto, clase:"aviso",

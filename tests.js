@@ -1281,11 +1281,13 @@ test("las columnas de ajuste clb no son venta cobrada", () => {
 test("lo que queda fuera del cotejo se informa, no se descarta", () => {
   const r = parseReporteConsolidado(INFORME(["Efectivo Brink", "Crédito", "Faltante"], [9997, 896.75, 0.75]));
   const et = (r.sinMapear || []).map(c => c.etiqueta);
-  if (et.indexOf("Efectivo Brink") < 0) throw new Error("el efectivo tiene que reportarse");
+  // El efectivo ya no es "sin cotejar": se coteja por dia contra Caja General en el Paso 1.
+  if (et.indexOf("Efectivo Brink") >= 0) throw new Error("el efectivo se coteja, no va a sin cotejar");
+  cerca((r.efectivo || []).reduce(function(a, e){ return a + e.monto; }, 0), 9997, "el efectivo viaja por dia");
   if (et.indexOf("Crédito") < 0) throw new Error("el crédito también");
   if (et.some(x => /Faltante/i.test(x))) throw new Error("faltante y sobrante se cotejan aparte");
   if (et.some(x => /Fecha|Cajera/i.test(x))) throw new Error("Fecha y Cajera no son métodos de pago");
-  cerca(r.sinMapear.find(c => c.etiqueta === "Efectivo Brink").total, 9997);
+  cerca(r.sinMapear.find(c => c.etiqueta === "Crédito").total, 896.75);
 });
 
 /* ---- Trazabilidad de los reportes ----
@@ -2862,6 +2864,177 @@ test("no se avisa 'descargo que no coincide' de lineas que otro reconocimiento s
   eq(h.filter(function(x){ return x.clase === "informativo" && /Descargo/.test(x.concepto || ""); }).length, 1, "se reconoce por sus partidas");
   eq(h.filter(function(x){ return x.clase === "aviso" && /no coincide/.test(x.concepto || ""); }).length, 0, "sin aviso falso");
   eq(contarRojas(h), 0);
+});
+
+test("el transito anterior se coteja una sola vez: los Pasos 2 y 3 heredan lo que decidio el Paso 0", () => {
+  STATE.decisiones = {};
+  const trPrev = [{ fecha: "2026-02-27", banco: "Banistmo", monto: 500.00, concepto: "cheque en transito", comprobante: "", sentido: "credito" }];
+  const fila = function(){ return [{ fecha: "2026-03-02", descripcion: "DEPOSITO", credito: 500.00, debito: 0, fila: 2 }]; };
+  paso0(trPrev, fila(), [], null, 7, 0.01);
+  let llamadas = 0;
+  const orig = consumirTransitoPrevio;
+  consumirTransitoPrevio = function(){ llamadas++; return orig.apply(null, arguments); };
+  try {
+    const e2 = fila();   // el mismo estado leido de nuevo
+    paso2([], e2, [], null, null, null, 7, 0.01, null, trPrev);
+    eq(e2[0]._transitoUsado, true, "el Paso 2 aparta la linea que uso el Paso 0");
+    const e3 = fila();
+    paso3([], [], e3, [], null, null, 7, 0.01, null, trPrev);
+    eq(e3[0]._transitoUsado, true, "el Paso 3 tambien");
+  } finally { consumirTransitoPrevio = orig; }
+  eq(llamadas, 0, "ni el Paso 2 ni el Paso 3 vuelven a cotejar el transito");
+  // Con OTRO estado de cuenta la decision no aplica y el paso coteja por su cuenta.
+  STATE.decisiones = {};
+  paso0(trPrev, fila(), [], null, 7, 0.01);
+  const otro = [{ fecha: "2026-03-05", descripcion: "DEPOSITO", credito: 500.00, debito: 0, fila: 9 }];
+  paso2([], otro, [], null, null, null, 7, 0.01, null, trPrev);
+  eq(otro[0]._transitoUsado, true, "con otro archivo decide de nuevo, no usa la decision vieja");
+});
+
+test("el descargo se decide en el Paso 1 y el Paso 2 lo hereda aunque el texto no tenga fecha", () => {
+  STATE.decisiones = {};
+  const partes = [{ metodo: "CHEQUE", monto: 1463.08 }, { metodo: "VISA", monto: 1124.69 }, { metodo: "CLAVE", monto: 983.83 }];
+  const trPrev = [{ fecha: "2026-02-27", banco: "Banistmo", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito", partes: partes }];
+  const cg = [
+    lineaCG("2026-03-02", "DEPOSITO POR TARJETA VISA BANISTMO", 1124.69),
+    lineaCG("2026-03-02", "DEPOSITO POR TARJETA CLAVE BANISTMO", 983.83),
+    lineaCG("2026-03-02", "DEPOSITO DE BANISTMO CK", 1463.08)
+  ];
+  // El banco acredito la partida de febrero de una vez: esa linea la consume el Paso 0.
+  const estB = [{ fecha: "2026-03-02", descripcion: "DEPOSITO", credito: 3571.60, debito: 0, fila: 4 }];
+  paso0(trPrev, estB, [], null, 7, 0.01);
+  const h1 = paso1([], cg, null, 0.01, [], "2026-03-01", trPrev);
+  eq(contarRojas(h1), 0, "el Paso 1 lo reconoce por el desglose");
+  const h2 = paso2(cg, [{ fecha: "2026-03-02", descripcion: "DEPOSITO", credito: 3571.60, debito: 0, fila: 4 }], [], null, null, null, 7, 0.01, null, trPrev);
+  eq(h2.filter(function(x){ return /Descargo/.test(x.concepto || ""); }).length, 1, "el Paso 2 usa el descargo del Paso 1");
+  eq(contarRojas(h2), 0, "y sus lineas no salen como depositos sin compensar");
+});
+
+test("el informe de cajeras trae el efectivo por dia", () => {
+  const rows = [
+    [],
+    [null, null, null, "EFECTIVO", null, null, "TARJETA", null],
+    ["Fecha", "Empresa", "Cajera", "Efectivo\nBrink", "Efectivo\nVentanilla", "efectivo Yappy\nclb(-)", "Visa\nSr.George", "Visa\nBanistmo"],
+    ["15/03/2026", "PETTY", "GENESIS", 535.00, 3.61, 0, null, 100.00],
+    ["16/03/2026", "PETTY", "EIRA", 320.00, 0, 0, null, null]
+  ];
+  const r = parseReporteConsolidado(rows);
+  eq((r.efectivo || []).length, 3, "535 + 3.61 del 15 y 320 del 16");
+  eq(r.efectivo[0].tipo, "BRINK"); eq(r.efectivo[1].tipo, "VENTANILLA");
+  eq(r.efectivo[0].fecha, "2026-03-15");
+  eq((r.sinMapear || []).filter(function(c){ return /brink|ventanilla/i.test(c.etiqueta); }).length, 0, "el efectivo ya no queda como metodo sin cotejar");
+});
+
+test("el efectivo de la cajera se coteja contra Caja General en el Paso 1", () => {
+  STATE.decisiones = {};
+  const rep = [{ fecha: "2026-03-10", banco: "STG", metodo: "VISA", monto: 100.00, cajera: "A" }];
+  rep.efectivo = [
+    { fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 },
+    { fecha: "2026-03-31", tipo: "BRINK", monto: 280.00 }
+  ];
+  const base = [
+    lineaCG("2026-03-10", "DEPOSITO POR TARJETA VISA STG DEL 10/03/2026", 100.00),
+    lineaCG("2026-03-10", "DEPOSITO BRINKS DEL 10/03/2026", 535.00)
+  ];
+  const completo = base.concat([lineaCG("2026-03-10", "DEPOSITO DEL 10/03/2026", 3.61)]);
+  const h = paso1(rep, completo, null, 0.01, [], "2026-03-01", null);
+  eq(contarRojas(h), 0, "Brink + ventanilla = lo acreditado");
+  const fin = h.filter(function(x){ return esEnTransito(x) && /Efectivo de fin de mes/.test(x.concepto || ""); });
+  eq(fin.length, 1, "el Brinks del 31 sin credito queda en transito");
+  cerca(fin[0].monto, 280.00);
+  // Falta asentar la ventanilla: diferencia roja.
+  const falta = paso1(rep, base, null, 0.01, [], "2026-03-01", null);
+  const rojas = falta.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1);
+  if (rojas[0].texto.indexOf("Efectivo 2026-03-10") < 0) throw new Error("debe decir que es el efectivo: " + rojas[0].texto);
+});
+
+test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];
+  const cg = [lineaCG("2026-03-10", "DEPOSITO BRINKS DEL 10/03/2026", 535.00), lineaCG("2026-03-10", "DEPOSITO DEL 10/03/2026", 3.61)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-03-01", null)), 0);
+  // El banco lo acredito consolidado dos dias despues.
+  const estS = [{ fecha: "2026-03-12", descripcion: "ACH DE BRINKS PANAMA", credito: 538.61, debito: 0, fila: 2 }];
+  eq(contarRojas(paso2(cg, [], estS, null, null, null, 7, 0.01, null, null)), 0, "encuentra el efectivo consolidado");
+  // Si el banco no lo tiene, es diferencia.
+  const sinEf = [{ fecha: "2026-03-12", descripcion: "ACH DE BRINKS PANAMA", credito: 100.00, debito: 0, fila: 2 }];
+  const h = paso2(cg, [], sinEf, null, null, null, 7, 0.01, null, null);
+  eq(h.filter(function(x){ return x.clase === "diff" && /efectivo/i.test(x.texto || ""); }).length, 2, "Brinks y ventanilla sin credito en el banco");
+});
+
+test("el Paso 4 no usa una remision VISA que el Paso 2 asigno a otra venta", () => {
+  STATE.decisiones = {};
+  const estStg = function(){ return [{ fecha: "2026-03-11", descripcion: "Remisión V/Mc 016005605", credito: 95.00, debito: 0, fila: 5 }]; };
+  const cg = [lineaCG("2026-03-10", "DEPOSITO POR TARJETA VISA STG DEL 10/03/2026", 100.00)];
+  const e = estStg();
+  eq(contarRojas(paso2(cg, [], e, null, { "2026-03-10": 5.00 }, null, 7, 0.01, null, null)), 0, "el Paso 2 asigna la remision a la venta del 10");
+  // El informe lista primero el 11: sin la asignacion, el 11 se llevaba la remision del 10.
+  const ret = [
+    { fecha: "2026-03-11", bruto: 100.00, retenciones: -5.00, neto: 95.00 },
+    { fecha: "2026-03-10", bruto: 100.00, retenciones: -5.00, neto: 95.00 }
+  ];
+  const h = paso4(ret, e, 7, 0.01);
+  eq(h.length, 1, "un solo dia sin remision");
+  eq(h[0].fecha, "2026-03-11", "y es el 11: la remision ya pago la venta del 10");
+});
+
+test("el año mal tecleado no convierte el efectivo del dia en descargo (02-ene-2026)", () => {
+  eq(fechaOrigenEnTexto("DEPOSITO BRINKS DEL 02/01/2025", "2026-01-02"), null, "mismo dia y mes: es la fecha del asiento");
+  eq(fechaOrigenEnTexto("deposito Banistmo tarjeta visa 28/2", "2026-03-01"), "2026-02-28", "una fecha de otro dia sigue siendo origen");
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-01-02", tipo: "BRINK", monto: 740.00 }, { fecha: "2026-01-02", tipo: "VENTANILLA", monto: 55.76 }];
+  const cg = [lineaCG("2026-01-02", "DEPOSITO BRINKS DEL 02/01/2025", 740.00), lineaCG("2026-01-02", "DEPOSITO DEL 02/01/2025", 55.76)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-01-01", null)), 0, "el efectivo del dia cuadra con la cajera");
+});
+
+test("el Paso 3 no reabre un descargo que el Paso 1 ya decidio (164.08 del 27-jun-2026)", () => {
+  // Una linea que nombra banco la vio el Paso 1: si la cajera la reporto, es deposito del mes. El Paso 3 la
+  // tomaba como descargo de otro cheque de 164.08 de mayo y los dos pasos se contradecian.
+  STATE.decisiones = {};
+  const trPrev = [{ fecha: "2026-05-20", banco: "Banistmo", monto: 164.08, concepto: "cheque en transito", sentido: "credito" }];
+  const estB = function(){ return [{ fecha: "2026-06-03", descripcion: "DEPOSITO", credito: 164.08, debito: 0, fila: 2 }]; };
+  paso0(trPrev, estB(), [], null, 7, 0.01);
+  const rep = [{ fecha: "2026-06-27", banco: "Banistmo", metodo: "CHEQUE", monto: 164.08, cajera: "A" }];
+  const cg = [lineaCG("2026-06-27", "DEPOSITO DE BANISTMO CK DEL 27/6/2026", 164.08)];
+  const h1 = paso1(rep, cg, null, 0.01, [], "2026-06-01", trPrev);
+  eq(h1.filter(function(x){ return /Descargo/.test(x.concepto || ""); }).length, 0, "el Paso 1 lo coteja contra la cajera");
+  const dB = [{ fecha: "2026-06-27", debito: 164.08, credito: 0, descripcion: "DEPOSITO DE BANISTMO CK DEL 27/6/2026", referencia: "ME-00000001878", fila: 3 }];
+  const h3 = paso3(dB, [], estB(), [], null, null, 7, 0.01, null, trPrev);
+  eq(h3.filter(function(x){ return /Descargo/.test(x.concepto || ""); }).length, 0, "el Paso 3 no lo convierte en descargo");
+});
+
+test("el efectivo toma la combinacion del banco mas cercana a su fecha (junio de 2026)", () => {
+  // El 13 tiene sus 4.90 el 15; los 4.90 del 19 son del 17. Con la primera combinacion que sumaba, el 13 se
+  // llevaba los del 19 y el 17 quedaba sin compensar.
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-06-13", tipo: "BRINK", monto: 869.90 }, { fecha: "2026-06-17", tipo: "BRINK", monto: 364.90 }];
+  const cg = [lineaCG("2026-06-13", "DEPOSITO BRINKS DEL 13/6/2026", 869.90), lineaCG("2026-06-17", "DEPOSITO BRINKS DEL 17/6/2026", 364.90)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-06-01", null)), 0);
+  // Ordenado como el estado real: de la fecha mas nueva a la mas vieja.
+  const estS = [
+    { fecha: "2026-06-19", descripcion: "Ach De Brink S Panama 180626", credito: 360.00, debito: 0, fila: 1 },
+    { fecha: "2026-06-19", descripcion: "Descripción", credito: 4.90, debito: 0, fila: 2 },
+    { fecha: "2026-06-16", descripcion: "Ach De Brinks Panama 140626", credito: 865.00, debito: 0, fila: 3 },
+    { fecha: "2026-06-15", descripcion: "Descripción", credito: 4.90, debito: 0, fila: 4 }
+  ];
+  eq(contarRojas(paso2(cg, [], estS, null, null, null, 7, 0.01, null, null)), 0, "cada dia encuentra su propio efectivo");
+});
+
+test("la venta sin deposito no se confunde con el efectivo de fin de mes del mismo dia (28-mar-2026)", () => {
+  // La cajera reporto 189.31 de ventanilla y Caja General acredito 31.40: quedan 157.91 de efectivo en transito.
+  // Aparte, la venta del dia deja 65.10 sin ningun deposito. Las dos cosas viajan al mes siguiente.
+  STATE.decisiones = {}; STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.diarioCaja = [
+    { fecha: "2026-03-28", referencia: "ME-00000001905", debito: 2002.43, credito: 0, descripcion: "REPORTE DE VENTA DEL 28/03/2026", fila: 1 },
+    { fecha: "2026-03-28", referencia: "ME-00000001905", debito: 0, credito: 1779.42, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 28/03/2026", fila: 2 }
+  ];
+  STATE.results = { paso1: [{ clase: "en_transito", fecha: "2026-03-28", banco: "STG", monto: 157.91,
+    concepto: "Efectivo de fin de mes reportado por la cajera", comprobante: "", motivo: "efectivo de fin de mes sin crédito en Caja General",
+    partes: [{ metodo: "EFECTIVO VENTANILLA", monto: 189.31 }], texto: "x" }] };
+  const tr = recolectarEnTransito();
+  eq(tr.length, 2, "el efectivo y la venta sin deposito");
+  cerca(tr.reduce(function(a, x){ return a + x.monto; }, 0), 223.01, "157.91 + 65.10");
 });
 
 /* --- resumen --- */
