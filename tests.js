@@ -3103,6 +3103,48 @@ test("los cheques los decide el Paso 2 y el Paso 3 verifica el total del navegad
   if (av[0].texto.indexOf("150.00") < 0 || av[0].texto.indexOf("100.00") < 0) throw new Error("el aviso debe decir los dos totales: " + av[0].texto);
 });
 
+test("un asiento repetido en el navegador del banco no viaja en silencio al resumen", () => {
+  STATE.decisiones = {};
+  // El mismo deposito, dos veces, bajo el mismo comprobante, y ninguno compensa en el estado.
+  const linea = function(fila){ return { fecha: "2026-03-10", referencia: "ME-00000001900", debito: 300.00, credito: 0,
+    descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", fila: fila }; };
+  const h = paso3([linea(2), linea(3)], [], [], [], null, null, 7, 0.01, null, null);
+  const av = h.filter(function(x){ return x.clase === "aviso" && /repetido/i.test(x.concepto || ""); });
+  eq(av.length, 1, "un solo aviso, no uno por copia");
+  if (av[0].texto.indexOf("2 veces") < 0) throw new Error("el aviso debe decir cuantas veces aparece: " + av[0].texto);
+  eq(h.filter(esEnTransito).length, 2, "siguen en transito: el aviso no cambia el arrastre");
+  // Un deposito que aparece una sola vez no genera aviso.
+  STATE.decisiones = {};
+  const h2 = paso3([linea(2)], [], [], [], null, null, 7, 0.01, null, null);
+  eq(h2.filter(function(x){ return x.clase === "aviso" && /repetido/i.test(x.concepto || ""); }).length, 0);
+});
+
+test("al arranque del mes, el Paso 3 dice si el resumen del mes anterior no trae esa partida", () => {
+  STATE.decisiones = {}; STATE.diarioCaja = null;
+  const estB = function(){ return [{ fecha: "2026-03-02", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", credito: 230.31, debito: 0, fila: 2 }]; };
+  // Sin resumen del mes anterior: es el respaldo por fecha y queda en transito para confirmar.
+  const sinResumen = paso3([], [], estB(), [], null, null, 7, 0.01, null, null);
+  eq(contarRojas(sinResumen), 0);
+  eq(sinResumen.filter(esEnTransito).length, 1, "sin resumen, se confirma a mano");
+  // Con resumen que trae esa misma partida pendiente, el Paso 0 la da por compensada y consume la linea:
+  // el Paso 3 ni siquiera la ve, que es lo correcto.
+  const trPrev = [{ fecha: "2026-02-28", banco: "Banistmo", monto: 230.31, concepto: "Remisión V/Mc de fin de mes", sentido: "credito" }];
+  STATE.decisiones = {};
+  const est2 = estB();
+  const conPartida = paso3([], [], est2, [], null, null, 7, 0.01, null, trPrev);
+  eq(est2[0]._transitoUsado, true, "la compensó el Paso 0");
+  eq(conPartida.length, 0, "el Paso 3 no tiene nada que decir de esa línea");
+  // Con resumen que NO la trae: no se silencia como transito, se pide confirmarla. No bloquea: puede ser
+  // legitima (su asiento esta en el navegador del mes pasado, como las remisiones del 02-feb-2026).
+  const otro = [{ fecha: "2026-02-28", banco: "Banistmo", monto: 99.99, concepto: "cheque en transito", sentido: "credito" }];
+  STATE.decisiones = {};
+  const sinPartida = paso3([], [], estB(), [], null, null, 7, 0.01, null, otro);
+  eq(contarRojas(sinPartida), 0, "no bloquea el paso");
+  const sc = sinPartida.filter(esSinConfirmar);
+  eq(sc.length, 1, "queda como sin confirmar");
+  if (sc[0].texto.indexOf("no trae ninguna partida de ese importe") < 0) throw new Error("debe decir por que: " + sc[0].texto);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

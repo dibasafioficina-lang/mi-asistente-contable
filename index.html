@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.30";
+var APP_VERSION="2026.10.01";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2425,7 +2425,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // estado que compensó una partida en tránsito del mes anterior: su asiento es del mes pasado, no de
     // este) y _neutro (traspaso interno de neto cero, no llega al estado de cuenta).
     return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, fila:x.fila, usado:false}; });
+      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
   }
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
@@ -2622,6 +2622,23 @@ function marcarLineasHeredadas(filas, lineas, campo, marca){
 function refME(ref){ var r = String(ref==null ? "" : ref).trim(); return /^ME-/i.test(r) ? r : ""; }
 // Cheques: los clarea el Paso 2 contra el desglose del informe. El Paso 3 recibe que lineas del estado se
 // usaron y cuanto suma el desglose, y solo verifica que el navegador del banco registre ese mismo total.
+/* ---- Asiento repetido en el navegador del banco ----
+   Todo lo que esta en el navegador y no en el estado se da por rezago del banco y viaja al resumen. Si el
+   MISMO asiento esta dos veces —igual comprobante, fecha, importe y descripcion— y ninguna de las dos
+   compenso, no es rezago: es el movimiento registrado dos veces, y asi se arrastraba mes tras mes sin que
+   nadie lo notara. No se compara importe contra importe con Caja General a proposito: el navegador parte
+   lo que la cuenta puente trae junto (el efectivo del 29-jun-2026 son 321.12 en Caja General y 320.00 +
+   1.12 en el banco), y esa comparacion daba diferencias que no existen. */
+function repetidoEnNavegador(diario, f){
+  var ref = refME(f.referencia), n = 0;
+  (diario||[]).forEach(function(x){
+    if(!(x.debito > 0) || refME(x.referencia) !== ref) return;
+    if(x.fecha !== f.fecha || Math.abs(x.debito - f.monto) > 0.005) return;
+    if(normTxt(x.descripcion) !== normTxt(f.descripcion)) return;
+    n++;
+  });
+  return n;
+}
 function chequesDelPaso2(banco, estado){
   var dec = STATE.decisiones && STATE.decisiones.cheques;
   if(!dec || !dec.porBanco || !dec.porBanco[banco]) return null;
@@ -3274,6 +3291,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
   // Bordes de mes: el último día lo pendiente queda en tránsito al mes siguiente; el primer día lo del
   // estado de cuenta suele ser una compensación que venía en tránsito del mes anterior.
   var poolDescargoP3 = poolParaDescargos(transitoPrevio, resPrev && resPrev.compensadas);
+  var dupAvisado = {};   // un solo aviso por asiento repetido, no uno por cada copia
   var heredadosP3 = descargosHeredados(transitoPrevio, null);
   var todasFechas = [];
   cfgs.forEach(function(c){ (c.diario||[]).forEach(function(x){todasFechas.push(x.fecha);}); (c.estado||[]).forEach(function(x){todasFechas.push(x.fecha);}); });
@@ -3356,6 +3374,21 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
           "Resumen en transito del mes anterior / Diario " + cfg.nombre));
         return;
       }
+      var refNav = refME(f.referencia);
+      var claveDup = refNav + "|" + f.fecha + "|" + Math.round(f.monto*100) + "|" + normTxt(desc).slice(0, 40);
+      var veces = refNav ? repetidoEnNavegador(cfg.diario, f) : 1;
+      if(veces > 1 && !dupAvisado[claveDup]){
+        dupAvisado[claveDup] = true;
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"aviso",
+          concepto:"Asiento repetido en el navegador", comprobante:refNav, motivo:"mismo comprobante, fecha, importe y descripción",
+          texto: cfg.nombre + " " + f.fecha + ": el asiento de B/ " + fmt(f.monto) + " (\"" + desc + "\", comprobante " + refNav +
+                 ") aparece " + veces + " veces en el navegador del banco y ninguna compensó en el estado de cuenta. " +
+                 "Si es el mismo movimiento registrado dos veces, corregilo en el navegador: mientras esté duplicado va a viajar " +
+                 "al resumen del mes siguiente una y otra vez.",
+          fuente: "Diario " + cfg.nombre + " (fila " + f.fila + ")"
+        });
+      }
       var lag = esBrinks(desc) ? 5
         : (n.indexOf("TARJETA")!==-1 || n.indexOf("VISA")!==-1 || n.indexOf("CLAVE")!==-1 || n.indexOf("YAPPY")!==-1) ? 3 : 0;
       var diasAlCierre = ultimoDia ? daysBetween(f.fecha, ultimoDia) : 999;
@@ -3396,13 +3429,23 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       var esRemTarjeta = esRemisionVisa(desc) || esRemisionClave(desc);
       var margenEntrada = esRemTarjeta ? 3 : 0;   // dias habiles desde el arranque del estado
       if(iniMov && f.fecha >= iniMov && distanciaBancaria(iniMov, f.fecha) <= margenEntrada){
+        // La regla del arranque daba por buena cualquier linea de los primeros dias por su fecha. Con un
+        // resumen del mes anterior cargado se puede decir mas: si ninguna partida pendiente coincide con
+        // ese importe, el resumen no la explica y hay que confirmarla (no se silencia como transito normal).
+        // No se marca como diferencia porque puede ser legitima: en enero de 2026 las remisiones de 230.31
+        // y 359.71 entraron el 02-feb y su asiento estaba en el navegador de enero, no en el resumen.
+        var loExplica = !(transitoPrevio && transitoPrevio.length) ||
+          pendientesPrev.some(function(p){ return p.banco === cfg.nombre && Math.abs(p.monto - f.monto) <= tolerancia; });
         hallazgos.push({
-          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"en_transito",
-          concepto:desc, comprobante:"", motivo:"compensación del mes anterior (confirmar)",
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase: loExplica ? "en_transito" : "sin_confirmar",
+          concepto:desc, comprobante:"", motivo: loExplica ? "compensación del mes anterior (confirmar)" : "el resumen del mes anterior no la trae",
           texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (" + desc + ") " +
-                 (esRemTarjeta
-                   ? "es una remisión de tarjeta de los primeros días del mes: corresponde a ventas de los últimos días del mes anterior, y su asiento está en el diario del mes pasado. No es una diferencia."
-                   : "aparece el primer día con movimiento del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo)."),
+                 (loExplica
+                   ? (esRemTarjeta
+                     ? "es una remisión de tarjeta de los primeros días del mes: corresponde a ventas de los últimos días del mes anterior, y su asiento está en el diario del mes pasado. No es una diferencia."
+                     : "aparece el primer día con movimiento del mes — probablemente una compensación en tránsito del mes anterior. Confirmá que estaba en circulación (o cargá el Paso 0 para validarlo).")
+                   : "entró en los primeros días del mes, así que parece una compensación del mes anterior, pero el resumen en tránsito no trae ninguna partida de ese importe. " +
+                     "Confirmá que su asiento está en el mes pasado; si no está, es plata que entró al banco y nadie registró."),
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") / Diario " + cfg.nombre
         });
         return;
