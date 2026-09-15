@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.26";
+var APP_VERSION="2026.09.27";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -5227,8 +5227,11 @@ function recolectarEnTransito(){
    Ahora las dos caras salen de recorrer UNA sola lista —el resumen en transito— y clasificar partida por
    partida, asi que la tabla suma siempre su propio total. */
 function transitoSigueEnCaja(it){
-  // El Paso 0 son partidas viejas que aun no se descargaron: su credito a Caja General todavia no se hizo.
-  if(it._paso === "paso0") return true;
+  // Politica validada por Diba (15-sep-2026): cheque y Brinks se acreditan en Caja General al DEPOSITAR;
+  // el deposito de fin de mes y la VISA acumulada, al COMPENSAR. Cada partida se clasifica por la evidencia
+  // (si el credito existe en el diario) y el resultado viaja al mes siguiente en el resumen.
+  // El Paso 0 son partidas viejas: siguen dentro salvo que el cierre anterior diga que su credito ya se hizo.
+  if(it._paso === "paso0") return it.creditoCG !== "hecho";
   // El Paso 1 marca lo que la cajera reporto y Caja General no tiene acreditado: sigue dentro por definicion.
   if(it._paso === "paso1") return true;
   // Una venta sin deposito no salio de la cuenta por definicion: entro y no salio.
@@ -5401,6 +5404,8 @@ function partidasApertura(){
   });
   return (Array.isArray(r.paso0)?r.paso0:[]).filter(function(x){
     if(!esEnTransito(x) || !/mes anterior/i.test(x.motivo||"")) return false;
+    // Su credito a Caja General se hizo al depositar: compensar no deja nada que descargar.
+    if(x.creditoCG==="hecho") return false;
     // El Paso 0 reporta la partida con la fecha en que COMPENSO; el descargo la referencia con su fecha
     // original, asi que el cruce va por banco + importe (y consume una sola vez cada una).
     var hit = null;
@@ -6253,14 +6258,16 @@ function exportarEnTransito(){
      !confirm("El Paso 0 se corrió SIN estados de cuenta, así que ninguna partida pudo darse por compensada: " +
               "el resumen va a arrastrar al mes siguiente partidas que ya cerraron.\n\n" +
               "Subí los estados de cuenta y volvé a ejecutar.\n\n¿Descargar igual?")) return;
+  marcarChequesAcreditados();   // sin esto los cheques ya depositados saldrian como "pendiente"
   var items = recolectarEnTransito();
   var rows = filasTraza("Partidas en tránsito al cierre — insumo del Paso 0 del mes siguiente");
-  rows.push(["Fecha","Banco","Monto","Concepto","Comprobante","Motivo"]);
+  rows.push(["Fecha","Banco","Monto","Concepto","Comprobante","Motivo","Crédito a Caja General"]);
   items.forEach(function(it){
-    rows.push([it.fecha, it.banco, it.monto, it.concepto||"", it.comprobante||"", it.motivo||"en tránsito"]);
+    rows.push([it.fecha, it.banco, it.monto, it.concepto||"", it.comprobante||"", it.motivo||"en tránsito",
+               transitoSigueEnCaja(it) ? "pendiente" : "ya hecho"]);
   });
   var ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{wch:12},{wch:14},{wch:12},{wch:44},{wch:20},{wch:26}];
+  ws['!cols'] = [{wch:12},{wch:14},{wch:12},{wch:44},{wch:20},{wch:26},{wch:22}];
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "En transito");
   var mes = (STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.fechaFinal) ? STATE.saldoCajaGeneral.fechaFinal.slice(0,7) : "mes";
@@ -6306,6 +6313,10 @@ function parseTransitoPrevio(rows){
   if(hIdx===-1) throw new Error("No se encontró el encabezado (Fecha, Banco, Monto) en el resumen en tránsito.");
   var h = rows[hIdx];
   var cF=colIdx(h,"Fecha"), cB=colIdx(h,"Banco"), cM=colIdx(h,"Monto"), cC=colIdx(h,"Concepto"), cR=colIdx(h,"Comprobante");
+  // Si el credito a Caja General de la partida ya se hizo. Lo escribe el cierre del mes anterior, que es
+  // el unico que lo sabe (ve el diario de ese mes). Sin esto, un cheque acreditado al depositarlo volvia
+  // el mes siguiente como si siguiera dentro de la cuenta y el panel pedia acreditarlo otra vez.
+  var cCG=colIdx(h,"Caja General");
   var mesesOK = cF>=0 ? mesesInequivocos(rows, cF, hIdx+1) : [];
   var out = [];
   for(var r=hIdx+1;r<rows.length;r++){
@@ -6326,9 +6337,19 @@ function parseTransitoPrevio(rows){
     var rowTxt = normTxt(row.join(" "));
     var sentido = (rowTxt.indexOf("DEBITO")!==-1 || /^PAY/i.test(comprobante)) ? "debito" : "credito";
     out.push({ fecha:iso, banco: banco, monto:monto, concepto: concepto,
-               comprobante: comprobante, sentido: sentido });
+               comprobante: comprobante, sentido: sentido, creditoCG: leerCreditoCG(cCG>=0?row[cCG]:null) });
   }
+  // Un resumen bajado con una version anterior no trae la columna: el Paso 0 lo avisa.
+  out.sinColumnaCredito = cCG < 0;
   return out;
+}
+// "ya hecho" / "pendiente" -> "hecho" / "pendiente". Vacio o irreconocible -> null (se trata como hasta ahora).
+function leerCreditoCG(v){
+  var n = normTxt(v==null?"":String(v)).trim();
+  if(!n) return null;
+  if(n.indexOf("HECHO")!==-1 || n.indexOf("ACREDITAD")!==-1 || n==="SI") return "hecho";
+  if(n.indexOf("PENDIENTE")!==-1 || n==="NO") return "pendiente";
+  return null;
 }
 
 // Línea del estado que es una "Remisión Clave" (compensación de tarjeta CLAVE).
@@ -6428,7 +6449,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
         fechasRaras.push({banco:banco, item:t, iniEstado:iniEstado});
       }
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
-              sentido:t.sentido, banco:banco, usado:false, pool:poolDe(t)};
+              sentido:t.sentido, creditoCG:t.creditoCG, banco:banco, usado:false, pool:poolDe(t)};
     });
     // Paso A: cada partida contra su pool, hacia adelante. Primero 1:1; si no aparece, una combinación de
     // líneas DEL MISMO DÍA, porque cuando el banco parte un depósito lo acredita el mismo día (el depósito
@@ -6471,6 +6492,9 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
 // banco todavía no reflejó: depósito, cheque POR DEPOSITAR, tarjeta, Yappy. Los cheques EMITIDOS (en
 // circulación) son pagos que salen de la cuenta bancaria — nunca tocan Caja General, así que no suman.
 function pasaPorCajaGeneral(t){
+  // Ya acreditada en el mes anterior (cheque o Brinks, que se acreditan al depositar): esta en transito del
+  // lado del banco, no dentro de Caja General. No suma a la apertura ni puede ser parte de un descargo.
+  if(t.creditoCG==="hecho") return false;
   if(t.sentido==="debito") return false;
   var c = normTxt(t.concepto);
   return c.indexOf("CIRCULACION")===-1 && c.indexOf("EMITIDO")===-1;
@@ -6679,6 +6703,19 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       fuente:"Paso 0 — partidas en tránsito"
     });
   }
+  // Un resumen sin la columna del credito a Caja General no permite distinguir un cheque ya acreditado
+  // de uno que sigue dentro de la cuenta. Se procesa igual que antes, pero hay que decirlo.
+  if(transitoPrevio && transitoPrevio.sinColumnaCredito && transitoPrevio.length){
+    hallazgos.push({
+      fecha:"", banco:"", monto:0, clase:"aviso",
+      concepto:"Resumen en tránsito sin la columna «Crédito a Caja General»", comprobante:"", motivo:"resumen de una versión anterior",
+      texto:"El resumen del mes anterior se bajó con una versión anterior de la herramienta y no dice qué partidas ya tenían " +
+            "su crédito en Caja General. Todas se tratan como si siguieran dentro de la cuenta: las que se acreditaron al depositar " +
+            "(cheques, Brinks) pueden salir como descargo a registrar y descuadrar la apertura. Volvé a correr el mes anterior y " +
+            "descargá de nuevo el resumen en tránsito.",
+      fuente:"Paso 0 — resumen en tránsito del mes anterior"
+    });
+  }
   var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
   // Fechas imposibles en el resumen del Paso 0 (error de tecleo): se concilian igual, pero hay que avisar.
   res.fechasRaras.forEach(function(f){
@@ -6696,16 +6733,18 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
     var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
     var fCierre = ch.compensoEn ? ch.compensoEn.fecha : null;
     hallazgos.push({ fecha:(fCierre||ch.fechaOrig), banco:ch.banco, monto:ch.monto, clase:"en_transito",
-      concepto:ch.concepto, comprobante:ch.comprobante, motivo:"compensó — venía del mes anterior",
+      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, motivo:"compensó — venía del mes anterior",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") venía en tránsito del mes anterior y COMPENSÓ en el banco"+
-            (fCierre?" el "+fCierre:"")+" — su asiento es del mes pasado, no es una diferencia."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
+            (fCierre?" el "+fCierre:"")+" — su asiento es del mes pasado, no es una diferencia."+
+            (ch.creditoCG==="hecho"?" No lleva asiento de descargo: su crédito a Caja General ya se hizo al depositar.":"")+
+            (ch.comprobante?" · Comprobante "+ch.comprobante:""),
       fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });
   });
   // Partidas que no compensaron → siguen en tránsito (rotuladas con su concepto real).
   res.pendientes.forEach(function(ch){
     var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
     hallazgos.push({ fecha:ch.fechaOrig, banco:ch.banco, monto:ch.monto, clase:"en_transito",
-      concepto:ch.concepto, comprobante:ch.comprobante, motivo:"aún pendiente de compensar",
+      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, motivo:"aún pendiente de compensar",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
       fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });
   });

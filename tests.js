@@ -2636,6 +2636,83 @@ test("el descargo se reconoce ANTES de buscarle contrapartida en el banco", () =
   eq(contarRojas(h), 0, "y no deja diferencias");
 });
 
+test("el resumen en transito lleva y lee si el credito a Caja General ya se hizo", () => {
+  // Febrero de 2026: los cheques de 273.49 y 238.55 y el Brinks de 605.00 se acreditaron en Caja General al
+  // depositarlos y compensaron en marzo. Sin esta columna volvian como si siguieran dentro de la cuenta.
+  const rows = [
+    ["Fecha","Banco","Monto","Concepto","Comprobante","Motivo","Crédito a Caja General"],
+    ["12/02/2026","Banistmo",273.49,"Cheque (detalle individual)","","cheque pendiente por cambiar","ya hecho"],
+    ["26/02/2026","STG",605.00,"DEPOSITO BRINKS DEL 26/02/2026","","en tránsito","ya hecho"],
+    ["27/02/2026","STG",282.29,"Depósito de fin de mes reportado por la cajera","","depósito de fin de mes — el crédito se registra al compensar","pendiente"]
+  ];
+  const tr = parseTransitoPrevio(rows);
+  eq(tr.sinColumnaCredito, false);
+  eq(tr[0].creditoCG, "hecho"); eq(tr[1].creditoCG, "hecho"); eq(tr[2].creditoCG, "pendiente");
+  eq(pasaPorCajaGeneral(tr[0]), false, "un cheque ya acreditado no esta dentro de Caja General");
+  eq(pasaPorCajaGeneral(tr[2]), true, "el fin de mes si");
+  const c = cuadreSaldoInicialPaso0(tr, { inicial: 282.29, fechaInicial: "2026-03-01" });
+  eq(c.ok, true, "la apertura solo espera lo que sigue dentro de la cuenta");
+  // Un resumen bajado antes de este cambio: se lee igual que siempre y queda marcado para avisar.
+  const viejo = parseTransitoPrevio(rows.map(function(r){ return r.slice(0,6); }));
+  eq(viejo.sinColumnaCredito, true);
+  eq(viejo[0].creditoCG, null);
+  eq(pasaPorCajaGeneral(viejo[0]), true, "sin la columna, como hasta ahora");
+});
+
+test("un cheque ya acreditado que compensa el mes siguiente no pide asiento de descargo", () => {
+  // Era el riesgo de marzo: el panel iba a pedir Debito Banistmo / Credito Caja General por 273.49,
+  // acreditando la cuenta por segunda vez.
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 246.20, final: 0, fechaFinal: "2026-03-31" };
+  const trPrev = [
+    { fecha: "2026-02-12", banco: "Banistmo", monto: 273.49, concepto: "Cheque (detalle individual)", comprobante: "", sentido: "credito", creditoCG: "hecho" },
+    { fecha: "2026-02-26", banco: "Banistmo", monto: 246.20, concepto: "Depósito de fin de mes reportado por la cajera", comprobante: "", sentido: "credito", creditoCG: "pendiente" }
+  ];
+  const estB = [
+    { fecha: "2026-03-02", descripcion: "DEPOSITO", debito: 0, credito: 246.20, fila: 2 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 273.49, fila: 3 }
+  ];
+  const h0 = paso0(trPrev, estB, [], null, 7, 0.01);
+  const comp = h0.filter(function(x){ return /mes anterior/.test(x.motivo || ""); });
+  eq(comp.length, 2, "las dos compensaron");
+  STATE.results = { paso0: h0 };
+  const ap = partidasApertura();
+  eq(ap.length, 1, "solo la que seguia dentro de Caja General");
+  cerca(ap[0].monto, 246.20);
+  cerca(desgloseSaldoCaja().compenso, 246.20, "el descargo no incluye el cheque");
+  const ch = comp.filter(function(x){ return Math.abs(x.monto - 273.49) < 0.005; })[0];
+  if (ch.texto.indexOf("No lleva asiento de descargo") < 0) throw new Error("el Paso 0 debe decir que no lleva descargo");
+  eq(h0.filter(function(x){ return x.clase === "aviso" && /Crédito a Caja General/.test(x.concepto || ""); }).length, 0,
+     "con la columna no hay aviso de version anterior");
+});
+
+test("lo que sale del cierre vuelve a entrar con su estado, mes tras mes", () => {
+  STATE.transitoPrevio = null; STATE.diarioCaja = null; STATE.chequesDetalle = null;
+  STATE.estados = null; STATE.retVisaDetalle = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 887.29, fechaFinal: "2026-02-28" };
+  STATE.results = {
+    paso0: [{ clase: "en_transito", motivo: "aún pendiente de compensar", banco: "Banistmo", fecha: "2026-01-20", monto: 238.55,
+              concepto: "Cheque (detalle individual)", comprobante: "", creditoCG: "hecho", texto: "x" }],
+    paso1: [{ clase: "en_transito", motivo: "depósito de fin de mes — el crédito se registra al compensar", banco: "STG", fecha: "2026-02-27",
+              monto: 282.29, concepto: "Depósito de fin de mes reportado por la cajera", comprobante: "", texto: "x" }],
+    paso3: [{ clase: "en_transito", motivo: "en tránsito", banco: "STG", fecha: "2026-02-26", monto: 605.00,
+              concepto: "DEPOSITO BRINKS DEL 26/02/2026", comprobante: "", texto: "x" }]
+  };
+  let libro = null;
+  const orig = XLSX.writeFile;
+  XLSX.writeFile = function(wb){ libro = wb; };
+  try { exportarEnTransito(); } finally { XLSX.writeFile = orig; }
+  if (!libro) throw new Error("no se exporto");
+  const rows = XLSX.utils.sheet_to_json(libro.Sheets["En transito"], { header: 1, raw: true });
+  const tr = parseTransitoPrevio(rows);
+  const por = function(m){ return tr.filter(function(x){ return Math.abs(x.monto - m) < 0.005; })[0]; };
+  eq(tr.length, 3);
+  eq(por(605.00).creditoCG, "hecho", "Brinks: se acredita al depositar");
+  eq(por(282.29).creditoCG, "pendiente", "fin de mes: se acredita al compensar");
+  eq(por(238.55).creditoCG, "hecho", "lo ya acreditado no se olvida al pasar otro mes");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
