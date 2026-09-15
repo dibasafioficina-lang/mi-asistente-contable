@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.09.29";
+var APP_VERSION="2026.09.30";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2021,6 +2021,34 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     });
   }
   // Último: las diferencias que se cancelan entre sí no son plata faltante, son plata mal ubicada.
+  /* ---- Ventas que entraron a la cuenta y no salieron por ningun deposito ----
+     Es un cotejo de Caja General —el debito de la VENTA contra los creditos de su mismo comprobante— asi que
+     vive aca y no en el panel del cierre: el Paso 1 podia dar "cuadrado" y la venta sin deposito aparecer
+     recien al cerrar el mes. Se descuenta la VISA de St. Georges del dia (su credito llega a fin de mes),
+     lo que este mismo paso dejo en transito —efectivo incluido— y los descargos del mes anterior. */
+  (function(){
+    var visaDiaP1 = {};
+    (reporte||[]).forEach(function(x){
+      if(x.banco === "STG" && normTxt(x.metodo).indexOf("VISA") !== -1)
+        visaDiaP1[x.fecha] = Math.round(((visaDiaP1[x.fecha]||0) + x.monto)*100)/100;
+    });
+    var transDiaP1 = {};
+    hallazgos.forEach(function(x){
+      if(esEnTransito(x)) transDiaP1[x.fecha] = Math.round(((transDiaP1[x.fecha]||0) + x.monto)*100)/100;
+    });
+    var clavesP1 = {};
+    descargos.forEach(function(dg){
+      ((dg.lineas && dg.lineas.length) ? dg.lineas : [{ fecha:dg.fecha, monto:dg.monto }]).forEach(function(l){
+        var c = (l.fecha||"") + "|" + Math.round((l.monto||0)*100);
+        clavesP1[c] = (clavesP1[c]||0) + 1;
+      });
+    });
+    var bancoEfP1 = (STATE.decisiones && STATE.decisiones.efectivo && STATE.decisiones.efectivo.banco) || null;
+    ventasSinDeposito({ cg:diarioCaja, visaDia:visaDiaP1, transDia:transDiaP1, claves:clavesP1 }).forEach(function(v){
+      hallazgos.push(itemVentaSinDeposito(v, bancoEfP1));
+    });
+  })();
+
   guardarDecisionDescargos(diarioCaja, transitoPrevio, descargos);   // los Pasos 2 y 3 heredan esta decision
   return colapsarCompensados(hallazgos, tolerancia);
 }
@@ -2592,6 +2620,14 @@ function marcarLineasHeredadas(filas, lineas, campo, marca){
   return halladas;
 }
 function refME(ref){ var r = String(ref==null ? "" : ref).trim(); return /^ME-/i.test(r) ? r : ""; }
+// Cheques: los clarea el Paso 2 contra el desglose del informe. El Paso 3 recibe que lineas del estado se
+// usaron y cuanto suma el desglose, y solo verifica que el navegador del banco registre ese mismo total.
+function chequesDelPaso2(banco, estado){
+  var dec = STATE.decisiones && STATE.decisiones.cheques;
+  if(!dec || !dec.porBanco || !dec.porBanco[banco]) return null;
+  if(dec.firmas[banco] !== firmaEstado(estado||[])) return null;
+  return dec.porBanco[banco];
+}
 /* ---- Fecha de origen escrita en la descripcion ----
    El descargo del transito se asienta con la fecha del dia en que se registra (1-mar), bajo el mismo
    comprobante que las ventas de ese dia. Lo unico que dice que es de febrero es el texto: "tarjeta visa 28/2",
@@ -3025,6 +3061,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
   // permitiendo combinaciones en ambos sentidos y sin límite de fecha (solo dentro del mes).
   if(usarDetalleCheques){
     var VENTANA_CHEQUE = 366; // sin límite práctico dentro del mes
+    var decCheques = {};   // por banco: lo que este paso decidio, para que el Paso 3 no los vuelva a clarear
     Object.keys(bancoCred).forEach(function(banco){
       // Cheques del reporte de este banco. Los del último día quedan en tránsito (clarean el mes siguiente).
       var chs = [];
@@ -3040,6 +3077,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       });
       // Depósitos del estado de cuenta (no remisiones/comisiones), referencias con .usado compartido.
       var depos = bancoCred[banco].filter(function(x){ return esDepositoEstado(x.desc); });
+      var usadoAntesCk = depos.map(function(d){ return d.usado; });   // foto antes de la pasada de cheques
       // Paso A: cada cheque contra una combinación de depósitos (un cheque puede clarear en varios depósitos).
       chs.forEach(function(ch){
         if(ch.usado) return;
@@ -3060,7 +3098,20 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           texto:"Cheque de B/ "+fmt(ch.monto)+" ("+ch.fecha+", "+banco+") aún no aparece en el estado de cuenta — en tránsito (pendiente por cambiar).",
           fuente:"Desglose de cheques / Estado de cuenta "+banco });
       });
+      var filasCheque = {};
+      // Solo las lineas que consumieron los CHEQUES: el pool ya venia con lineas usadas por los depositos
+      // normales del mes (los Yappy de Banco General, por ejemplo) y esas no son asunto de esta decision.
+      depos.forEach(function(d, i){ if(d.usado && !usadoAntesCk[i] && d.fila != null) filasCheque[d.fila] = true; });
+      decCheques[banco] = {
+        filasUsadas: filasCheque,
+        clareados: chs.filter(function(c){ return c.usado; }).map(function(c){ return { fecha:c.fecha, monto:c.monto }; }),
+        pendientes: chs.filter(function(c){ return !c.usado; }).map(function(c){ return { fecha:c.fecha, monto:c.monto }; }),
+        total: Math.round(chequesDetalle.filter(function(x){ return x.banco===banco; }).reduce(function(a,x){ return a + x.monto; }, 0)*100)/100
+      };
     });
+    var firmasCheque = {};
+    Object.keys(estados).forEach(function(b){ firmasCheque[b] = firmaEstado(estados[b]||[]); });
+    decisiones().cheques = { firmas:firmasCheque, porBanco:decCheques };
   }
 
   /* ---- Efectivo: Caja General contra el banco ----
@@ -3258,7 +3309,36 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       });
     }
     var prevChq = pendientesPrev.filter(function(t){ return t.banco===cfg.nombre; });
-    conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3, !!heredadosP3);
+    var chq2 = chequesDelPaso2(cfg.nombre, cfg.estado);
+    if(chq2){
+      // El Paso 2 ya los clareo: aca solo se apartan las lineas que uso y se verifica el navegador.
+      (cfg.estado||[]).forEach(function(x){ if(chq2.filasUsadas[x.fila]) x._chqUsado = true; });
+      var ckNav = (cfg.diario||[]).filter(function(x){ return x.debito>0 && !x._chqUsado && esChequeDesc(x.descripcion) &&
+        normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; });
+      var totalNav = Math.round(ckNav.reduce(function(a, x){ return a + x.debito; }, 0)*100)/100;
+      ckNav.forEach(function(x){ x._chqUsado = true; });
+      // El navegador tiene que registrar al menos los cheques que CLAREARON. Los que siguen pendientes
+      // pueden no tener asiento todavia: los de fin de mes se asientan el mes siguiente (en febrero de
+      // 2026 eran 1,643.08 que entraron en marzo). Y si registra mas que todo el desglose, hay un
+      // deposito de cheque que el informe de cajeras no trae.
+      var sumClareados = Math.round((chq2.clareados||[]).reduce(function(a, c){ return a + c.monto; }, 0)*100)/100;
+      var faltaCk = Math.round((sumClareados - totalNav)*100)/100;
+      var sobraCk = Math.round((totalNav - chq2.total)*100)/100;
+      if(faltaCk > tolerancia || sobraCk > tolerancia){
+        hallazgos.push({
+          fecha:"", banco:cfg.nombre, monto:Math.max(faltaCk, sobraCk), clase:"aviso",
+          concepto:"Cheques: el navegador del banco no cuadra", comprobante:"", motivo:"asientos de cheque que faltan o sobran",
+          texto: cfg.nombre + ": los cheques que clarearon en el banco suman B/ " + fmt(sumClareados) + " y el navegador registra B/ " +
+                 fmt(totalNav) + " en depósitos de cheque" +
+                 (faltaCk > tolerancia ? " — faltan B/ " + fmt(faltaCk) + " de asientos" : "") +
+                 (sobraCk > tolerancia ? " — sobran B/ " + fmt(sobraCk) + " sobre el desglose del informe (B/ " + fmt(chq2.total) + ")" : "") +
+                 ". El Paso 2 ya cotejó cada cheque contra el estado de cuenta.",
+          fuente: "Desglose de cheques / Diario " + cfg.nombre
+        });
+      }
+    } else {
+      conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3, !!heredadosP3);
+    }
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
@@ -6071,20 +6151,22 @@ function partidasYaAcreditadas(){ return clasificarTransito().fuera; }
       dice cuanto vendio cada dia).
    2. Lo que el Paso 1 ya marco en transito: la cajera lo reporto, el credito va cuando el banco compense.
    3. Los descargos del transito del mes anterior, que son creditos del dia pero de ventas viejas. */
-function ventasSinDeposito(){
-  var cg = STATE.diarioCaja || [];
+// Con 'opt' la calcula el Paso 1 con sus propios datos (su casa); sin 'opt', el cierre la calcula desde
+// STATE igual que siempre, para el caso en que no haya reporte de cajeras y el Paso 1 no llegue a correr.
+function ventasSinDeposito(opt){
+  var cg = (opt && opt.cg) || STATE.diarioCaja || [];
   if(!cg.length) return [];
   var r = STATE.results || {};
   // Ventas VISA STG por dia, del informe de retenciones: su credito no llega hasta fin de mes.
-  var visaDia = {};
-  (STATE.retVisaDetalle || []).forEach(function(d){ visaDia[d.fecha] = Math.round(((visaDia[d.fecha]||0) + d.bruto)*100)/100; });
+  var visaDia = (opt && opt.visaDia) || {};
+  if(!(opt && opt.visaDia)) (STATE.retVisaDetalle || []).forEach(function(d){ visaDia[d.fecha] = Math.round(((visaDia[d.fecha]||0) + d.bruto)*100)/100; });
   // Lo que el Paso 1 dejo en transito ese dia (deposito reportado por la cajera, sin credito todavia).
-  var transDia = {};
-  (Array.isArray(r.paso1) ? r.paso1 : []).forEach(function(x){
+  var transDia = (opt && opt.transDia) || {};
+  if(!(opt && opt.transDia)) (Array.isArray(r.paso1) ? r.paso1 : []).forEach(function(x){
     if(esEnTransito(x)) transDia[x.fecha] = Math.round(((transDia[x.fecha]||0) + x.monto)*100)/100;
   });
   // Creditos que son descargo de transito viejo: no pagan la venta de hoy.
-  var desc = clavesDescargo(r);
+  var desc = (opt && opt.claves) || clavesDescargo(r);
   var comp = {};
   cg.forEach(function(x){
     var k = String(x.referencia==null?"":x.referencia).trim();
@@ -6141,23 +6223,26 @@ function bancoDelEfectivo(){
 // que una venta no llego al banco.
 function partidasVentaSinDeposito(){
   var banco = bancoDelEfectivo();
-  return ventasSinDeposito().map(function(v){
-    var falta = "B/ " + fmt(v.pendiente) + " de la venta del " + v.fecha;
-    return {
-      fecha: v.fecha, banco: banco || "", monto: v.pendiente, clase: "en_transito",
-      concepto: "Depósito pendiente de identificar", comprobante: v.ref,
-      motivo: "la venta entró a Caja General y no salió por ningún depósito",
-      texto: "El " + v.fecha + " entró una venta de B/ " + fmt(v.venta) + " a Caja General. " +
-        (v.acreditado > 0.005 ? "Se acreditaron B/ " + fmt(v.acreditado) + " de depósitos" : "No se acreditó ningún depósito") +
-        (v.visa > 0.005 ? " (más B/ " + fmt(v.visa) + " de VISA St. Georges, que se acredita a fin de mes)" : "") +
-        (v.reportado > 0.005 ? " y la cajera reportó B/ " + fmt(v.reportado) + " depositados" : " y la cajera no reportó depósito") +
-        ": quedan " + falta + " sin explicar. Se arrastra al mes siguiente hasta que el depósito aparezca en el banco. " +
-        (banco ? "Se asume " + banco + " porque es donde compensó el efectivo de este mes; si fue otro banco, corregilo en el resumen."
-               : "No se pudo deducir a qué banco va: completá el banco en el resumen en tránsito antes de usarlo el mes que viene."),
-      fuente: "Diario Caja General / Reporte consolidado de caja",
-      _paso: "ventas"
-    };
-  });
+  return ventasSinDeposito().map(function(v){ return itemVentaSinDeposito(v, banco); });
+}
+// La partida con forma de hallazgo. La arma el Paso 1, que es su casa, y tambien el cierre cuando no hubo
+// reporte de cajeras y el Paso 1 no llego a correr.
+function itemVentaSinDeposito(v, banco){
+  var falta = "B/ " + fmt(v.pendiente) + " de la venta del " + v.fecha;
+  return {
+    fecha: v.fecha, banco: banco || "", monto: v.pendiente, clase: "en_transito",
+    concepto: "Depósito pendiente de identificar", comprobante: v.ref,
+    motivo: "la venta entró a Caja General y no salió por ningún depósito",
+    texto: "El " + v.fecha + " entró una venta de B/ " + fmt(v.venta) + " a Caja General. " +
+      (v.acreditado > 0.005 ? "Se acreditaron B/ " + fmt(v.acreditado) + " de depósitos" : "No se acreditó ningún depósito") +
+      (v.visa > 0.005 ? " (más B/ " + fmt(v.visa) + " de VISA St. Georges, que se acredita a fin de mes)" : "") +
+      (v.reportado > 0.005 ? " y la cajera reportó B/ " + fmt(v.reportado) + " depositados" : " y la cajera no reportó depósito") +
+      ": quedan " + falta + " sin explicar. Se arrastra al mes siguiente hasta que el depósito aparezca en el banco. " +
+      (banco ? "Se asume " + banco + " porque es donde compensó el efectivo de este mes; si fue otro banco, corregilo en el resumen."
+             : "No se pudo deducir a qué banco va: completá el banco en el resumen en tránsito antes de usarlo el mes que viene."),
+    fuente: "Diario Caja General / Reporte consolidado de caja",
+    _paso: "ventas"
+  };
 }
 
 // Cargos de tarjeta del estado de cuenta, agrupados por concepto. Es lo que el banco se quedó y nunca va
@@ -7321,6 +7406,36 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
   }
   var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
   guardarDecisionTransito(transitoPrevio || [], estados, res);   // los Pasos 2 y 3 heredan esta decision
+
+  /* ---- Cuadre de apertura ----
+     Caja General es una cuenta puente: su saldo al abrir el mes tiene que ser lo que quedo en transito y
+     sigue dentro de la cuenta. Es la prueba de que el mes arranca bien, asi que va en el resultado del
+     Paso 0 y no solo en el panel del saldo, donde aparecia despues de correr todo. */
+  var cuadreAp = cuadreSaldoInicialPaso0(transitoPrevio, STATE.saldoCajaGeneral, STATE.diarioCaja);
+  if(cuadreAp){
+    if(cuadreAp.ok){
+      hallazgos.push({
+        fecha:cuadreAp.fecha||"", banco:"", monto:cuadreAp.total, clase:"informativo",
+        concepto:"Apertura de Caja General cuadrada", comprobante:"", motivo:"el saldo inicial es el tránsito que sigue en la cuenta",
+        texto:"Caja General abre el mes con B/ " + fmt(cuadreAp.apertura) + " y las " + cuadreAp.n + " partida(s) del resumen que siguen dentro de la cuenta suman lo mismo" +
+              (cuadreAp.nFuera ? " (otras " + cuadreAp.nFuera + " por B/ " + fmt(cuadreAp.totalFuera) + " ya estaban acreditadas)" : "") +
+              ". El mes arranca con el tránsito correcto.",
+        fuente:"Resumen en tránsito del mes anterior / Diario Caja General"
+      });
+    } else {
+      hallazgos.push({
+        fecha:cuadreAp.fecha||"", banco:"", monto:Math.round(Math.abs(cuadreAp.dif)*100)/100, clase:"aviso",
+        concepto:"La apertura de Caja General no cuadra con el resumen", comprobante:"", motivo:"saldo inicial distinto del tránsito",
+        texto:"Caja General abre el mes con B/ " + fmt(cuadreAp.apertura) + " y las partidas del resumen que siguen dentro de la cuenta suman B/ " +
+              fmt(cuadreAp.total) + " (diferencia B/ " + fmt(cuadreAp.dif) + "). " +
+              (cuadreAp.dif > 0
+                ? "La cuenta abre con menos de lo que el resumen dice que quedó pendiente: o al resumen le sobran partidas que ya compensaron, o falta el ajuste de apertura."
+                : "La cuenta trae de más: son partidas de meses anteriores que compensaron y nunca se descargaron.") +
+              " El panel del saldo trae el asiento de ajuste.",
+        fuente:"Resumen en tránsito del mes anterior / Diario Caja General"
+      });
+    }
+  }
   // Fechas imposibles en el resumen del Paso 0 (error de tecleo): se concilian igual, pero hay que avisar.
   res.fechasRaras.forEach(function(f){
     hallazgos.push({ fecha:f.item.fecha, banco:f.banco, monto:f.item.monto, clase:"aviso",

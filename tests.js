@@ -3037,6 +3037,72 @@ test("la venta sin deposito no se confunde con el efectivo de fin de mes del mis
   cerca(tr.reduce(function(a, x){ return a + x.monto; }, 0), 223.01, "157.91 + 65.10");
 });
 
+test("el Paso 0 dice en su propio resultado si la apertura de Caja General cuadra", () => {
+  STATE.decisiones = {}; STATE.diarioCaja = [];
+  const trPrev = [{ fecha: "2026-02-20", banco: "Banistmo", monto: 500.00, concepto: "cheque en transito", sentido: "credito" }];
+  STATE.saldoCajaGeneral = { inicial: 500.00, fechaInicial: "2026-03-01", final: 0, fechaFinal: "2026-03-31" };
+  const ok = paso0(trPrev, [], [], null, 7, 0.01);
+  const cuadra = ok.filter(function(x){ return /Apertura de Caja General cuadrada/.test(x.concepto || ""); });
+  eq(cuadra.length, 1, "lo dice el Paso 0, no solo el panel del saldo");
+  eq(contarRojas(ok), 0);
+  // Y cuando no cuadra, lo avisa con la diferencia.
+  STATE.decisiones = {};
+  STATE.saldoCajaGeneral = { inicial: 400.00, fechaInicial: "2026-03-01", final: 0, fechaFinal: "2026-03-31" };
+  const mal = paso0(trPrev, [], [], null, 7, 0.01);
+  const av = mal.filter(function(x){ return x.clase === "aviso" && /apertura/i.test(x.concepto || ""); });
+  eq(av.length, 1, "avisa que no cuadra");
+  cerca(av[0].monto, 100.00);
+});
+
+test("la venta que entra y no sale la detecta el Paso 1, no el cierre", () => {
+  STATE.decisiones = {}; STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.estados = null; STATE.retVisaDetalle = null;
+  const reporte = [{ fecha: "2026-03-10", banco: "Banistmo", metodo: "VISA", monto: 700.00, cajera: "A" }];
+  const cg = [
+    { fecha: "2026-03-10", referencia: "ME-00000001900", debito: 1000.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 10/03/2026", fila: 1 },
+    { fecha: "2026-03-10", referencia: "ME-00000001900", debito: 0, credito: 700.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", fila: 2 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-03-01", null);
+  const vsd = h.filter(function(x){ return /Depósito pendiente de identificar/.test(x.concepto || ""); });
+  eq(vsd.length, 1, "el Paso 1 la denuncia en su propio resultado");
+  cerca(vsd[0].monto, 300.00, "1,000 de venta menos 700 acreditados");
+  eq(contarRojas(h), 0, "no es una diferencia: es plata que sigue pendiente de depositar");
+  // Y en el cierre no se cuenta dos veces.
+  STATE.diarioCaja = cg; STATE.results = { paso1: h };
+  const tr = recolectarEnTransito().filter(function(x){ return /Depósito pendiente de identificar/.test(x.concepto || ""); });
+  eq(tr.length, 1, "una sola vez en el resumen");
+});
+
+test("los cheques los decide el Paso 2 y el Paso 3 verifica el total del navegador", () => {
+  STATE.decisiones = {};
+  const detalle = [
+    { fecha: "2026-03-05", banco: "Banistmo", monto: 100.00 },
+    { fecha: "2026-03-06", banco: "Banistmo", monto: 50.00 }
+  ];
+  const cg = [
+    lineaCG("2026-03-05", "DEPOSITO DE BANISTMO CK DEL 05/03/2026", 100.00),
+    lineaCG("2026-03-06", "DEPOSITO DE BANISTMO CK DEL 06/03/2026", 50.00)
+  ];
+  // El banco los junta en un solo deposito.
+  const estB = function(){ return [{ fecha: "2026-03-08", descripcion: "DEPOSITO", credito: 150.00, debito: 0, fila: 2 }]; };
+  const h2 = paso2(cg, estB(), [], null, null, detalle, 7, 0.01, null, null);
+  eq(contarRojas(h2), 0, "los dos cheques clarean en el Paso 2");
+  eq(h2.filter(esEnTransito).length, 0, "ninguno queda pendiente");
+  // El Paso 3 no los vuelve a clarear: recibe las lineas usadas y solo verifica el navegador.
+  // Cada corrida con filas nuevas: el Paso 3 marca las que usa y no se pueden reusar entre llamadas.
+  const dB = function(){ return [
+    { fecha: "2026-03-05", debito: 100.00, credito: 0, descripcion: "DEPOSITO DE BANISTMO CK DEL 05/03/2026", referencia: "ME-1", fila: 2 },
+    { fecha: "2026-03-06", debito: 50.00, credito: 0, descripcion: "DEPOSITO DE BANISTMO CK DEL 06/03/2026", referencia: "ME-2", fila: 3 }
+  ]; };
+  const h3 = paso3(dB(), [], estB(), [], null, null, 7, 0.01, null, null);
+  eq(contarRojas(h3), 0, "el deposito de 150 ya lo explico el Paso 2");
+  eq(h3.filter(esEnTransito).length, 0, "y los cheques no vuelven a quedar en transito");
+  // Si al navegador del banco le falta un cheque, el Paso 3 lo avisa.
+  const h3b = paso3([dB()[0]], [], estB(), [], null, null, 7, 0.01, null, null);
+  const av = h3b.filter(function(x){ return x.clase === "aviso" && /cheque/i.test(x.concepto || ""); });
+  eq(av.length, 1, "avisa que el navegador no tiene todos los cheques");
+  if (av[0].texto.indexOf("150.00") < 0 || av[0].texto.indexOf("100.00") < 0) throw new Error("el aviso debe decir los dos totales: " + av[0].texto);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
