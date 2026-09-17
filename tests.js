@@ -2771,17 +2771,44 @@ test("el descargo repartido por medio de pago se reconoce (1-mar-2026, Banistmo,
   if (por(3571.60).texto.indexOf("suman B/ 3,571.60") < 0) throw new Error("el texto debe decir que las lineas suman la partida");
 });
 
-test("un descargo que cita su fecha pero no suma lo mismo queda a la vista con aviso (1-mar-2026, STG)", () => {
+test("un descargo que cita su fecha pero no suma lo mismo marca la diferencia contra la partida, no contra la cajera (1-mar-2026, STG)", () => {
+  STATE.decisiones = {};
   const cg = [
+    lineaCG("2026-03-01", "deposito brinks St georges 28/2", 2380.00),
+    lineaCG("2026-03-01", "deposito efectivo St georges 28/2", 4.88),
     lineaCG("2026-03-01", "deposito brinks St georges 27/2", 280.00),
     lineaCG("2026-03-01", "deposito efectivo St georges 27/2", 2.32)
   ];
-  const transito = [{ fecha: "2026-02-27", banco: "STG", monto: 282.29, concepto: "Depósito pendiente de identificar", sentido: "credito" }];
+  // El resumen de febrero bajado con la version 2026.09.26 traia otros importes.
+  const transito = [
+    { fecha: "2026-02-27", banco: "STG", monto: 282.29, concepto: "Depósito pendiente de identificar", sentido: "credito" },
+    { fecha: "2026-02-28", banco: "STG", monto: 1116.10, concepto: "Depósito pendiente de identificar", sentido: "credito" }
+  ];
   const h = paso1([], cg, null, 0.01, [], "2026-03-01", transito);
-  const av = h.filter(function(x){ return x.clase === "aviso" && /no coincide/.test(x.concepto || ""); });
-  eq(av.length, 1, "aviso de descargo que no coincide");
-  if (av[0].texto.indexOf("diferencia B/ 0.03") < 0) throw new Error("el aviso debe decir la diferencia: " + av[0].texto);
-  eq(contarRojas(h), 1, "la diferencia real sigue en el cotejo");
+  const nc = h.filter(function(x){ return /no coincide/.test(x.concepto || ""); });
+  eq(nc.length, 2, "una por fecha de origen");
+  nc.forEach(function(x){ eq(x.clase, "diff", "es una diferencia real"); });
+  const d28 = nc.filter(function(x){ return x.lineas.some(function(l){ return /28\/2/.test(l.descripcion); }); })[0];
+  cerca(d28.monto, 1268.78, "la diferencia es contra la partida de 1,116.10, no el total");
+  const d27 = nc.filter(function(x){ return x.lineas.some(function(l){ return /27\/2/.test(l.descripcion); }); })[0];
+  cerca(d27.monto, 0.03);
+  eq(contarRojas(h), 2, "no aparece la diferencia de 2,667.20 contra el reporte de cajeras en cero");
+  eq(h.filter(function(x){ return x.clase === "diff" && Math.abs(Math.abs(x.monto) - 2667.20) < 0.01; }).length, 0);
+  // El Paso 2 hereda la decision: aparta las lineas y no la vuelve a reportar.
+  const dec = STATE.decisiones.descargos.lista.filter(function(d){ return d.dif != null; });
+  eq(dec.length, 2, "la decision viaja a los Pasos 2 y 3");
+});
+
+test("una linea que cita una fecha del mes anterior sin partida de esa fecha tampoco vuelve al cotejo del dia", () => {
+  STATE.decisiones = {};
+  const cg = [ lineaCG("2026-03-01", "deposito brinks St georges 25/2", 500.00) ];
+  const transito = [{ fecha: "2026-02-27", banco: "STG", monto: 480.00, concepto: "Depósito pendiente de identificar", sentido: "credito" }];
+  const h = paso1([], cg, null, 0.01, [], "2026-03-01", transito);
+  const nc = h.filter(function(x){ return /no coincide/.test(x.concepto || ""); });
+  eq(nc.length, 1);
+  cerca(nc[0].monto, 20.00, "contra la partida mas parecida del banco");
+  if (nc[0].texto.indexOf("no trae ninguna partida de STG del 2026-02-25") < 0) throw new Error("debe decir que esa fecha no esta: " + nc[0].texto);
+  eq(contarRojas(h), 1, "una sola diferencia, no otra contra la cajera");
 });
 
 test("el desglose por medio de pago viaja en el resumen y reconoce un descargo sin fecha en el texto", () => {
@@ -3143,6 +3170,16 @@ test("al arranque del mes, el Paso 3 dice si el resumen del mes anterior no trae
   const sc = sinPartida.filter(esSinConfirmar);
   eq(sc.length, 1, "queda como sin confirmar");
   if (sc[0].texto.indexOf("no trae ninguna partida de ese importe") < 0) throw new Error("debe decir por que: " + sc[0].texto);
+});
+
+test("una fecha mal tecleada en la venta del dia no se toma por descargo si la cajera la reporto (4-jun-2026, 04/5)", () => {
+  STATE.decisiones = {};
+  const reporte = [{ fecha: "2026-06-04", banco: "Banistmo", metodo: "CLAVE", monto: 130.45, cajera: "A" }];
+  const cg = [ lineaCG("2026-06-04", "DEPOSITO POR TAREJTA CLAVE BTS DEL 04/5/2026", 130.45) ];
+  const transito = [{ fecha: "2026-04-11", banco: "Banistmo", monto: 164.08, concepto: "deposito de Banistmo CK", sentido: "credito" }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-06-01", transito);
+  eq(contarRojas(h), 0, "la venta del dia cuadra con la cajera");
+  eq(h.filter(function(x){ return /no coincide/.test(x.concepto || ""); }).length, 0, "no se reporta como descargo");
 });
 
 /* --- resumen --- */

@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.01";
+var APP_VERSION="2026.10.02";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1714,7 +1714,20 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     // una fecha puede descargar partidas de varias fechas y reconocerse en (c): avisar de el seria una falsa alarma.
     cercanosP1.forEach(function(c){
       var sigue = c.lineas.every(function(l){ return cajaFiltrada.indexOf(l.src) !== -1; });
-      if(sigue) avisosDescargo.push(avisoDescargoNoCoincide(c, "Resumen en tránsito del mes anterior / Diario Caja General"));
+      if(!sigue) return;
+      // Solo se aparta si el reporte de cajeras de ese dia NO la respalda. Si la respalda, la fecha del texto
+      // esta mal tecleada y es la venta del dia: el 4-jun-2026 "TARJETA CLAVE BTS DEL 04/5/2026" por 130.45
+      // era el deposito de ese dia, y la cajera lo reporto.
+      if(excesoP1(c.banco, c.fecha) < c.monto - tolerancia){
+        if(!c.otraFecha) avisosDescargo.push(avisoCercanoEnCotejo(c, "Resumen en tránsito del mes anterior / Diario Caja General"));
+        return;
+      }
+      if(c.partida && c.partida.usado){ c.partida = null; c.dif = c.monto; }   // la tomo otro descargo: no se reporta contra ella
+      if(c.partida) c.partida.usado = true;
+      avisosDescargo.push(avisoDescargoNoCoincide(c, "Resumen en tránsito del mes anterior / Diario Caja General"));
+      descargos.push({ fecha:c.fecha, banco:c.banco, monto:c.monto, ref:c.lineas[0].referencia, partidas: c.partida ? [c.partida] : [],
+                       lineas:c.lineas, dif:c.dif, soloDecision:true });
+      quitarP1(c.lineas);   // no vuelve al cotejo del dia
     });
   }
 
@@ -1762,6 +1775,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
 
   var hallazgos = [];
   descargos.forEach(function(dg){
+    if(dg.soloDecision) return;   // su hallazgo es la diferencia contra la partida, ya emitida
     var repartido = dg.lineas && dg.lineas.length > 1;
     hallazgos.push({
       fecha:dg.fecha, banco:dg.banco, monto:dg.monto, clase:"informativo", concepto:"Descargo de tránsito",
@@ -2588,7 +2602,7 @@ function transitoDelPaso0(transitoPrevio, estados, tolerancia){
 function guardarDecisionDescargos(diarioCaja, transitoPrevio, lista){
   decisiones().descargos = { firmaCaja: firmaDiario(diarioCaja), firmaTransito: firmaTransito(transitoPrevio),
     lista: (lista||[]).map(function(dg){
-      return { banco:dg.banco, fecha:dg.fecha, monto:dg.monto, ref:dg.ref,
+      return { banco:dg.banco, fecha:dg.fecha, monto:dg.monto, ref:dg.ref, dif: dg.soloDecision ? dg.dif : null,
         partidas:(dg.partidas||[]).map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
         lineas:(dg.lineas||[]).map(function(l){ return { fecha:l.fecha, monto:l.monto, descripcion:l.descripcion, referencia:l.referencia }; }) };
     }) };
@@ -2694,7 +2708,16 @@ function descargosPorFechaOrigen(lineas, pool, banco, tolerancia, campoUsado){
   orden.forEach(function(k){
     var g = grupos[k];
     var cand = (pool||[]).filter(function(p){ return p.banco===banco && !p[campoUsado] && p.fecha===g.origen; });
-    if(!cand.length) return;
+    if(!cand.length){
+      // Ninguna partida de esa fecha: igual es un descargo (la linea dice de que dia es). Se reporta contra la
+      // partida del banco que mas se le acerca, o contra ninguna, para que no vuelva al cotejo del dia.
+      var otras = (pool||[]).filter(function(p){ return p.banco===banco && !p[campoUsado] && String(p.fecha||"").slice(0,7) < String(g.fecha).slice(0,7); });
+      var cerca = null;
+      otras.forEach(function(p){ var d = Math.abs(p.monto - g.total); if(!cerca || d < cerca.d) cerca = { p:p, d:d }; });
+      cercanos.push({ fecha:g.fecha, origen:g.origen, banco:banco, monto:g.total, lineas:g.lineas, partida: cerca ? cerca.p : null,
+                      dif: Math.round((g.total - (cerca ? cerca.p.monto : 0))*100)/100, otraFecha:true });
+      return;
+    }
     var idx = buscarSubsetSuma(cand, g.origen, g.total, 0, tolerancia, 12);
     if(idx){
       var usadas = idx.map(function(i){ return cand[i]; });
@@ -2709,17 +2732,46 @@ function descargosPorFechaOrigen(lineas, pool, banco, tolerancia, campoUsado){
   });
   return { hechos:hechos, cercanos:cercanos };
 }
-// Lineas que citan una fecha de origen y parecen el descargo de una partida, pero no suman lo mismo. No se
-// dan por descargo (la diferencia es real y queda a la vista en el cotejo), pero se dice a que se parecen.
+/* ---- Descargo que no coincide con el transito ----
+   Una linea que cita una fecha del mes anterior ("deposito brinks St georges 28/2") nunca es un deposito de
+   las ventas del dia en que se asienta. Antes, si no sumaba lo mismo que la partida del resumen, volvia al
+   cotejo del dia y se comparaba contra lo que reportaron las cajeras ESE dia, que no la pueden traer: el
+   1-mar-2026 los descargos de STG de 282.32 y 2,384.88 salieron como una diferencia de 2,667.20 contra un
+   reporte en cero, cuando lo que no cuadraba era el resumen (282.29 y 1,116.10, bajado con una version vieja).
+   Ahora se apartan del cotejo del dia y la diferencia se marca donde esta: entre el descargo y su partida. */
 function avisoDescargoNoCoincide(c, fuente){
+  var lineasTxt = c.lineas.map(function(l){ return String(l.descripcion||"").trim().slice(0,40) + " B/ " + fmt(l.monto); }).join("; ");
+  var cab = c.banco + " " + c.fecha + ": " + c.lineas.length + " línea(s) de Caja General citan el " + c.origen +
+            " y suman B/ " + fmt(c.monto) + " (" + lineasTxt + "). Son el descargo de un depósito del mes anterior, así que no se comparan con lo que reportaron las cajeras este día. ";
+  var cuerpo = c.partida
+    ? (c.otraFecha
+        ? "El resumen en tránsito no trae ninguna partida de " + c.banco + " del " + c.origen + "; la más parecida es la de B/ " + fmt(c.partida.monto) + " del " + c.partida.fecha + ". "
+        : "La partida en tránsito de esa fecha es de B/ " + fmt(c.partida.monto) + ". ") +
+      "Diferencia: B/ " + fmt(c.dif) + (c.dif > 0 ? " más en Caja General que en el resumen" : " menos en Caja General que en el resumen") + ". " +
+      "Revisá el importe de la partida en el resumen del Paso 0 (si se bajó con una versión anterior, volvé a correr el mes pasado y bajalo de nuevo) o el asiento."
+    : "El resumen en tránsito no trae ninguna partida pendiente de " + c.banco + ". Confirmá que ese depósito quedó en tránsito el mes pasado; si no, el asiento está de más.";
+  return { fecha:c.fecha, banco:c.banco, monto:c.dif, clase:"diff", concepto:"Descargo que no coincide con el tránsito",
+    comprobante:"", motivo:"descargo con diferencia",
+    partidas: c.partida ? [{ banco:c.partida.banco, fecha:c.partida.fecha, monto:c.partida.monto, concepto:c.partida.concepto }] : [],
+    lineas: c.lineas.map(function(l){ return { fecha:l.fecha, monto:l.monto, descripcion:String(l.descripcion||"").trim() }; }),
+    texto: cab + cuerpo + comprobanteDeLineas(c.lineas),
+    fuente: fuente };
+}
+// Cuando el reporte de cajeras del dia SI respalda esas lineas, se quedan en el cotejo del dia y solo se avisa
+// a que partida se parecen.
+function avisoCercanoEnCotejo(c, fuente){
   return { fecha:c.fecha, banco:c.banco, monto:c.monto, clase:"aviso", concepto:"Descargo que no coincide con el tránsito",
     comprobante:"", motivo:"descargo con diferencia",
     texto: c.banco + " " + c.fecha + ": " + c.lineas.length + " línea(s) citan el " + c.origen + " y suman B/ " + fmt(c.monto) +
-           " (" + c.lineas.map(function(l){ return String(l.descripcion||"").trim().slice(0,40) + " B/ " + fmt(l.monto); }).join("; ") + "). " +
-           "Parecen el descargo de la partida en tránsito de B/ " + fmt(c.partida.monto) + " del " + c.origen +
-           ", pero no coinciden: diferencia B/ " + fmt(c.dif) + ". Quedan en el cotejo del día. " +
-           "Revisá el asiento o el importe de esa partida en el resumen del Paso 0.",
+           ". Parecen el descargo de la partida en tránsito de B/ " + fmt(c.partida.monto) + " del " + c.origen +
+           ", pero no coinciden (diferencia B/ " + fmt(c.dif) + ") y el reporte de cajeras de ese día las respalda, así que quedan en el cotejo del día." +
+           comprobanteDeLineas(c.lineas),
     fuente: fuente };
+}
+function comprobanteDeLineas(lineas){
+  var rs = [];
+  (lineas||[]).forEach(function(l){ var r = refME(l.referencia); if(r && rs.indexOf(r) === -1) rs.push(r); });
+  return rs.length ? " · Comprobante " + rs.join(" / ") : "";
 }
 // Todas las soluciones (hasta maxSol+1) de un subconjunto de montos que sume el objetivo. null si la busqueda
 // se corta por tamaño. Sirve para aceptar una combinacion SOLO cuando es la unica posible.
@@ -2856,6 +2908,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             if(!q.usadoDescargo && q.banco===p.banco && q.fecha===p.fecha && Math.abs(q.monto - p.monto) < 0.005){ q.usadoDescargo = true; break; }
           }
         });
+        if(dg.dif != null) return;   // descargo con diferencia: el Paso 1 ya la marco contra su partida
         hallazgos.push(hallazgoDescargo(banco, dg.fecha, dg.monto, dg.lineas[0].descripcion, { partidas:dg.partidas }, refME(dg.ref),
           "Paso 1 (descargo decidido ahí) / Diario Caja General", dg.lineas));
       });
@@ -3310,6 +3363,7 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
             if(!q.usadoDescargo && q.banco===p.banco && q.fecha===p.fecha && Math.abs(q.monto - p.monto) < 0.005){ q.usadoDescargo = true; break; }
           }
         });
+        if(dg.dif != null) return;   // descargo con diferencia: el Paso 1 ya la marco contra su partida
         hallazgos.push(hallazgoDescargo(cfg.nombre, dg.fecha, dg.monto, dg.lineas[0].descripcion, { partidas:dg.partidas }, refME(dg.ref),
           "Paso 1 (descargo decidido ahí) / Diario " + cfg.nombre, dg.lineas));
       });
