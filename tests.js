@@ -3182,6 +3182,54 @@ test("una fecha mal tecleada en la venta del dia no se toma por descargo si la c
   eq(h.filter(function(x){ return /no coincide/.test(x.concepto || ""); }).length, 0, "no se reporta como descargo");
 });
 
+test("el cierre dice en qué días buscar el residuo, y el cuadro suma exactamente el residuo", () => {
+  STATE.transitoPrevio = null; STATE.estados = null; STATE.chequesDetalle = null; STATE.decisiones = {};
+  // Dos días de venta: el primero deja la retención de tarjeta, el segundo un hueco de 200 que no explica nadie.
+  STATE.diarioCaja = [
+    { fecha: "2026-05-04", debito: 1000.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 04/05/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-05-04", debito: 0, credito: 950.00, descripcion: "DEPOSITO POR TARJETA VISA STG DEL 04/05/2026", referencia: "ME-1", fila: 2 },
+    { fecha: "2026-05-05", debito: 1000.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 05/05/2026", referencia: "ME-2", fila: 3 },
+    { fecha: "2026-05-05", debito: 0, credito: 800.00, descripcion: "DEPOSITO POR TARJETA VISA STG DEL 05/05/2026", referencia: "ME-2", fila: 4 },
+    { fecha: "2026-05-06", debito: 300.00, credito: 0, descripcion: "AJUSTA SALDO ERRADO DE LA CAJA GENERAL", referencia: "ME-3", fila: 5 }
+  ];
+  STATE.retVisaDetalle = [{ fecha: "2026-05-04", bruto: 1000.00, retenciones: -50.00, neto: 950.00 }];
+  STATE.saldoCajaGeneral = { inicial: 0, final: 550.00, fechaInicial: "2026-05-01", fechaFinal: "2026-05-31" };
+  STATE.results = { paso0: [], paso1: [], paso2: [], paso3: [] };
+  const d = desgloseSaldoCaja();
+  const p = pistasResiduo();
+  cerca(p.total, d.resto, "el cuadro suma el residuo, no un número aparte");
+  const d4 = p.dias.filter(function(x){ return x.fecha === "2026-05-04"; })[0];
+  cerca(d4.sinExplicar, 50.00, "el día normal deja solo la retención");
+  cerca(d4.retencion, 50.00, "y al lado se ve la retención del informe para compararla");
+  // El hueco de 200 del día 5 no es residuo: es una venta que entró y no salió, con su propio renglón.
+  eq(p.dias.filter(function(x){ return x.fecha === "2026-05-05"; }).length, 0);
+  eq(p.dias[0].fecha, "2026-05-06", "el mayor va primero");
+  cerca(p.dias[0].sinExplicar, 300.00, "el ajuste que no es venta ni depósito");
+  eq(p.dias.length, 2);
+  // El ajuste, que no es venta ni depósito, se lista aparte para poder ir a buscarlo.
+  eq(p.otros.length, 1);
+  cerca(p.otros[0].monto, 300.00);
+  const h = desgloseSaldoCajaHtml();
+  if (h.indexOf("Dónde buscar") < 0) throw new Error("el cuadro tiene que salir en el reporte");
+  if (h.indexOf("AJUSTA SALDO ERRADO") < 0) throw new Error("y listar el asiento que no es venta ni depósito");
+});
+
+test("el descargo del mes anterior no aparece como un hueco del día: se empareja con la apertura", () => {
+  STATE.decisiones = {}; STATE.estados = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null;
+  STATE.transitoPrevio = [{ fecha: "2026-04-28", banco: "STG", monto: 500.00, concepto: "deposito en transito", sentido: "credito" }];
+  STATE.diarioCaja = [
+    { fecha: "2026-05-04", debito: 0, credito: 500.00, descripcion: "deposito St georges 28/4", referencia: "ME-1", fila: 1 }
+  ];
+  STATE.saldoCajaGeneral = { inicial: 500.00, final: 0, fechaInicial: "2026-05-01", fechaFinal: "2026-05-31" };
+  STATE.results = { paso0: [], paso1: [{ clase:"informativo", concepto:"Descargo de tránsito", banco:"STG", fecha:"2026-05-04",
+    monto:500.00, texto:"x", partidas:[{banco:"STG", fecha:"2026-04-28", monto:500.00, concepto:"deposito en transito"}],
+    lineas:[{fecha:"2026-05-04", monto:500.00, descripcion:"deposito St georges 28/4"}] }], paso2: [], paso3: [] };
+  const p = pistasResiduo();
+  eq(p.dias.length, 0, "el día del descargo no queda con un hueco");
+  cerca(p.descargos, 500.00);
+  cerca(p.total, desgloseSaldoCaja().resto);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

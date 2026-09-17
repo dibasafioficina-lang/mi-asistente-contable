@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.02";
+var APP_VERSION="2026.10.03";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2797,7 +2797,9 @@ function clavesDescargo(r){
   var claves = {}, vistos = {};
   ["paso1","paso2","paso3"].forEach(function(k){
     (Array.isArray(r[k]) ? r[k] : []).forEach(function(x){
-      if(x.clase!=="informativo" || String(x.concepto||"").indexOf("Descargo")===-1) return;
+      // El descargo que no coincide con el transito (clase "diff") tambien saca esas lineas del dia: si no
+      // se cuentan, sus creditos parecen pagar la venta del dia y el cierre se confunde.
+      if((x.clase!=="informativo" && x.clase!=="diff") || String(x.concepto||"").indexOf("Descargo")===-1) return;
       var id = String(x.banco||"") + "|" + (x.fecha||"") + "|" + Math.round((x.monto||0)*100);
       if(vistos[id]) return;
       vistos[id] = true;
@@ -6342,6 +6344,86 @@ function itemVentaSinDeposito(v, banco){
   };
 }
 
+/* ---- Donde buscar el residuo ----
+   Cuando todos los pasos cuadran y el saldo igual no coincide con el transito, queda el residuo, y hasta
+   ahora el reporte solo decia su total: no habia por donde empezar a buscar. Este cuadro lo abre DIA por
+   dia con la aritmetica del propio navegador de Caja General, y suma exactamente el residuo:
+
+     residuo = (apertura en transito - lo que ya compenso y falta descargar)
+               + suma por dia de (debitos - creditos - lo que quedo en transito ESE dia)
+
+   Un dia normal deja en la cuenta solo la retencion de tarjeta: la venta entra BRUTA y el deposito sale
+   NETO. Por eso al lado va la retencion que dice el informe de VISA: el dia donde "sin explicar" no se le
+   parece es el que hay que ir a mirar. */
+function pistasResiduo(){
+  var cg = STATE.diarioCaja || [];
+  var d = desgloseSaldoCaja();
+  if(!cg.length || !d) return null;
+  function r2(n){ return Math.round((n||0)*100)/100; }
+  var visaRet = {};
+  (STATE.retVisaDetalle || []).forEach(function(x){ visaRet[x.fecha] = r2((visaRet[x.fecha]||0) + Math.abs(x.retenciones)); });
+  // Lo que quedo en transito con fecha de ESE dia y sigue dentro de Caja General (lo que ya salio de la
+  // cuenta no toca el saldo, asi que no se descuenta aca). El transito con fecha de meses anteriores —los
+  // cheques viejos que siguen en circulacion— no es de ningun dia de este mes: va en el renglon de apertura.
+  var diaCG = {};
+  cg.forEach(function(x){ if(x.fecha) diaCG[x.fecha] = true; });
+  var transDia = {}, transViejo = 0;
+  clasificarTransito().dentro.forEach(function(x){
+    if(x.fecha && diaCG[x.fecha]) transDia[x.fecha] = r2((transDia[x.fecha]||0) + x.monto);
+    else transViejo = r2(transViejo + x.monto);
+  });
+  var claves = clavesDescargo(STATE.results || {});
+  var dias = {}, otros = [], descargos = 0;
+  cg.forEach(function(x){
+    if(!x.fecha) return;
+    var dd = dias[x.fecha] || (dias[x.fecha] = { fecha:x.fecha, ref:"", deb:0, cred:0, descargo:0 });
+    var ref = refME(x.referencia);
+    if(!dd.ref && ref) dd.ref = ref;
+    if(x.debito > 0){
+      dd.deb = r2(dd.deb + x.debito);
+      // Un debito que no es la venta del dia ni un deposito (un ajuste de saldo, una diferencia por credito,
+      // la reposicion de un fondo) entra a la cuenta y no sale por el banco: ningun paso lo mira.
+      var t = normTxt(x.descripcion);
+      if(!/VENTA|VETA/.test(t) && t.indexOf("DEPOSITO") === -1)
+        otros.push({ fecha:x.fecha, ref:ref, descripcion:String(x.descripcion||"").trim(), monto:x.debito });
+    }
+    if(x.credito > 0){
+      dd.cred = r2(dd.cred + x.credito);
+      // El credito que descarga transito del mes anterior no paga nada de este dia: se empareja con la
+      // apertura, que es de donde salio esa partida.
+      if(consumirClaveDescargo(claves, x.fecha, x.credito)){   // la clave va por la fecha del asiento
+        dd.descargo = r2(dd.descargo + x.credito);
+        descargos = r2(descargos + x.credito);
+      }
+    }
+  });
+  // Para la lista de "asientos que no son venta ni deposito": el navegador de algunos meses trae las dos
+  // patas del asiento, asi que un debito que tiene su credito igual el mismo dia es el mismo deposito
+  // visto dos veces y no hay nada que revisar. Solo afecta a la lista: la aritmetica usa todas las lineas.
+  otros = otros.filter(function(o){
+    return !cg.some(function(y){ return y.credito > 0 && y.fecha === o.fecha && Math.abs(y.credito - o.monto) < 0.005 &&
+      normTxt(y.descripcion) === normTxt(o.descripcion); });
+  });
+  var lista = Object.keys(dias).map(function(f){
+    var dd = dias[f];
+    dd.transito = transDia[f] || 0;
+    dd.retencion = visaRet[f] || 0;
+    dd.sinExplicar = r2(dd.deb - dd.cred + dd.descargo - dd.transito);
+    return dd;
+  }).filter(function(x){ return Math.abs(x.sinExplicar) >= 0.005; });
+  lista.sort(function(a, b){ return Math.abs(b.sinExplicar) - Math.abs(a.sinExplicar); });
+  otros.sort(function(a, b){ return b.monto - a.monto; });
+  var apertura = r2((d.aperturaTransito||0) - d.compenso - transViejo - descargos);
+  var sumaDias = r2(lista.reduce(function(a, x){ return a + x.sinExplicar; }, 0));
+  // Lo que falta para que el cuadro sume el residuo es lo que el navegador ya trae DENTRO de su saldo de
+  // apertura y ademas asienta como linea del mes: el "ajusta saldo errado de la Caja General" del 1-ene-2026
+  // por 5,119.10 estaba en los dos lados y el dia 1 salia con un sobrante de ese mismo importe.
+  var ajuste = r2(d.resto - sumaDias - apertura);
+  var total = r2(apertura + ajuste + sumaDias);
+  return { dias: lista, otros: otros, apertura: apertura, aperturaTransito: d.aperturaTransito||0,
+           compenso: d.compenso, transViejo: transViejo, descargos: descargos, ajuste: ajuste,
+           total: total, resto: d.resto };
+}
 // Cargos de tarjeta del estado de cuenta, agrupados por concepto. Es lo que el banco se quedó y nunca va
 // a acreditar, así que queda en Caja General porque la venta entró bruta.
 function cargosTarjetaPorBanco(){
@@ -6782,6 +6864,7 @@ function desgloseSaldoCajaHtml(){
             "bancarios va por los cargos del estado, no por el residuo.") + '</div>';
     }
   }
+  if(Math.abs(d.resto) >= 1) h += pistasResiduoHtml(d);
   // Lo que falta depende del mes. Cuando el residuo es cero, decirle que salde retenciones contra gastos
   // bancarios lo manda a hacer un asiento que descuadraria la cuenta.
   var pasos = [];
@@ -6793,6 +6876,63 @@ function desgloseSaldoCajaHtml(){
     (pasos.length ? pasos.join('; ') + '. ' : '') +
     'Lo demás se corrige solo al acreditar Caja General el día que el banco compensa, no el día del depósito.</div>';
   return cerrar(h);
+}
+// El cuadro de "donde buscar": el residuo abierto dia por dia, de mayor a menor, y los asientos que no
+// son ni venta ni deposito. Es lo que responde "por donde empiezo".
+function pistasResiduoHtml(d){
+  var p = pistasResiduo();
+  if(!p) return "";
+  var MAX = 12;
+  var h = '<div class="dif-sub">Dónde buscar' +
+    '<span>El residuo, día por día, con la aritmética del navegador de Caja General: lo que entró, lo que ' +
+    'salió y lo que quedó en tránsito ese día. <b>Un día normal deja solo la retención de tarjeta</b> — la venta ' +
+    'entra bruta y el depósito sale neto —, así que al lado va la retención que dice el informe de VISA. ' +
+    'El día donde «sin explicar» no se le parece es el que hay que mirar. Están ordenados de mayor a menor: ' +
+    'empezá por arriba. <b>Ojo con el desfase de un día</b>: el depósito de la venta de un día suele asentarse al ' +
+    'siguiente, así que un día puede salir con un hueco y el otro con el mismo sobrante — esos dos se cancelan ' +
+    'entre sí y no hay nada que buscar ahí.</span></div>';
+  h += '<table class="dif-tabla"><thead><tr><th>Día</th><th>Comprobante</th><th class="num">Entró</th>' +
+       '<th class="num">Salió</th><th class="num">Quedó en tránsito</th><th class="num">Sin explicar</th>' +
+       '<th class="num">Retención del informe</th></tr></thead><tbody>';
+  if(Math.abs(p.apertura) > 0.005){
+    h += '<tr><td colspan="5">Con lo que abrió el mes: apertura en tránsito B/ '+fmt(p.aperturaTransito)+
+         (p.compenso > 0.005 ? ', menos B/ '+fmt(p.compenso)+' que ya compensó y falta descargar' : '') +
+         (Math.abs(p.transViejo) > 0.005 ? ', menos B/ '+fmt(p.transViejo)+' que sigue en tránsito de meses anteriores' : '') +
+         (Math.abs(p.descargos) > 0.005 ? ', menos B/ '+fmt(p.descargos)+' que ya se descargó con su asiento' : '') +
+         '</td><td class="num"><b>'+fmt(p.apertura)+'</b></td><td></td></tr>';
+  }
+  if(Math.abs(p.ajuste) > 0.005){
+    h += '<tr><td colspan="5">Ajustes de apertura que el navegador ya trae dentro del saldo inicial</td>' +
+         '<td class="num"><b>'+fmt(p.ajuste)+'</b></td><td></td></tr>';
+  }
+  p.dias.slice(0, MAX).forEach(function(x){
+    h += '<tr><td>'+esc(x.fecha)+'</td><td>'+esc(x.ref||"")+'</td><td class="num">'+fmt(x.deb)+'</td>' +
+         '<td class="num">'+fmt(x.cred)+'</td><td class="num">'+(x.transito ? fmt(x.transito) : "—")+'</td>' +
+         '<td class="num"><b>'+fmt(x.sinExplicar)+'</b></td>' +
+         '<td class="num">'+(x.retencion ? fmt(x.retencion) : "—")+'</td></tr>';
+  });
+  if(p.dias.length > MAX){
+    var rst = Math.round(p.dias.slice(MAX).reduce(function(a, x){ return a + x.sinExplicar; }, 0)*100)/100;
+    h += '<tr><td colspan="5">Otros '+(p.dias.length-MAX)+' día(s), todos menores</td><td class="num"><b>'+fmt(rst)+'</b></td><td></td></tr>';
+  }
+  h += '<tr class="tot"><td colspan="5">Total</td><td class="num">'+fmt(p.total)+'</td><td></td></tr></tbody></table>';
+  if(Math.abs(p.ajuste) > 0.005){
+    h += '<div class="cg-note">El renglón de ajustes de apertura sale de asientos que el navegador ya trae dentro ' +
+      'de su saldo inicial y además asienta como línea del mes — el típico «ajusta saldo errado de Caja General» ' +
+      'del primer día. Está contado dos veces, y por eso se resta acá: se cancela con el día que lo muestra arriba.</div>';
+  }
+  if(p.otros.length){
+    h += '<div class="cg-note"><b>Asientos que no son la venta del día ni un depósito.</b> Entran a Caja General ' +
+         'y no salen por el banco, así que ningún paso los coteja y se quedan en el saldo hasta que alguien los revisa.</div>';
+    h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Comprobante</th><th>Asiento</th><th class="num">Débito</th></tr></thead><tbody>';
+    p.otros.slice(0, 10).forEach(function(x){
+      h += '<tr><td>'+esc(x.fecha)+'</td><td>'+esc(x.ref||"")+'</td><td>'+esc(x.descripcion.slice(0, 60))+
+           '</td><td class="num">'+fmt(x.monto)+'</td></tr>';
+    });
+    if(p.otros.length > 10) h += '<tr><td colspan="4">… y '+(p.otros.length-10)+' más</td></tr>';
+    h += '</tbody></table>';
+  }
+  return h;
 }
 function cierreCajaHtml(){
   var tm = transitoPorMetodo();
