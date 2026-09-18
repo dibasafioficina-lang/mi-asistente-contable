@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.03";
+var APP_VERSION="2026.10.04";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -6713,7 +6713,12 @@ function desgloseSaldoCajaHtml(){
   }
   if(!d) return "";
   var abiertas = rojasAbiertas();
-  var dif = Math.round((d.final - d.totalResumen)*100)/100;
+  /* El saldo de Caja General se compara contra el transito que sigue DENTRO de la cuenta, la misma vara que
+     usa el cuadre de apertura del mes siguiente. Comparar contra el total del resumen (que incluye lo ya
+     acreditado al depositar) pedia cerrar el mes con un saldo que al mes siguiente no cuadraba: en febrero de
+     2026 la apertura vino en 6,755.43 —el resumen completo— cuando dentro de la cuenta quedaban 2,650.04, y
+     los 4,105.39 de diferencia eran justo las partidas ya acreditadas. */
+  var dif = Math.round((d.final - d.transito)*100)/100;
   var ok = Math.abs(dif) < 0.01;
   function fila(lbl, val, nota){
     return '<div class="cg-row"><span>'+lbl+(nota?' <i class="cg-src">'+nota+'</i>':"")+'</span><b>B/ '+fmt(val)+'</b></div>';
@@ -6727,11 +6732,19 @@ function desgloseSaldoCajaHtml(){
     (abiertas ? '<div class="cg-note cg-prov">Todavía hay '+abiertas+' diferencia(s) sin resolver en la conciliación: ' +
       'estas cifras son provisionales hasta que cierren.</div>' : '') +
     '<div class="cg-row"><span>Saldo final del sistema'+(d.fecha?' <i class="cg-src">'+d.fecha+'</i>':"")+'</span><b>B/ '+fmt(d.final)+'</b></div>' +
-    '<div class="cg-row"><span>En tránsito al cierre <i class="cg-src">'+d.n+' partida(s)</i></span><b>B/ '+fmt(d.totalResumen)+'</b></div>' +
+    '<div class="cg-row"><span>En tránsito que sigue dentro de Caja General</span><b>B/ '+fmt(d.transito)+'</b></div>' +
+    (Math.abs(d.soloBanco) > 0.005
+      ? '<div class="cg-row"><span>Ya acreditado en Caja General, en tránsito del lado del banco <i class="cg-src">viaja en el resumen, no está en la cuenta</i></span><b>B/ '+fmt(d.soloBanco)+'</b></div>' +
+        '<div class="cg-row"><span>Total del resumen en tránsito <i class="cg-src">'+d.n+' partida(s)</i></span><b>B/ '+fmt(d.totalResumen)+'</b></div>'
+      : '') +
     '<div class="cg-row cg-dif"><span>Diferencia</span><b style="color:'+(ok?"var(--ok)":"#B54B4B")+'">'+(ok?"✓ Coincide":"B/ "+fmt(dif))+'</b></div>';
   if(ok){
-    return cerrar(h + '<div class="cg-note">El saldo de la cuenta es exactamente lo que queda por compensar en el banco: ' +
-      'es lo que se espera cuando el crédito a Caja General se registra al compensar, no al depositar.</div>');
+    return cerrar(h + '<div class="cg-note">El saldo de la cuenta es exactamente el tránsito que sigue dentro de ella, ' +
+      'así que el mes que viene la apertura va a cuadrar con el resumen. ' +
+      (Math.abs(d.soloBanco) > 0.005
+        ? 'Lo ya acreditado al depositar (B/ '+fmt(d.soloBanco)+') viaja en el resumen para que el banco lo confirme, pero no ' +
+          'forma parte del saldo: <b>no lo sumes al cerrar</b>.'
+        : '') + '</div>');
   }
   h += '<div class="cg-h" style="margin-top:16px">De qué se compone la diferencia</div>';
   // (1) Partidas que venian en transito, el banco YA las acredito y nadie hizo el asiento que las saca de
@@ -6774,13 +6787,13 @@ function desgloseSaldoCajaHtml(){
     }
   }
 
-  // (1) Efectivo que sigue en tránsito pero cuyo asiento ya salió de Caja General.
+  // (1) Efectivo que sigue en transito pero cuyo asiento ya salio de Caja General. NO es un componente de la
+  // diferencia —el renglon de arriba ya lo separa del saldo—, pero se lista para saber cuales son.
   var ya = partidasYaAcreditadas();
   if(Math.abs(d.soloBanco) > 0.005){
-    nBloque++;
-    h += '<div class="dif-sub">'+nBloque+' · En tránsito pero ya acreditado en Caja General <b>B/ '+fmt(-d.soloBanco)+'</b>' +
-      '<span>El asiento del depósito se hizo el día que se entregó al banco, así que ya no está en la cuenta. ' +
-      'Se corrige solo cuando el crédito se registre al compensar.</span></div>';
+    h += '<div class="dif-sub">Aparte: en tránsito pero ya acreditado en Caja General <b>B/ '+fmt(d.soloBanco)+'</b>' +
+      '<span>El asiento del depósito se hizo el día que se entregó al banco, así que estas partidas ya salieron ' +
+      'de la cuenta y no explican la diferencia. Viajan en el resumen hasta que el banco las refleje.</span></div>';
     if(ya.length){ h += '<table class="dif-tabla"><thead><tr><th>Fecha</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
     ya.forEach(function(x){
       h += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+esc(String(x.concepto||"").slice(0,44))+
@@ -7441,8 +7454,11 @@ function ajustesDeApertura(diarioCaja, fechaInicial){
 function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG, diarioCaja){
   if(!transitoPrevio || !transitoPrevio.length) return null;
   if(!saldoCG || saldoCG.inicial==null) return null;
-  var dentro = [], fuera = [];
-  transitoPrevio.forEach(function(t){ (pasaPorCajaGeneral(t) ? dentro : fuera).push(t); });
+  var dentro = [], fuera = [], acreditadas = [];
+  transitoPrevio.forEach(function(t){
+    if(pasaPorCajaGeneral(t)) dentro.push(t);
+    else { fuera.push(t); if(t.creditoCG==="hecho") acreditadas.push(t); }
+  });
   function suma(arr){ return Math.round(arr.reduce(function(a,t){ return a+t.monto; },0)*100)/100; }
   var total = suma(dentro);
   var porBanco = {};
@@ -7454,6 +7470,10 @@ function cuadreSaldoInicialPaso0(transitoPrevio, saldoCG, diarioCaja){
   var dif = Math.round((total - apertura)*100)/100;
   return { saldoInicial: saldoCG.inicial, fecha: saldoCG.fechaInicial, total: total, n: dentro.length,
            totalFuera: suma(fuera), nFuera: fuera.length, porBanco: porBanco,
+           // Lo que el resumen trae con su credito a Caja General YA hecho: no suma a la apertura, y cuando la
+           // diferencia es justo eso, el saldo de cierre del mes pasado se dejo en el total del resumen.
+           totalAcreditadas: suma(acreditadas), nAcreditadas: acreditadas.length,
+           esResumenCompleto: acreditadas.length > 0 && Math.abs(apertura - (total + suma(acreditadas))) < 0.01,
            ajustes: aj, totalAjustes: totalAj, apertura: apertura,
            dif: dif, ok: Math.abs(dif) < 0.01 };
 }
@@ -7504,6 +7524,8 @@ function ajusteHtml(c, yaHechos){
     '<div class="per-title" style="color:#4A3C63">✎ Asiento de ajuste sugerido</div>' +
     '<p class="per-txt">' + (c.apertura < 0
       ? 'El saldo de apertura está en la columna equivocada, así que el ajuste va acá — no hay nada que corregir en el resumen del Paso 0.'
+      : c.esResumenCompleto
+      ? 'El resumen del Paso 0 está bien: la diferencia es lo que ya se había acreditado en Caja General al depositar. El saldo de apertura es el que hay que corregir, con este asiento.'
       : 'Primero revisá el resumen del Paso 0. <b>Si confirmás que está completo</b>, entonces el descuadre es del navegador y se corrige con este asiento.') +
     '</p>' +
     '<table class="per-tabla"><tbody>' +
@@ -7536,8 +7558,22 @@ function cuadreSaldoIniHtml(c){
     return '<tr><td>'+esc(b)+'</td><td class="per-rango">B/ '+fmt(c.porBanco[b])+'</td></tr>';
   }).join("");
   var partidas = c.n===1 ? "1 partida" : c.n+" partidas";
-  var excluidas = c.nFuera
-    ? '<p class="per-nota">No se '+(c.nFuera===1?'cuenta 1 cheque':'cuentan '+c.nFuera+' cheques')+' en circulación por B/ '+fmt(c.totalFuera)+
+  // El caso mas comun de descuadre: el saldo de cierre del mes pasado se ajusto al TOTAL del resumen en vez
+  // de a lo que sigue dentro de la cuenta. La diferencia es exactamente lo que ya se habia acreditado.
+  var yaAcred = c.nAcreditadas
+    ? '<p class="per-nota">El resumen trae '+(c.nAcreditadas===1?'1 partida':c.nAcreditadas+' partidas')+' por B/ '+fmt(c.totalAcreditadas)+
+      ' cuyo <b>crédito a Caja General ya se hizo</b> al registrar el depósito (cheques y Brinks). Esas viajan en el resumen ' +
+      'porque el banco todavía no las reflejó, pero <b>ya salieron de la cuenta</b>: no suman al saldo de apertura.</p>'
+    : "";
+  var completo = c.esResumenCompleto
+    ? '<p class="per-txt" style="margin-top:8px"><b>La diferencia es exactamente eso.</b> El saldo de apertura es el resumen ' +
+      'COMPLETO (B/ '+fmt(c.total)+' + B/ '+fmt(c.totalAcreditadas)+'), así que el mes pasado el saldo de cierre se dejó en el total ' +
+      'del resumen en vez de en lo que sigue dentro de la cuenta. El cierre del mes anterior debió quedar en <b>B/ '+fmt(c.total)+'</b>: ' +
+      'revisá si se registró un ajuste de más al cerrar.</p>'
+    : "";
+  var nCirc = c.nFuera - c.nAcreditadas, totalCirc = Math.round((c.totalFuera - c.totalAcreditadas)*100)/100;
+  var excluidas = nCirc > 0
+    ? '<p class="per-nota">No se '+(nCirc===1?'cuenta 1 cheque':'cuentan '+nCirc+' cheques')+' en circulación por B/ '+fmt(totalCirc)+
       ': son pagos que salen de la cuenta bancaria y nunca pasan por Caja General.</p>'
     : "";
   // Ajustes de apertura ya asentados: se muestran siempre, cuadre o no, para que se vea de dónde sale la cifra.
@@ -7558,13 +7594,15 @@ function cuadreSaldoIniHtml(c){
           '<tr><td><b>Saldo de apertura</b></td><td class="per-rango"><b>B/ '+fmt(c.apertura)+'</b></td></tr>' +
           '</tbody></table>'
         : '') +
-      excluidas + '</div>';
+      yaAcred + excluidas + '</div>';
   }
   var faltan = c.dif < 0; // el resumen suma MENOS que el saldo: le faltan partidas
   return '<div class="per-panel per-grave">' +
     '<div class="per-title">⛔ El Paso 0 no cuadra con el saldo inicial de Caja General</div>' +
-    '<p class="per-txt">El saldo de Caja General al arrancar el mes es lo que quedó en tránsito del mes anterior, ' +
-    'así que tiene que ser igual al total del resumen del Paso 0.</p>' +
+    '<p class="per-txt">El saldo de Caja General al arrancar el mes es el tránsito del mes anterior <b>que todavía sigue ' +
+    'dentro de la cuenta</b>: las partidas cuyo crédito a Caja General aún no se hizo. No es el total del resumen — ' +
+    'lo que ya se acreditó al depositar viaja en el resumen, pero ya salió de la cuenta.</p>' +
+    completo + yaAcred +
     '<table class="per-tabla"><tbody>' +
       '<tr><td>Balance Inicial del navegador'+(c.fecha?' <span class="per-arch">'+c.fecha+'</span>':'')+'</td>' +
         '<td class="per-rango">B/ '+fmt(c.saldoInicial)+'</td></tr>' + filasAj +
@@ -7576,7 +7614,7 @@ function cuadreSaldoIniHtml(c){
     '</tbody></table>' + excluidas +
     // Con el saldo en negativo el error está del lado del navegador, no del resumen: no tiene sentido
     // mandar a buscar partidas que sobran cuando lo que hay es un saldo mal ubicado.
-    (c.apertura < 0 ? '' : '<p class="per-nota">' + (faltan
+    (c.apertura < 0 || c.esResumenCompleto ? '' : '<p class="per-nota">' + (faltan
       ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Revisá si quedó alguna partida sin anotar — lo más común es una fila de tarjeta (clave/visa) sin monto o un depósito de los últimos días del mes anterior.'
       : '<b>El resumen trae B/ '+fmt(Math.abs(c.dif))+' de más.</b> Revisá si hay una partida repetida, una que ya había compensado antes, o alguna que no debería estar (un pago, no un depósito).') +
     '</p>') +
@@ -7585,6 +7623,8 @@ function cuadreSaldoIniHtml(c){
       : '') +
     '<p class="per-nota">' + (c.apertura < 0
       ? 'La conciliación corre igual: empareja partida por partida y no usa este saldo. Pero mientras no se registre el ajuste, el saldo de apertura de Caja General queda mal y el descuadre se arrastra al cierre.'
+      : c.esResumenCompleto
+      ? 'La conciliación corre igual: el resumen está bien y empareja partida por partida. Lo que hay que corregir es el <b>saldo de apertura</b>, con el asiento de abajo; si no, este mismo descuadre va a reaparecer todos los meses.'
       : 'La conciliación corre igual, pero mientras esto no cuadre <b>el resumen está incompleto</b>: lo que le falte va a aparecer como diferencia en los pasos siguientes, y lo que le sobre va a quedar como "pendiente de compensar" para siempre.') +
     '</p>' +
   '</div>';
@@ -7665,7 +7705,12 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
         concepto:"La apertura de Caja General no cuadra con el resumen", comprobante:"", motivo:"saldo inicial distinto del tránsito",
         texto:"Caja General abre el mes con B/ " + fmt(cuadreAp.apertura) + " y las partidas del resumen que siguen dentro de la cuenta suman B/ " +
               fmt(cuadreAp.total) + " (diferencia B/ " + fmt(cuadreAp.dif) + "). " +
-              (cuadreAp.dif > 0
+              (cuadreAp.esResumenCompleto
+                ? "La diferencia es exactamente las " + cuadreAp.nAcreditadas + " partida(s) por B/ " + fmt(cuadreAp.totalAcreditadas) +
+                  " cuyo crédito a Caja General ya se hizo al depositar: esas viajan en el resumen porque el banco no las reflejó, " +
+                  "pero ya salieron de la cuenta. El mes pasado el saldo de cierre se dejó en el total del resumen en vez de en el " +
+                  "tránsito que sigue dentro; debió quedar en B/ " + fmt(cuadreAp.total) + "."
+                : cuadreAp.dif > 0
                 ? "La cuenta abre con menos de lo que el resumen dice que quedó pendiente: o al resumen le sobran partidas que ya compensaron, o falta el ajuste de apertura."
                 : "La cuenta trae de más: son partidas de meses anteriores que compensaron y nunca se descargaron.") +
               " El panel del saldo trae el asiento de ajuste.",

@@ -1429,12 +1429,15 @@ test("la tolerancia máxima es 0.03", () => {
   eq(TOLERANCIA_MAX, 0.03);
 });
 
-/* ---- El saldo de Caja General tiene que SER el tránsito ----
-   Decisión de Diba: el crédito a la cuenta se registra cuando el banco compensa, no el día del depósito.
-   Con eso el saldo al cierre es exactamente lo que queda por compensar. El control lo verifica. */
-test("cuando el saldo iguala al tránsito, el control da verde", () => {
+/* ---- El saldo de Caja General tiene que SER el tránsito que sigue DENTRO de la cuenta ----
+   Una sola vara para las dos puntas del mes: la misma que usa el cuadre de apertura del mes siguiente. Lo que
+   se acreditó el día del depósito (cheques, Brinks, y todo lo que el Paso 2 ve como crédito de Caja General)
+   viaja en el resumen para que el banco lo confirme, pero YA SALIÓ de la cuenta y no suma al saldo. Cerrar el
+   mes con el total del resumen deja la apertura del mes siguiente descuadrada por esa diferencia — le pasó a
+   febrero de 2026, que abrió en 6,755.43 con 2,650.04 adentro. */
+test("cuando el saldo iguala al tránsito que sigue dentro de la cuenta, el control da verde", () => {
   STATE.transitoPrevio = null; STATE.diarioCaja = null;
-  STATE.saldoCajaGeneral = { inicial: 2650.04, final: 4221.14, fechaFinal: "2026-01-31" };
+  STATE.saldoCajaGeneral = { inicial: 2650.04, final: 2650.04, fechaFinal: "2026-01-31" };
   STATE.results = {
     paso0: [{ clase: "en_transito", motivo: "aún pendiente", banco: "Banistmo", fecha: "2025-12-22", monto: 2650.04, concepto: "cheque", texto: "x" }],
     paso2: [{ clase: "en_transito", motivo: "último día del mes", banco: "STG", fecha: "2026-01-31", monto: 1571.10, concepto: "tarjeta", texto: "x" }]
@@ -1442,6 +1445,11 @@ test("cuando el saldo iguala al tránsito, el control da verde", () => {
   const h = desgloseSaldoCajaHtml();
   if (h.indexOf("Coincide") < 0) throw new Error("debería dar verde");
   if (h.indexOf("Qué falta para que cuadre") >= 0) throw new Error("no debería pedir asientos");
+  if (h.indexOf("no lo sumes al cerrar") < 0) throw new Error("tiene que decir que lo ya acreditado no suma al saldo");
+  // Cerrar con el total del resumen (2,650.04 + 1,571.10) ya NO da verde: es lo que descuadraba la apertura.
+  STATE.saldoCajaGeneral = { inicial: 2650.04, final: 4221.14, fechaFinal: "2026-01-31" };
+  const h2 = desgloseSaldoCajaHtml();
+  if (h2.indexOf("Coincide") >= 0) throw new Error("el total del resumen no es el saldo de la cuenta");
 });
 
 test("cuando no coincide, dice de qué se compone la diferencia", () => {
@@ -1465,9 +1473,15 @@ test("cuando no coincide, dice de qué se compone la diferencia", () => {
   cerca(d.final - d.compenso + d.soloBanco - d.resto, d.totalResumen, "el puente cierra");
   const h = desgloseSaldoCajaHtml();
   if (h.indexOf("Coincide") >= 0) throw new Error("no debería dar verde");
-  ["13,003.97", "-2,925.35", "2,537.25", "Qué falta para que cuadre"].forEach(function(t){
+  ["13,003.97", "2,925.35", "2,537.25", "Qué falta para que cuadre"].forEach(function(t){
     if (h.indexOf(t) < 0) throw new Error("falta en el desglose: " + t);
   });
+  // Lo ya acreditado se muestra aparte, no como componente de la diferencia.
+  if (h.indexOf("Aparte: en tránsito pero ya acreditado") < 0) throw new Error("tiene que ir aparte");
+  // La diferencia es contra lo que sigue DENTRO de la cuenta (2,650.04), no contra el resumen completo.
+  // La diferencia se compone de lo que compensó y falta descargar, el arrastre y el residuo: lo ya
+  // acreditado quedó fuera porque nunca estuvo en el saldo.
+  cerca(d.final - d.transito, d.compenso + d.arrastre + d.resto, "la diferencia usa la misma vara que la apertura del mes siguiente");
 });
 
 test("el detalle lista las partidas que ya salieron de Caja General", () => {
@@ -3228,6 +3242,32 @@ test("el descargo del mes anterior no aparece como un hueco del día: se emparej
   eq(p.dias.length, 0, "el día del descargo no queda con un hueco");
   cerca(p.descargos, 500.00);
   cerca(p.total, desgloseSaldoCaja().resto);
+});
+
+test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había acreditado (febrero 2026)", () => {
+  // Caso real: el resumen de enero trae 18 partidas por 6,755.43, de las cuales 15 (B/ 4,105.39) ya tenían su
+  // crédito en Caja General. La cuenta abrió febrero con el total del resumen en vez de con los 2,650.04
+  // que seguían adentro.
+  const transito = [
+    { fecha: "2025-12-22", banco: "Banistmo", monto: 435.71, concepto: "cheque en transito", sentido: "credito", creditoCG: "pendiente" },
+    { fecha: "2025-12-22", banco: "Banistmo", monto: 2208.48, concepto: "cheque en transito", sentido: "credito", creditoCG: "pendiente" },
+    { fecha: "2025-12-06", banco: "STG", monto: 5.85, concepto: "deposito en transito", sentido: "credito", creditoCG: "pendiente" },
+    { fecha: "2026-01-28", banco: "STG", monto: 405.00, concepto: "DEPOSITO BRINKS DEL 28/01/2026", sentido: "credito", creditoCG: "hecho" },
+    { fecha: "2026-01-31", banco: "Banistmo", monto: 3700.39, concepto: "Cheque (detalle individual)", sentido: "credito", creditoCG: "hecho" }
+  ];
+  const saldo = { inicial: 6755.43, final: 0, fechaInicial: "2026-02-01", fechaFinal: "2026-02-28" };
+  const c = cuadreSaldoInicialPaso0(transito, saldo, []);
+  eq(c.ok, false);
+  cerca(c.total, 2650.04, "solo lo que sigue dentro de la cuenta");
+  cerca(c.totalAcreditadas, 4105.39);
+  eq(c.nAcreditadas, 2);
+  eq(c.esResumenCompleto, true, "la apertura es el resumen completo");
+  const h = cuadreSaldoIniHtml(c);
+  if (h.indexOf("La diferencia es exactamente eso") < 0) throw new Error("tiene que decirlo: " + h.slice(0, 400));
+  if (h.indexOf("2,650.04") < 0) throw new Error("y decir en cuánto debió cerrar el mes pasado");
+  // Con la apertura correcta, cuadra.
+  const c2 = cuadreSaldoInicialPaso0(transito, { inicial: 2650.04, fechaInicial: "2026-02-01" }, []);
+  eq(c2.ok, true);
 });
 
 /* --- resumen --- */
