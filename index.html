@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.05";
+var APP_VERSION="2026.10.06";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2873,7 +2873,7 @@ function hallazgoDescargo(banco, fecha, monto, desc, dsc, comprobante, fuente, l
            (comprobante ? " · Comprobante " + comprobante : ""),
     fuente: fuente };
 }
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio){
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio, diariosBanco){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
@@ -3214,6 +3214,44 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           var c = esBrinks(d.descripcion) ? buscarBrinks(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
           if(!c) c = combinacionMasCercana(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
           if(c){ c.forEach(function(i){ candEf[i].usado = true; }); d.usado = true; }
+        });
+        /* Deposito MIXTO: Brinks retira el efectivo de Caja General junto con otra plata que no pasa por
+           Caja General (la caja menuda que los duenos prestan, registrada solo en el diario del banco) y el
+           banco lo acredita en una sola linea. Caso real: el 04-feb-2026 STG acredito 4,465.00 = 265.00 del
+           Brinks del 02-feb + 4,200.00 del PDN-000000044. Buscando solo lineas iguales al efectivo, los 265.00
+           salian como "no aparece en el estado de cuenta". Solo se acepta si el resto esta EXPLICADO por
+           debitos del diario del banco que no vienen de Caja General (sin comprobante ME- del navegador): un
+           resto sin explicar no alcanza, o cualquier deposito grande se tragaria cualquier efectivo chico. */
+        var diarioBk = (diariosBanco && diariosBanco[bancoEf]) || [];
+        var refsCaja = {};
+        diarioCaja.forEach(function(x){ var r = refME(x.referencia); if(r) refsCaja[r] = true; });
+        var ajenos = diarioBk.filter(function(x){ return x.debito>0 && !refsCaja[refME(x.referencia)]; })
+          .map(function(x){ return { fecha:x.fecha, monto:x.debito, descripcion:x.descripcion, referencia:x.referencia, usado:false }; });
+        var mixtos = [];
+        if(ajenos.length) poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          for(var i=0;i<candEf.length;i++){
+            var e = candEf[i];
+            if(e.usado || e.fecha < d.fecha || e.monto - d.monto <= tolerancia) continue;
+            if(distanciaBancaria(d.fecha, e.fecha) > Math.max(ventanaDias, 10)) continue;
+            var otros = buscarSubsetSuma(ajenos, e.fecha, Math.round((e.monto - d.monto)*100)/100, Math.max(ventanaDias, 10), tolerancia, 3, "atras");
+            if(!otros) continue;
+            otros.forEach(function(k){ ajenos[k].usado = true; });
+            e.usado = true; d.usado = true;
+            mixtos.push({ d:d, e:e, otros: otros.map(function(k){ return ajenos[k]; }) });
+            return;
+          }
+        });
+        mixtos.forEach(function(m){
+          var desc = String(m.d.descripcion||"").trim();
+          hallazgos.push({ fecha:m.d.fecha, banco:bancoEf, monto:m.d.monto, clase:"informativo", concepto:desc,
+            comprobante: refME(m.d.src.referencia), motivo:"compensó en un depósito mixto",
+            texto: bancoEf + " " + m.d.fecha + ": el efectivo de B/ " + fmt(m.d.monto) + " (\"" + desc + "\") compensó el " + m.e.fecha +
+                   " dentro de un depósito de B/ " + fmt(m.e.monto) + " (\"" + String(m.e.descripcion||"").trim() + "\"), junto con " +
+                   m.otros.map(function(o){ return "B/ " + fmt(o.monto) + " de " + (String(o.referencia||"").trim() || "otro asiento") +
+                     " (\"" + String(o.descripcion||"").trim().slice(0,50) + "\")"; }).join(" y ") +
+                   ", que está en el diario de " + bancoEf + " y no pasa por Caja General. No hay nada que registrar." + refComprobante(m.d.src.referencia),
+            fuente: "Diario Caja General / Diario " + bancoEf + " / Estado de cuenta " + bancoEf });
         });
         poolEstEf.forEach(function(e){ if(e.usado) e.ref.usado = true; });
         poolDiaEf.forEach(function(d){
@@ -3601,7 +3639,9 @@ var PASO_OPCIONALES = {
   paso0: ["estBanistmo","estStg","estBancoGeneral"],
   // retVisa: para el neto VISA. reporte: para el desglose individual de cheques (2ª pestaña).
   // transitoPrevio: para apartar las líneas del estado que compensan partidas del mes anterior.
-  paso2: ["estBancoGeneral","retVisa","reporte","transitoPrevio"],
+  // diarios de banco: para reconocer el deposito mixto (el banco acredita el efectivo de Caja General junto
+  // con un deposito que solo esta en el diario del banco, como la caja menuda).
+  paso2: ["estBancoGeneral","retVisa","reporte","transitoPrevio","diarioBanistmo","diarioStg","diarioBancoGeneral"],
   // diarioCaja es opcional en Paso 3 solo para leer su saldo inicial (contexto de partidas en tránsito).
   // transitoPrevio: cheques del Paso 0, para no marcar como diferencia lo que compensa cheques anteriores.
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja","transitoPrevio"]
@@ -3728,7 +3768,13 @@ function computaPaso(pasoKey, raws, opts){
     STATE.chequesDetalle = chequesDet;   // el desglose del saldo los cruza contra los creditos CK del diario
     var reporteCajas = raws.reporte ? parseReporteConsolidado(raws.reporte) : null;
     var trPrev2 = transitoPrevioDe(raws);
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2);
+    var diariosBanco = {};
+    try{
+      if(raws.diarioBanistmo) diariosBanco["Banistmo"] = parseDiario(raws.diarioBanistmo, "Banistmo");
+      if(raws.diarioStg) diariosBanco["STG"] = parseDiario(raws.diarioStg, null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
+      if(raws.diarioBancoGeneral) diariosBanco["Banco General"] = parseDiario(raws.diarioBancoGeneral, null);
+    }catch(e){}
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2, diariosBanco);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;

@@ -3004,6 +3004,32 @@ test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   eq(h.filter(function(x){ return x.clase === "diff" && /efectivo/i.test(x.texto || ""); }).length, 2, "Brinks y ventanilla sin credito en el banco");
 });
 
+test("el efectivo que el banco acredita junto con un deposito ajeno a Caja General compensa (deposito mixto)", () => {
+  // 04-feb-2026: STG acredito 4,465.00 = 265.00 del Brinks del 02-feb + 4,200.00 de caja menuda (PDN-000000044),
+  // que esta solo en el diario del banco. Los 265.00 salian como "no aparece en el estado de cuenta".
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-02-02", tipo: "BRINK", monto: 265.00 }];
+  const cg = [lineaCG("2026-02-02", "DEPOSITO BRINKS DEL 02/02/2026", 265.00)];
+  cg[0].referencia = "ME-00000001855";
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-02-01", null)), 0);
+  const estS = function(){ return [{ fecha: "2026-02-04", descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 030226 David", credito: 4465.00, debito: 0, fila: 2 }]; };
+  const diarioStg = [
+    { fecha: "2026-02-02", debito: 265.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 02/02/2026", referencia: "ME-00000001855", fila: 3 },
+    { fecha: "2026-02-04", debito: 4200.00, credito: 0, descripcion: "dueños/préstamo interno - caja menuda", referencia: "PDN-000000044", fila: 4 }
+  ];
+  const h = paso2(cg, [], estS(), null, null, null, 7, 0.01, null, null, { STG: diarioStg });
+  eq(contarRojas(h), 0, "compensa dentro del deposito mixto");
+  const m = h.filter(function(x){ return x.motivo === "compensó en un depósito mixto"; });
+  eq(m.length, 1);
+  ["4,465.00", "4,200.00", "PDN-000000044"].forEach(function(s){ if (m[0].texto.indexOf(s) < 0) throw new Error("al texto le falta " + s); });
+
+  // Sin el diario del banco el resto no esta explicado: sigue siendo diferencia.
+  eq(contarRojas(paso2(cg, [], estS(), null, null, null, 7, 0.01, null, null)), 1, "sin diario, no se adivina");
+  // Si el resto lo explica un asiento que SI esta en Caja General (otro deposito del navegador), tampoco.
+  const diario2 = [{ fecha: "2026-02-04", debito: 4200.00, credito: 0, descripcion: "DEPOSITO", referencia: "ME-00000001855", fila: 4 }];
+  eq(contarRojas(paso2(cg, [], estS(), null, null, null, 7, 0.01, null, null, { STG: diario2 })), 1, "el resto tiene que ser ajeno a Caja General");
+});
+
 test("el Paso 4 no usa una remision VISA que el Paso 2 asigno a otra venta", () => {
   STATE.decisiones = {};
   const estStg = function(){ return [{ fecha: "2026-03-11", descripcion: "Remisión V/Mc 016005605", credito: 95.00, debito: 0, fila: 5 }]; };
