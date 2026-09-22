@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.04";
+var APP_VERSION="2026.10.05";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -3651,6 +3651,32 @@ function computePasoResult(pasoKey, raws, opts){
   }
   return res;
 }
+/* ---- Partidas "ya acreditadas" que volvieron a entrar a Caja General ----
+   El resumen en transito guarda, partida por partida, si su credito a Caja General ya se hizo. Es una foto
+   del dia en que se bajo: si despues, en el mismo mes anterior, se registro el asiento de REINGRESO (debito a
+   Caja General por los depositos que se acreditaron al entregarlos y el banco todavia no reflejaba), esas
+   partidas volvieron a la cuenta y el resumen sigue diciendo "hecho". Paso en febrero de 2026: el 18-sep se
+   reingresaron en enero B/ 1,180.04 (ME-1853) y B/ 1,354.25 (ME-1854), Caja General abrio febrero con el
+   total del resumen (6,755.43) y el Paso 0 acusaba B/ 4,105.39 "de mas" que en realidad estaban bien.
+   El navegador del mes no trae las lineas del mes anterior, asi que la prueba es el saldo: si la apertura es
+   EXACTAMENTE el total de todas las partidas, las marcadas "hecho" estan dentro. Se corrigen aca, una vez,
+   para que el Paso 0, el descargo, el Paso 2 y el panel del saldo lean lo mismo. */
+function corregirAcreditadasReingresadas(tr, saldoCG, diarioCaja){
+  if(!tr || !tr.length) return tr;
+  var c = cuadreSaldoInicialPaso0(tr, saldoCG, diarioCaja);
+  if(!c || c.ok || !c.esResumenCompleto) return tr;
+  var n = 0, total = 0;
+  tr.forEach(function(t){
+    if(t.creditoCG !== "hecho") return;
+    t.creditoCG = "pendiente"; t.reingresada = true; n++; total += t.monto;
+  });
+  tr.reingresadas = { n: n, total: Math.round(total*100)/100 };
+  return tr;
+}
+function transitoPrevioDe(raws){
+  if(!raws.transitoPrevio) return null;
+  return corregirAcreditadasReingresadas(parseTransitoPrevio(raws.transitoPrevio), STATE.saldoCajaGeneral, STATE.diarioCaja);
+}
 function computaPaso(pasoKey, raws, opts){
   // La ventana de días se mide sobre los días con movimiento bancario, no sobre el calendario.
   fijarCalendarioBancario(raws);
@@ -3663,7 +3689,7 @@ function computaPaso(pasoKey, raws, opts){
   }
   if(pasoKey==="paso0"){
     if(!raws.transitoPrevio) return null; // único archivo requerido: el resumen en tránsito
-    var trPrev = parseTransitoPrevio(raws.transitoPrevio);
+    var trPrev = transitoPrevioDe(raws);
     STATE.transitoPrevio = trPrev; // lo usa el cuadre contra el saldo inicial de Caja General
     // Estados de cuenta opcionales: si no están, se valida contra vacío (todo queda en tránsito).
     var eB = raws.estBanistmo ? parseEstadoCuenta(raws.estBanistmo,"banistmo") : [];
@@ -3678,7 +3704,7 @@ function computaPaso(pasoKey, raws, opts){
     var apertura = STATE.saldoCajaGeneral ? STATE.saldoCajaGeneral.fechaInicial : null;
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"),
                  parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura,
-                 raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null);
+                 transitoPrevioDe(raws));
   }
   if(pasoKey==="paso2"){
     if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;
@@ -3701,7 +3727,7 @@ function computaPaso(pasoKey, raws, opts){
     var chequesDet = raws.reporte ? parseChequesDetalle(raws.reporte) : null;
     STATE.chequesDetalle = chequesDet;   // el desglose del saldo los cruza contra los creditos CK del diario
     var reporteCajas = raws.reporte ? parseReporteConsolidado(raws.reporte) : null;
-    var trPrev2 = raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null;
+    var trPrev2 = transitoPrevioDe(raws);
     return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2);
   }
   if(pasoKey==="paso3"){
@@ -3719,7 +3745,7 @@ function computaPaso(pasoKey, raws, opts){
     if(retVisaLista){ retVisaDia = {}; retVisaLista.forEach(function(d){ retVisaDia[d.fecha] = Math.abs(d.retenciones); }); }
     // Cheques en tránsito del mes anterior (Paso 0): si están, se usan para no marcar como diferencia
     // los depósitos de junio que en realidad compensan cheques de meses anteriores.
-    var transitoPrevio = raws.transitoPrevio ? parseTransitoPrevio(raws.transitoPrevio) : null;
+    var transitoPrevio = transitoPrevioDe(raws);
     if(transitoPrevio) STATE.transitoPrevio = transitoPrevio;
     var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio);
     // Validación VISA (antes Paso 4): chequeo independiente de que el neto VISA del informe tiene su
@@ -7696,7 +7722,12 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
         concepto:"Apertura de Caja General cuadrada", comprobante:"", motivo:"el saldo inicial es el tránsito que sigue en la cuenta",
         texto:"Caja General abre el mes con B/ " + fmt(cuadreAp.apertura) + " y las " + cuadreAp.n + " partida(s) del resumen que siguen dentro de la cuenta suman lo mismo" +
               (cuadreAp.nFuera ? " (otras " + cuadreAp.nFuera + " por B/ " + fmt(cuadreAp.totalFuera) + " ya estaban acreditadas)" : "") +
-              ". El mes arranca con el tránsito correcto.",
+              ". El mes arranca con el tránsito correcto." +
+              (transitoPrevio.reingresadas
+                ? " De esas, " + transitoPrevio.reingresadas.n + " por B/ " + fmt(transitoPrevio.reingresadas.total) +
+                  " el resumen las marca como «crédito ya hecho», pero el saldo muestra que volvieron a la cuenta con el asiento de" +
+                  " reingreso del cierre anterior: se tratan como dentro de Caja General y llevan su descargo al compensar."
+                : ""),
         fuente:"Resumen en tránsito del mes anterior / Diario Caja General"
       });
     } else {

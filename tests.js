@@ -3244,6 +3244,32 @@ test("el descargo del mes anterior no aparece como un hueco del día: se emparej
   cerca(p.total, desgloseSaldoCaja().resto);
 });
 
+test("las partidas acreditadas que se reingresaron en el cierre anterior cuentan como dentro de Caja General", () => {
+  // El resumen de enero de 2026 se bajo con 15 partidas "credito ya hecho" (4,105.39). Despues, en enero, se
+  // registro el reingreso (ME-1853 y ME-1854) y Caja General abrio febrero con el total del resumen: 6,755.43.
+  // El Paso 0 acusaba 4,105.39 "de mas" cada vez que se ejecutaba un paso, aunque la cuenta estaba bien.
+  const tr = [
+    { fecha: "2025-12-22", banco: "Banistmo", monto: 2644.19, concepto: "cheque en transito", creditoCG: "pendiente" },
+    { fecha: "2026-01-28", banco: "STG", monto: 405.00, concepto: "DEPOSITO BRINKS DEL 28/01/2026", creditoCG: "hecho" },
+    { fecha: "2026-01-30", banco: "Banistmo", monto: 230.31, concepto: "DEPOSITO POR TARJETA VISA BANISTMO", creditoCG: "hecho" }
+  ];
+  corregirAcreditadasReingresadas(tr, { inicial: 3279.50, fechaInicial: "2026-02-01" }, []);
+  eq(tr[1].creditoCG, "pendiente", "reingresada: vuelve a estar dentro");
+  eq(tr[2].reingresada, true);
+  cerca(tr.reingresadas.total, 635.31);
+  eq(cuadreSaldoInicialPaso0(tr, { inicial: 3279.50, fechaInicial: "2026-02-01" }, []).ok, true, "la apertura cuadra");
+
+  // Si la cuenta abre solo con las pendientes, el credito si se hizo: no se toca nada.
+  const tr2 = tr.map(function(x, i){ return Object.assign({}, x, { creditoCG: i ? "hecho" : "pendiente", reingresada: undefined }); });
+  corregirAcreditadasReingresadas(tr2, { inicial: 2644.19, fechaInicial: "2026-02-01" }, []);
+  eq(tr2[1].creditoCG, "hecho");
+  eq(tr2.reingresadas, undefined);
+  // Y si la apertura no es ninguna de las dos cosas, tampoco: el aviso tiene que salir.
+  const tr3 = tr.map(function(x, i){ return Object.assign({}, x, { creditoCG: i ? "hecho" : "pendiente" }); });
+  corregirAcreditadasReingresadas(tr3, { inicial: 5000, fechaInicial: "2026-02-01" }, []);
+  eq(tr3[1].creditoCG, "hecho");
+});
+
 test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había acreditado (febrero 2026)", () => {
   // Caso real: el resumen de enero trae 18 partidas por 6,755.43, de las cuales 15 (B/ 4,105.39) ya tenían su
   // crédito en Caja General. La cuenta abrió febrero con el total del resumen en vez de con los 2,650.04
