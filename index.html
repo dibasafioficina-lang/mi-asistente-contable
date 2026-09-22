@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.07";
+var APP_VERSION="2026.10.08";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -749,12 +749,34 @@ function daysBetween(iso1, iso2){
   var d1 = new Date(iso1+"T00:00:00"), d2 = new Date(iso2+"T00:00:00");
   return Math.abs((d1-d2)/86400000);
 }
+/* ---- El .xls que exporta el sistema contable es una pagina web ----
+   El navegador contable baja "Navegador_Contabilidad_Excel - <fecha>.xls", pero adentro no es un Excel:
+   es una tabla HTML con renglones en blanco al principio y sin declarar la codificacion (los acentos vienen
+   en Windows-1252). Leido como binario, SheetJS devolvia cada linea de HTML como una celda y la app lo
+   rechazaba como "archivo equivocado"; habia que abrirlo y guardarlo como .xlsx a mano. Ahora se reconoce
+   el HTML, se decodifica y se lee la tabla. */
+function esLibroHtml(bytes){
+  for(var i=0;i<bytes.length && i<4096;i++){
+    var c = bytes[i];
+    if(c===32 || c===9 || c===10 || c===13 || c===0xEF || c===0xBB || c===0xBF) continue;
+    return c===60;   // "<"
+  }
+  return false;
+}
+function decodificarTexto(bytes){
+  try{ return new TextDecoder("utf-8", {fatal:true}).decode(bytes); }
+  catch(e){ return new TextDecoder("windows-1252").decode(bytes); }
+}
+function leerLibro(bytes){
+  if(esLibroHtml(bytes)) return XLSX.read(decodificarTexto(bytes).trim(), {type:"string", cellDates:true});
+  return XLSX.read(bytes, {type:"array", cellDates:true});
+}
 function readWorkbook(file, cb){
   var reader = new FileReader();
   reader.onload = function(e){
     try{
       var data = new Uint8Array(e.target.result);
-      var wb = XLSX.read(data, {type:"array", cellDates:true});
+      var wb = leerLibro(data);
       var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, raw:true, defval:null});
       // Adjuntamos todas las hojas (ej. el reporte de cajeras trae una 2ª pestaña con el desglose de cheques).
       rows.hojas = {};

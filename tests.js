@@ -3351,6 +3351,27 @@ test("un descargo que ya esta en Caja General no se vuelve a pedir aunque no nom
   STATE.results = {}; STATE.diarioCaja = null;
 });
 
+test("el .xls del navegador contable (una pagina web) se lee tal cual viene", () => {
+  // El sistema exporta el navegador como HTML con extension .xls, sin charset y con los acentos en
+  // Windows-1252. Antes la app lo rechazaba como "archivo equivocado".
+  const html = "\n\n\t<table><tr><td colspan='12'><strong>Balance Inicial (2026-01-01):</strong></td><td>-B/ 2,469.06</td></tr>" +
+    "<tr><td></td><td>Account</td><td>Fecha</td><td>Referencia</td><td>Ref. Sec</td><td>Fuente</td><td>Descripción</td><td>Guardado Por</td>" +
+    "<td>Centro de Costos</td><td>OF</td><td>Contenedor</td><td>Acreedor</td><td>Proveedor</td><td>Débito</td><td>Crédito</td></tr>" +
+    "<tr><td></td><td>[1.1.8] Caja General</td><td>2026-01-30</td><td>ME-00000001853</td><td></td><td>MAN-ENTRY</td><td>DEPOSITO BRINKS DEL 30/01/2026</td>" +
+    "<td>ARELYS SALDAÑA</td><td></td><td></td><td></td><td></td><td></td><td>B/ 0.00</td><td>B/ 751.00</td></tr></table>";
+  const bytes = Uint8Array.from(Array.from(html).map(function(c){ return c.charCodeAt(0); }));   // latin-1, como viene
+  eq(esLibroHtml(bytes), true);
+  const wb = leerLibro(bytes);
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
+  eq(identificarArchivo(rows), "diarioCaja");
+  eq(validarArchivoParaCasilla("diarioCaja", rows), null, "entra en su casilla");
+  const d = parseDiario(rows, "Caja General");
+  eq(d.length, 1);
+  cerca(d[0].credito, 751.00);
+  // Un .xlsx de verdad sigue por el camino de siempre.
+  eq(esLibroHtml(Uint8Array.from([0x50, 0x4B, 3, 4])), false);
+});
+
 test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había acreditado (febrero 2026)", () => {
   // Caso real: el resumen de enero trae 18 partidas por 6,755.43, de las cuales 15 (B/ 4,105.39) ya tenían su
   // crédito en Caja General. La cuenta abrió febrero con el total del resumen en vez de con los 2,650.04
