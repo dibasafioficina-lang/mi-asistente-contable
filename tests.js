@@ -3296,6 +3296,61 @@ test("las partidas acreditadas que se reingresaron en el cierre anterior cuentan
   eq(tr3[1].creditoCG, "hecho");
 });
 
+test("el resumen no lleva el deposito consolidado y ademas sus partes", () => {
+  // Enero de 2026: el Paso 2 dejo en transito los 590.02 del 30-ene (VISA + CLAVE en un solo asiento) y el
+  // Paso 3 las mismas VISA 230.31 y CLAVE 359.71 sueltas. El resumen las llevo las tres.
+  STATE.results = {
+    paso2: [{ fecha: "2026-01-30", banco: "Banistmo", monto: 590.02, clase: "en_transito", motivo: "depósito consolidado — aún no compensa",
+              concepto: "DEPOSITO POR TARJETA VISA BANISTMO DEL 30/01/2026", partes: [{ metodo: "VISA", monto: 230.31 }, { metodo: "CLAVE", monto: 359.71 }] }],
+    paso3: [{ fecha: "2026-01-30", banco: "Banistmo", monto: 230.31, clase: "en_transito", motivo: "depósito de fin de mes", concepto: "DEPOSITO POR TARJETA VISA BANISTMO DEL 30/01/2026" },
+            { fecha: "2026-01-30", banco: "Banistmo", monto: 359.71, clase: "en_transito", motivo: "depósito de fin de mes", concepto: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 30/01/2026" }]
+  };
+  const tr = recolectarEnTransito();
+  eq(tr.length, 1, "una sola partida");
+  cerca(tr[0].monto, 590.02);
+  STATE.results = {};
+});
+
+test("el Paso 0 cuenta una sola vez el consolidado que el resumen viejo trae junto con sus partes", () => {
+  const tr = [
+    { fecha: "2025-12-22", banco: "Banistmo", monto: 435.71, concepto: "cheque en transito", creditoCG: "pendiente" },
+    { fecha: "2026-01-30", banco: "Banistmo", monto: 590.02, concepto: "DEPOSITO POR TARJETA VISA BANISTMO DEL 30/01/2026", comprobante: "ME-00000001853", creditoCG: "pendiente" },
+    { fecha: "2026-01-30", banco: "Banistmo", monto: 230.31, concepto: "DEPOSITO POR TARJETA VISA BANISTMO DEL 30/01/2026", creditoCG: "pendiente" },
+    { fecha: "2026-01-30", banco: "Banistmo", monto: 359.71, concepto: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 30/01/2026", creditoCG: "pendiente" }
+  ];
+  quitarConsolidadosDuplicados(tr);
+  eq(tr.length, 3, "sale el consolidado");
+  eq(tr.duplicados.length, 1);
+  cerca(tr.duplicados[0].monto, 590.02);
+  // El reingreso registrado por el doble aparece en el cuadre de apertura como lo que es.
+  const h = paso0(tr, [], [], null, 7, 0.01);
+  if (!h.some(function(x){ return x.concepto === "Partida contada dos veces en el resumen"; })) throw new Error("falta el aviso");
+
+  // Dos partidas distintas del mismo dia que no suman otra: no se toca nada.
+  const tr2 = [
+    { fecha: "2026-01-30", banco: "STG", monto: 100.00, concepto: "A" },
+    { fecha: "2026-01-30", banco: "STG", monto: 40.00, concepto: "B" },
+    { fecha: "2026-01-30", banco: "STG", monto: 50.00, concepto: "C" }
+  ];
+  quitarConsolidadosDuplicados(tr2);
+  eq(tr2.length, 3);
+});
+
+test("un descargo que ya esta en Caja General no se vuelve a pedir aunque no nombre banco", () => {
+  // 02-feb-2026: Caja General tiene "Descargo de partidas que venian en transito..." por 246.20 (la CLAVE STG
+  // del 31-ene) y el navegador de St. Georges no trae su debito. El panel lo seguia pidiendo.
+  STATE.results = { paso0: [
+    { fecha: "2026-02-02", banco: "STG", monto: 246.20, clase: "en_transito", motivo: "compensó — venía del mes anterior", concepto: "CLAVE STG 31/01" },
+    { fecha: "2026-02-02", banco: "STG", monto: 405.00, clase: "en_transito", motivo: "compensó — venía del mes anterior", concepto: "BRINKS 28/01" }
+  ] };
+  STATE.diarioCaja = [{ fecha: "2026-02-02", debito: 0, credito: 246.20, referencia: "ME-00000001855",
+    descripcion: "Descargo de partidas que venían en tránsito del mes anterior y ya compensaron en el banco" }];
+  const p = partidasApertura();
+  eq(p.length, 1, "solo falta el de 405.00");
+  cerca(p[0].monto, 405.00);
+  STATE.results = {}; STATE.diarioCaja = null;
+});
+
 test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había acreditado (febrero 2026)", () => {
   // Caso real: el resumen de enero trae 18 partidas por 6,755.43, de las cuales 15 (B/ 4,105.39) ya tenían su
   // crédito en Caja General. La cuenta abrió febrero con el total del resumen en vez de con los 2,650.04

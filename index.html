@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.06";
+var APP_VERSION="2026.10.07";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -3107,6 +3107,10 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(desglose && halladasN === 0){
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
+          // Igual que el de fin de mes: el Paso 3 ve cada metodo por separado en el diario del banco. Sin el
+          // desglose el resumen de enero de 2026 llevo los 590.02 del 30-ene Y ADEMAS sus partes (VISA 230.31 +
+          // CLAVE 359.71), y el reingreso que se registro siguiendo ese resumen salio por el doble: 1,180.04.
+          partes: desglose.map(function(p){ return { metodo:p.metodo, monto:p.monto }; }),
           concepto:concepto, comprobante:refRaw, motivo:"depósito consolidado — aún no compensa",
           texto: banco + " " + dep.fecha + ": B/ " + fmt(objetivo) + " (\"" + concepto + "\") es el total del día " +
                  "registrado en un solo asiento." + textoDesglose +
@@ -3713,9 +3717,39 @@ function corregirAcreditadasReingresadas(tr, saldoCG, diarioCaja){
   tr.reingresadas = { n: n, total: Math.round(total*100)/100 };
   return tr;
 }
+/* ---- Consolidado que viaja junto con sus propias partes ----
+   Un resumen bajado con una version anterior a 2026.10.07 podia traer el deposito consolidado del dia Y
+   ADEMAS las partidas que lo forman: enero de 2026 trajo los 590.02 del 30-ene (Banistmo) y tambien VISA
+   230.31 + CLAVE 359.71. El banco solo acredita las partes, asi que el consolidado quedaba pendiente para
+   siempre, y el reingreso registrado siguiendo ese resumen salio por el doble. Se lo reconoce porque otras
+   2 a 4 partidas del MISMO banco y el MISMO dia suman exactamente su importe; se lo saca de la lista y se
+   avisa. Va DESPUES del control de reingreso: ese mira el total tal como se registro. */
+function quitarConsolidadosDuplicados(tr){
+  if(!tr || tr.length < 3) return tr;
+  var quitar = [];
+  tr.forEach(function(t, i){
+    if(quitar.indexOf(i) !== -1) return;
+    var pool = [];
+    tr.forEach(function(o, j){
+      if(j === i || quitar.indexOf(j) !== -1 || o.banco !== t.banco || o.fecha !== t.fecha || o.monto >= t.monto) return;
+      pool.push({ fecha:o.fecha, monto:o.monto, usado:false, j:j });
+    });
+    if(pool.length < 2) return;
+    var combo = buscarSubsetSuma(pool, t.fecha, t.monto, 0, 0.01, 4);
+    if(!combo || combo.length < 2) return;
+    quitar.push(i);
+    t._partesEnResumen = combo.map(function(k){ return tr[pool[k].j]; });
+  });
+  if(!quitar.length) return tr;
+  var dup = quitar.map(function(i){ return tr[i]; });
+  for(var k = tr.length - 1; k >= 0; k--) if(quitar.indexOf(k) !== -1) tr.splice(k, 1);
+  tr.duplicados = dup;
+  return tr;
+}
 function transitoPrevioDe(raws){
   if(!raws.transitoPrevio) return null;
-  return corregirAcreditadasReingresadas(parseTransitoPrevio(raws.transitoPrevio), STATE.saldoCajaGeneral, STATE.diarioCaja);
+  var tr = corregirAcreditadasReingresadas(parseTransitoPrevio(raws.transitoPrevio), STATE.saldoCajaGeneral, STATE.diarioCaja);
+  return quitarConsolidadosDuplicados(tr);
 }
 function computaPaso(pasoKey, raws, opts){
   // La ventana de días se mide sobre los días con movimiento bancario, no sobre el calendario.
@@ -6236,7 +6270,7 @@ function partidasApertura(){
       });
     });
   });
-  return (Array.isArray(r.paso0)?r.paso0:[]).filter(function(x){
+  var pend = (Array.isArray(r.paso0)?r.paso0:[]).filter(function(x){
     if(!esEnTransito(x) || !/mes anterior/i.test(x.motivo||"")) return false;
     // Su credito a Caja General se hizo al depositar: compensar no deja nada que descargar.
     if(x.creditoCG==="hecho") return false;
@@ -6251,6 +6285,29 @@ function partidasApertura(){
     if(hit){ descargadas[hit]--; return false; }
     return true;
   });
+  /* Un descargo registrado en Caja General que no nombra banco ("Descargo de partidas que venian en transito
+     del mes anterior...") lo reconoce el Paso 3 buscando su otra mitad en el diario del banco. Si esa mitad
+     no esta —el 02-feb-2026 los 246.20 de la CLAVE STG del 31-ene se acreditaron en Caja General y el
+     navegador de St. Georges no tiene el debito—, el asiento igual existe y ya saco la partida de Caja
+     General: pedirlo otra vez lo haria registrar dos veces. Se cruza por importe contra lo pendiente. */
+  var reconocidas = [];
+  ["paso1","paso2","paso3"].forEach(function(p){
+    (Array.isArray(r[p])?r[p]:[]).forEach(function(x){
+      if(x.clase==="informativo" && String(x.concepto||"").indexOf("Descargo")>=0) reconocidas.push({ fecha:x.fecha, monto:x.monto });
+    });
+  });
+  (STATE.diarioCaja||[]).forEach(function(l){
+    if(!(l.credito>0) || !esDescargoDesc(l.descripcion) || clasificarBancoPorTexto(l.descripcion)) return;
+    for(var q=0;q<reconocidas.length;q++){
+      if(reconocidas[q] && reconocidas[q].fecha===l.fecha && Math.abs(reconocidas[q].monto - l.credito) < 0.005){ reconocidas[q] = null; return; }
+    }
+    var pool = pend.map(function(x){ return { fecha:l.fecha, monto:x.monto, usado:!!x._descargoCG, x:x }; });
+    var combo = buscarSubsetSuma(pool, l.fecha, l.credito, 0, 0.01, 12);
+    if(combo) combo.forEach(function(k){ pool[k].x._descargoCG = true; });
+  });
+  var out = pend.filter(function(x){ return !x._descargoCG; });
+  pend.forEach(function(x){ delete x._descargoCG; });
+  return out;
 }
 function desgloseSaldoCaja(){
   var s = STATE.saldoCajaGeneral;
@@ -7753,6 +7810,21 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       fuente:"Paso 0 — resumen en tránsito del mes anterior"
     });
   }
+  if(transitoPrevio && transitoPrevio.duplicados){
+    transitoPrevio.duplicados.forEach(function(t){
+      var partes = t._partesEnResumen || [];
+      hallazgos.push({
+        fecha:t.fecha, banco:t.banco, monto:t.monto, clase:"aviso",
+        concepto:"Partida contada dos veces en el resumen", comprobante:t.comprobante||"", motivo:"consolidado y sus partes a la vez",
+        texto:"El resumen del mes anterior trae B/ " + fmt(t.monto) + " de " + t.banco + " del " + t.fecha + " (\"" + String(t.concepto||"").trim() +
+              "\") y TAMBIÉN las partidas que lo forman: " + partes.map(function(p){ return "B/ " + fmt(p.monto) + " (" + String(p.concepto||"").trim().slice(0,45) + ")"; }).join(" + ") +
+              ". Es el mismo dinero contado dos veces, así que se toma una sola vez: las partes, que es como lo acredita el banco. " +
+              "Si registraste el reingreso a Caja General siguiendo ese resumen, quedó B/ " + fmt(t.monto) + " de más" +
+              (t.comprobante ? " (revisá el " + t.comprobante + ")" : "") + ": lo vas a ver en el cuadre de apertura de abajo.",
+        fuente:"Paso 0 — resumen en tránsito del mes anterior"
+      });
+    });
+  }
   var res = consumirTransitoPrevio(transitoPrevio, estados, tolerancia);
   guardarDecisionTransito(transitoPrevio || [], estados, res);   // los Pasos 2 y 3 heredan esta decision
 
@@ -7787,6 +7859,9 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
                   " cuyo crédito a Caja General ya se hizo al depositar: esas viajan en el resumen porque el banco no las reflejó, " +
                   "pero ya salieron de la cuenta. El mes pasado el saldo de cierre se dejó en el total del resumen en vez de en el " +
                   "tránsito que sigue dentro; debió quedar en B/ " + fmt(cuadreAp.total) + "."
+                : (transitoPrevio.duplicados && Math.abs(Math.abs(cuadreAp.dif) - transitoPrevio.duplicados.reduce(function(a,t){ return a+t.monto; },0)) < 0.01)
+                ? "La diferencia es exactamente la partida que el resumen contaba dos veces (avisada arriba): el reingreso a Caja General se registró por el doble. " +
+                  "Corregí ese comprobante para que el reingreso sea por el importe una sola vez, o registrá el asiento de ajuste: Débito al banco que figura en el reingreso, Crédito a Caja General."
                 : cuadreAp.dif > 0
                 ? "La cuenta abre con menos de lo que el resumen dice que quedó pendiente: o al resumen le sobran partidas que ya compensaron, o falta el ajuste de apertura."
                 : "La cuenta trae de más: son partidas de meses anteriores que compensaron y nunca se descargaron.") +
