@@ -5,3 +5,6 @@ _*.html
 ~$*
 package.json
 package-lock.json
+en_transito_*.xlsx
+checklist_*.xlsx
+retenciones_*.xlsx
