@@ -2521,9 +2521,88 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
                                   esAchDesc(e.descripcion) ? null : "atras");
     if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); e.usado=true; }
   });
+  /* ---- 3) GRUPO contra GRUPO: el mismo total repartido de otra forma ----
+     Las pasadas 1 y 2 prueban un asiento contra varios creditos y un credito contra varios asientos, pero
+     no grupo contra grupo, y el banco hace justo eso. Dos casos de marzo de 2026:
+     - Un asiento acumula el metodo de todo el mes sin declarar el rango en su texto ("DEPOSITOS POR YAPPY
+       404.49" del 31-mar) mientras el banco lo fue acreditando dia por dia en siete depositos. Como la
+       descripcion no dice "DEL 1 AL 31", conciliarAcumuladoPeriodo no lo ve, y siete lineas exceden el
+       tope de cinco de la pasada 1.
+     - El banco reagrupa: las tarjetas del 27 y 28 (VISA 546.65 + 739.62) entraron el 30 como dos
+       remisiones de 824.01 + 462.26. El total es el mismo —1,286.27— pero ninguna linea coincide con
+       ninguna, asi que las remisiones salian como diferencia Y los asientos inflaban el transito.
+     Resguardos: mismo tipo de linea a los dos lados, suma EXACTA, ventana, y —lo que de verdad protege—
+     la combinacion tiene que ser UNICA. Con dos formas de llegar al mismo total, elegir una seria
+     adivinar: se deja como diferencia, que es lo que paso con los 270.30 y 328.16 del 11-mar, depositos
+     que no estan en ningun archivo y tienen que seguir apareciendo. */
+  function tipoConc(desc, esEstado){
+    if(esEstado){
+      if(esRemisionVisa(desc)) return "VMC";
+      if(esRemisionClave(desc)) return "CLAVE";
+      return "OTRO";
+    }
+    var n = normTxt(desc);
+    if(n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1) return "VMC";
+    if(n.indexOf("CLAVE")!==-1) return "CLAVE";
+    return "OTRO";
+  }
+  var bloques = [];
+  var VENT_BLOQUE = Math.max(ventanaDias, 10);
+  function cerrarBloque(ds, es){
+    var fd = ds.map(function(x){ return x.fecha; }).sort();
+    var fe = es.map(function(x){ return x.fecha; }).sort();
+    if(distanciaBancaria(fd[0], fe[fe.length-1]) > VENT_BLOQUE) return false;
+    ds.forEach(function(x){ x.usado = true; });
+    es.forEach(function(x){ x.usado = true; });
+    bloques.push({ debitos:ds.slice(), creditos:es.slice(),
+                   total: Math.round(ds.reduce(function(a,x){ return a + montoConc(x); },0)*100)/100 });
+    return true;
+  }
+  // Una sola manera de llegar al total, o no se toca.
+  function unica(montos, objetivo, maxN){
+    var sols = solucionesSuma(montos, objetivo, tolerancia, maxN, 1);
+    return (sols && sols.length === 1) ? sols[0] : null;
+  }
+  ["VMC","CLAVE","OTRO"].forEach(function(t){
+    function pend(arr, esEstado){
+      return arr.filter(function(x){ return !x.usado && tipoConc(x.descripcion, esEstado) === t; });
+    }
+    /* a) un asiento que acumula el metodo de varios dias del periodo y se digita al cierre: sus creditos
+       son ANTERIORES al asiento. Se exige que abarquen 3 o mas DIAS distintos, porque con uno o dos lo
+       normal es al reves —el banco acredita el dia del deposito o despues— y aceptar lo anterior daria por
+       compensado un efectivo antes de entregarse: el Brinks de 1,313.10 del 27-jun-2026 "cuadraria" con
+       los cuatro certificados del 22 y el 23 que no son suyos. */
+    function diasDe(xs){ var m = {}; xs.forEach(function(x){ m[x.fecha] = true; }); return Object.keys(m).length; }
+    pend(poolDiario, false).forEach(function(d){
+      if(d.usado) return;
+      var es = pend(poolEstado, true).filter(function(e){ return e.fecha <= d.fecha; });
+      if(es.length < 3 || diasDe(es) < 3) return;
+      var idx = unica(es.map(function(e){ return e.monto; }), montoConc(d), 8);
+      if(!idx || idx.length < 3) return;
+      var sel = idx.map(function(i){ return es[i]; });
+      if(diasDe(sel) < 3) return;
+      cerrarBloque([d], sel);
+    });
+    // b) varios asientos contra varios creditos, con el mismo total repartido distinto.
+    var es2 = pend(poolEstado, true);
+    for(var a=0; a<es2.length; a++){
+      for(var b=a+1; b<es2.length; b++){
+        if(es2[a].usado || es2[b].usado) continue;
+        var grupoE = [es2[a], es2[b]];
+        var suma = Math.round((es2[a].monto + es2[b].monto)*100)/100;
+        var ultima = grupoE.map(function(x){ return x.fecha; }).sort().slice(-1)[0];
+        var ds = pend(poolDiario, false).filter(function(x){ return x.fecha <= ultima; });
+        if(ds.length < 2) continue;
+        var idxD = unica(ds.map(function(x){ return montoConc(x); }), suma, 4);
+        if(!idxD || idxD.length < 2) continue;
+        cerrarBloque(idxD.map(function(i){ return ds[i]; }), grupoE);
+      }
+    }
+  });
   return {
     faltanEnBanco: poolDiario.filter(function(d){ return !d.usado; }),   // en el diario, no en el estado
-    faltanEnDiario: poolEstado.filter(function(e){ return !e.usado; })   // en el estado, no en el diario
+    faltanEnDiario: poolEstado.filter(function(e){ return !e.usado; }),  // en el estado, no en el diario
+    bloques: bloques                                                    // cuadraron como bloque, no 1 a 1
   };
 }
 
@@ -3722,6 +3801,23 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       });
     });
 
+    // Lo que cuadro como BLOQUE, no linea por linea: se informa con los dos lados a la vista para que la
+    // equivalencia se pueda auditar. No es una diferencia ni hay nada que registrar.
+    (conc.bloques||[]).forEach(function(b){
+      var lado = function(xs, campo){
+        return xs.map(function(x){ return x.fecha + " B/ " + fmt(campo==="monto" ? x.monto : montoConc(x)); }).join(" + ");
+      };
+      hallazgos.push({
+        fecha: b.creditos.map(function(x){ return x.fecha; }).sort().slice(-1)[0], banco: cfg.nombre,
+        monto: b.total, clase:"informativo", concepto:"Cuadra como bloque", comprobante:"",
+        motivo:"el banco lo acreditó repartido de otra forma",
+        texto: cfg.nombre + ": " + b.debitos.length + " asiento(s) del diario por B/ " + fmt(b.total) + " (" + lado(b.debitos) +
+               ") cuadran contra " + b.creditos.length + " línea(s) del estado por el mismo total (" + lado(b.creditos, "monto") +
+               "). Ninguna coincide una a una —el banco acreditó el mismo dinero repartido de otra forma— y la suma solo " +
+               "se alcanza de una manera, así que el bloque cuadra. No hay nada que registrar.",
+        fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre
+      });
+    });
     /* ---- SALIDAS: fuera del alcance ----
        Este módulo coteja lo que pasa por CAJA GENERAL. Los pagos (cheques emitidos, ACH a proveedores,
        planillas) y los cargos propios del banco (comisiones, ITBMS, retenciones, timbres) salen directo de

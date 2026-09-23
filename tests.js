@@ -3482,6 +3482,92 @@ test("una remision paga el mismo metodo de dos dias seguidos", () => {
   eq(est.filter(function(x){ return x.credito === 241.98; }).length, 1);
 });
 
+test("un asiento acumula el metodo de todo el mes aunque su texto no declare el rango", () => {
+  // 31-mar-2026: "DEPOSITOS POR YAPPY 404.49" junta los siete depositos que el banco fue acreditando del
+  // 19 al 29. Como el texto no dice "DEL 1 AL 31", conciliarAcumuladoPeriodo no lo ve, y siete lineas
+  // exceden el tope de cinco del emparejamiento normal: los seis creditos que no cuadraban salian como
+  // "no aparece registrado en el diario" teniendo su asiento.
+  const nav = [{ fecha: "2026-03-31", debito: 404.49, credito: 0, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-00000001906", fila: 1 }];
+  const est = [
+    { fecha: "2026-03-19", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 89.83, fila: 2 },
+    { fecha: "2026-03-20", descripcion: "DEPOSITO YAPPY - POS PE (2 TRANSACCIONES)", debito: 0, credito: 24.59, fila: 3 },
+    { fecha: "2026-03-21", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 21.39, fila: 4 },
+    { fecha: "2026-03-26", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 34.82, fila: 5 },
+    { fecha: "2026-03-27", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 10.69, fila: 6 },
+    { fecha: "2026-03-28", descripcion: "DEPOSITO", debito: 0, credito: 157.94, fila: 7 },
+    { fecha: "2026-03-29", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 65.23, fila: 8 }
+  ];
+  const c = conciliarBancoEstado(nav, est.map(function(x){ return Object.assign({}, x); }), 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "los siete créditos cuadran contra el asiento acumulado");
+  eq(c.faltanEnBanco.length, 0, "y el asiento no queda en tránsito");
+  eq(c.bloques.length, 1, "cuadró como bloque");
+  eq(c.bloques[0].creditos.length, 7);
+  cerca(c.bloques[0].total, 404.49);
+});
+
+test("el banco reagrupa: el mismo total repartido de otra forma cuadra como bloque", () => {
+  // 30-mar-2026: las tarjetas del 27 y 28 (VISA 546.65 + 739.62 = 1,286.27) entraron como DOS remisiones
+  // de 824.01 + 462.26, el mismo total repartido distinto. Ninguna linea coincide con ninguna, asi que las
+  // remisiones salian como diferencia Y los asientos inflaban el transito. Lo mismo con la CLAVE.
+  const nav = [
+    { fecha: "2026-03-27", debito: 546.65, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 27/03/2026", referencia: "ME-1903", fila: 1 },
+    { fecha: "2026-03-28", debito: 739.62, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 28/03/2026", referencia: "ME-1904", fila: 2 },
+    { fecha: "2026-03-27", debito: 100.47, credito: 0, descripcion: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 27/03/2026", referencia: "ME-1903", fila: 3 },
+    { fecha: "2026-03-28", debito: 1008.37, credito: 0, descripcion: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 28/03/2026", referencia: "ME-1904", fila: 4 }
+  ];
+  const est = [
+    { fecha: "2026-03-30", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 824.01, fila: 2 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 462.26, fila: 3 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 318.92, fila: 4 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 789.92, fila: 5 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "las cuatro remisiones cuadran");
+  eq(c.faltanEnBanco.length, 0, "y los cuatro asientos no quedan en tránsito");
+  eq(c.bloques.length, 2, "un bloque por método: V/MC y CLAVE");
+  // Y no se mezclan los metodos: cada bloque suma lo suyo.
+  const totales = c.bloques.map(function(b){ return Math.round(b.total*100)/100; }).sort();
+  cerca(totales[0], 1108.84, "el bloque de CLAVE");
+  cerca(totales[1], 1286.27, "el bloque de V/MC");
+});
+
+test("un deposito que no esta en ningun archivo sigue saliendo como diferencia", () => {
+  // Los 270.30 y 328.16 que entraron a Banistmo el 11-mar-2026 no estan en el informe de cajeras, ni en
+  // Caja General, ni en el diario del banco, ni en el desglose de cheques. El diario de ese dia solo tiene
+  // pagos, asi que no hay con que armar su total y tienen que seguir apareciendo: es plata que entro al
+  // banco y nadie registro.
+  const nav = [
+    { fecha: "2026-03-11", debito: 0, credito: 2000.00, descripcion: "SON IMPORT, S.A. - Pago", referencia: "PAY0004267", fila: 1 },
+    { fecha: "2026-03-11", debito: 0, credito: 2443.25, descripcion: "PRIMERA QUINCENA DE MARZO", referencia: "ME-1897", fila: 2 }
+  ];
+  const est = [
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 270.30, fila: 2 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 328.16, fila: 3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 2, "los dos depósitos siguen sin registrar");
+  eq(c.bloques.length, 0, "y no se cierra ningún bloque");
+});
+
+test("con dos formas de llegar al mismo total, el bloque no se da por cuadrado", () => {
+  // El resguardo del cotejo por bloques: elegir una de dos combinaciones posibles seria adivinar, y
+  // adivinar aca mueve plata de lugar. Los creditos suman 300.00 y el diario puede armarlo de dos maneras
+  // (150+150 o 100+200), asi que se deja como diferencia.
+  const nav = [
+    { fecha: "2026-03-10", debito: 150.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-10", debito: 150.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-03-11", debito: 100.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/03/2026", referencia: "ME-3", fila: 3 },
+    { fecha: "2026-03-11", debito: 200.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/03/2026", referencia: "ME-4", fila: 4 }
+  ];
+  const est = [
+    { fecha: "2026-03-12", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", debito: 0, credito: 130.00, fila: 2 },
+    { fecha: "2026-03-12", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", debito: 0, credito: 170.00, fila: 3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.bloques.length, 0, "la combinación es ambigua: no se cierra el bloque");
+  eq(c.faltanEnDiario.length, 2, "las dos remisiones quedan como diferencia");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
