@@ -3598,6 +3598,39 @@ test("una partida de fin de mes compensa POR PARTES, cada medio de pago por su c
   eq(e2.filter(function(x){ return x._transitoUsado; }).length, 0, "y no consume ninguna línea a medias");
 });
 
+test("un asiento que acumula el mes sin decirlo en su texto tampoco queda en transito", () => {
+  // 31-mar-2026: "DEPOSITOS POR YAPPY 404.49" junta los siete depositos que el banco fue acreditando del
+  // 19 al 29. El Paso 3 ya lo cuadraba como bloque, pero el Paso 2 lo evalua por su cuenta: no lograba
+  // emparejarlo —siete lineas exceden el match directo y el texto no declara el rango— y como es del
+  // ultimo dia del mes lo mandaba a transito. El resumen del mes siguiente se llevaba 404.49 que ya
+  // habian compensado.
+  const cg = [{ fecha: "2026-03-31", debito: 0, credito: 404.49, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-00000001906", fila: 9 }];
+  const est = [
+    { fecha: "2026-03-19", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 89.83, fila: 2 },
+    { fecha: "2026-03-20", descripcion: "DEPOSITO YAPPY - POS PE (2 TRANSACCIONES)", debito: 0, credito: 24.59, fila: 3 },
+    { fecha: "2026-03-21", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 21.39, fila: 4 },
+    { fecha: "2026-03-26", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 34.82, fila: 5 },
+    { fecha: "2026-03-27", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 10.69, fila: 6 },
+    { fecha: "2026-03-28", descripcion: "DEPOSITO", debito: 0, credito: 157.94, fila: 7 },
+    { fecha: "2026-03-29", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 65.23, fila: 8 }
+  ];
+  STATE.decisiones = {};
+  const h = paso2(cg, [], [], est, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 0, "el asiento acumulado compensó");
+  eq(h.filter(esEnTransito).length, 0, "y NO queda en tránsito: ya está en el banco");
+
+  // Con los creditos de UN SOLO dia no se acepta hacia atras: ahi lo normal es que el banco acredite
+  // despues del deposito, y darlo por compensado seria aceptar plata acreditada antes de entregarse.
+  const est1 = [
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 200.00, fila: 2 },
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 104.49, fila: 3 },
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 100.00, fila: 4 }
+  ];
+  STATE.decisiones = {};
+  const h2 = paso2(cg, [], [], est1, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h2) + h2.filter(esEnTransito).length, 1, "con un solo día no se da por compensado");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

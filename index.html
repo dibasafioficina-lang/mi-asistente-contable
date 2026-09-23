@@ -3111,6 +3111,29 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           combo = combo.map(function(k){ return pool.indexOf(poolAch[k]); }).filter(function(k){ return k>=0; });
         }
       }
+      /* 2d) EL ASIENTO ACUMULA VARIOS DIAS Y NO LO DICE EN SU TEXTO. El Yappy de marzo de 2026 se asienta
+         el 31 en un solo credito ("DEPOSITOS POR YAPPY 404.49") y el banco lo fue acreditando dia por dia
+         en siete depositos del 19 al 29: son mas lineas de las que prueba el match directo, y como el texto
+         no declara el rango tampoco entra por 2b. Sin esto el asiento salia en transito por ser del ultimo
+         dia del mes y viajaba al resumen del mes siguiente habiendo compensado completo.
+         Mismos resguardos que el cotejo por bloques del Paso 3: la combinacion tiene que ser UNICA y
+         abarcar 3 o mas DIAS distintos. Con uno o dos dias lo normal es al reves —el banco acredita el dia
+         del deposito o despues— y aceptar lo anterior daria por compensado un efectivo antes de entregarse. */
+      if(!combo){
+        var libresAc = pool.filter(function(e){ return !e.usado && e.fecha <= dep.fecha; });
+        var diasAc = {};
+        libresAc.forEach(function(e){ diasAc[e.fecha] = true; });
+        if(libresAc.length >= 3 && Object.keys(diasAc).length >= 3){
+          var solsAc = solucionesSuma(libresAc.map(function(e){ return e.monto; }), objetivo, tolerancia, 8, 1);
+          if(solsAc && solsAc.length === 1 && solsAc[0].length >= 3){
+            var diasSel = {};
+            solsAc[0].forEach(function(i){ diasSel[libresAc[i].fecha] = true; });
+            if(Object.keys(diasSel).length >= 3){
+              combo = solsAc[0].map(function(i){ return pool.indexOf(libresAc[i]); }).filter(function(i){ return i>=0; });
+            }
+          }
+        }
+      }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
       // Se consulta el INFORME DE CAJA —la referencia del desglose— y se busca cada partida en el estado.
       var desglose = null, partesHalladas = null, halladasN = 0;
