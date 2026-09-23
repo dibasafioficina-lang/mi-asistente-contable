@@ -3568,6 +3568,36 @@ test("con dos formas de llegar al mismo total, el bloque no se da por cuadrado",
   eq(c.faltanEnDiario.length, 2, "las dos remisiones quedan como diferencia");
 });
 
+test("una partida de fin de mes compensa POR PARTES, cada medio de pago por su cuenta", () => {
+  // 27-feb-2026: el deposito de 3,571.60 es CHEQUE 1,463.08 + VISA 1,124.69 + CLAVE 983.83, y el banco
+  // acredito cada medio por separado: las dos tarjetas el 2-mar y los cheques repartidos en tres depositos
+  // (864.62 el 2, mas 270.30 y 328.16 el 11). Buscando el total no aparecia nunca: la partida viajaba al
+  // resumen del mes siguiente habiendo compensado completa, y los dos depositos del 11 salian como plata
+  // que nadie registro.
+  const partes = [{ metodo: "VISA", monto: 1124.69 }, { metodo: "CLAVE", monto: 983.83 }, { metodo: "CHEQUE", monto: 1463.08 }];
+  const tr = [{ fecha: "2026-02-27", banco: "Banistmo", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito", partes: partes }];
+  const est = function(){ return [
+    { fecha: "2026-03-02", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 1124.69, fila: 2 },
+    { fecha: "2026-03-02", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 983.83, fila: 3 },
+    { fecha: "2026-03-02", descripcion: "DEPOSITO", debito: 0, credito: 864.62, fila: 4 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 270.30, fila: 5 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 328.16, fila: 6 }
+  ]; };
+  const e1 = est();
+  const r = consumirTransitoPrevio(tr, { Banistmo: e1, STG: [] }, 0.01);
+  eq(r.compensadas.length, 1, "la partida compensó completa, por partes");
+  eq(r.pendientes.length, 0);
+  eq(r.compensadas[0].porPartes, true);
+  // Las cinco lineas quedaron consumidas: ninguna puede volver a usarse en los Pasos 2 y 3.
+  eq(e1.filter(function(x){ return x._transitoUsado; }).length, 5, "las cinco líneas del banco quedan apartadas");
+
+  // Si falta UNA parte, la partida sigue pendiente entera: media compensación no es una compensación.
+  const e2 = est().filter(function(x){ return Math.abs(x.credito - 328.16) > 0.01; });
+  const r2 = consumirTransitoPrevio(tr.map(function(t){ return Object.assign({}, t); }), { Banistmo: e2, STG: [] }, 0.01);
+  eq(r2.pendientes.length, 1, "sin una de las partes la partida no se da por compensada");
+  eq(e2.filter(function(x){ return x._transitoUsado; }).length, 0, "y no consume ninguna línea a medias");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

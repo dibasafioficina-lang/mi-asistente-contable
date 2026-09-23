@@ -7790,6 +7790,47 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       if(!combo) combo = comboMismoDia(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 3);
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
+    /* Paso A2: la partida compenso POR PARTES, no de una vez.
+       Una partida de fin de mes trae su desglose por medio de pago —el deposito del 27-feb-2026 son
+       CHEQUE 1,463.08 + VISA 1,124.69 + CLAVE 983.83— y el banco acredita cada medio por su cuenta: las
+       dos tarjetas el 2-mar, y los cheques repartidos en tres depositos (864.62 el 2, mas 270.30 y 328.16
+       el 11). Buscando el total de 3,571.60 no aparece nunca, asi que la partida viajaba al resumen del
+       mes siguiente habiendo compensado completa, y sus dos depositos del 11 salian como plata que nadie
+       registro. Se coteja medio por medio contra el pool que le toca a cada uno.
+       Dos resguardos: tienen que cuadrar TODAS las partes —con una sola que falte la partida sigue
+       pendiente entera, porque media compensacion no es una compensacion— y la combinacion de cada parte
+       tiene que ser UNICA, que es lo que impide armar el importe juntando depositos de cualquier lado. */
+    function poolDeMetodo(metodo){
+      var m = normTxt(metodo);
+      if(m.indexOf("CLAVE")!==-1) return poolClave;
+      if(m.indexOf("VISA")!==-1 || m.indexOf("V/MC")!==-1) return poolVisa;
+      if(m.indexOf("CHEQUE")!==-1 || m==="CK") return poolDep;
+      return poolCred;
+    }
+    chs.forEach(function(ch){
+      if(ch.usado || !Array.isArray(ch.partes) || ch.partes.length < 2) return;
+      var usar = [];
+      var todas = ch.partes.every(function(pt){
+        if(!(pt.monto > tolerancia)) return true;                 // una parte en cero no pide nada
+        var pool = poolDeMetodo(pt.metodo);
+        var vent = ventanaTransito({ concepto: pt.metodo });
+        var libres = pool.filter(function(o){
+          return !o.usado && usar.indexOf(o) === -1 && o.fecha >= ch.fecha &&
+                 distanciaBancaria(ch.fecha, o.fecha) <= vent;
+        });
+        if(!libres.length) return false;
+        var sols = solucionesSuma(libres.map(function(o){ return o.monto; }), pt.monto, tolerancia, 6, 1);
+        if(!sols || sols.length !== 1) return false;
+        sols[0].forEach(function(i){ usar.push(libres[i]); });
+        return true;
+      });
+      if(!todas || !usar.length) return;
+      usar.forEach(function(o){ o.usado = true; });
+      ch.usado = true;
+      ch.porPartes = true;
+      // La fecha en que termino de compensar: la ultima linea que consumio.
+      ch.compensoEn = usar.slice().sort(function(a,b){ return a.fecha < b.fecha ? -1 : 1; }).slice(-1)[0];
+    });
     // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco
     // a veces junta varias en una), hacia atrás.
     [poolDeb, poolCred, poolDep, poolClave, poolVisa].forEach(function(pool){
