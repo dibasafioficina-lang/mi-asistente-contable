@@ -3651,6 +3651,109 @@ test("el acumulado del mes cuadra aunque el banco lo haya acreditado en nueve di
   eq(c.bloques[0].creditos.length, 9);
 });
 
+// Hallazgo (abril 2026): "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026" por 1,443.41 y "DEPOSITOS POR YAPPY DEL 1
+// AL 30 DE ABRIL" por 403.33 no se reconocian como acumulados — el primero por el "1AL" pegado y sin "DEL",
+// el segundo porque el texto no trae el año — y cada dia de esos dos metodos salia como diferencia roja.
+test("el rango se reconoce con el dia pegado al AL y sin el DEL", () => {
+  const r = rangoDeposito("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026");
+  if (!r) throw new Error("no reconoció el rango");
+  eq(r.ym, "2026-04"); eq(r.diaIni, 1); eq(r.diaFin, 30);
+});
+
+test("sin año en el texto, el rango toma el año del asiento", () => {
+  const r = rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", "2026-04-30");
+  if (!r) throw new Error("no reconoció el rango");
+  eq(r.ym, "2026-04"); eq(r.diaIni, 1); eq(r.diaFin, 30);
+  // Un acumulado se asienta al CERRAR el rango, nunca antes: si el mes del texto es posterior al del
+  // asiento, el rango es del año anterior (el de diciembre se asienta en enero).
+  const dic = rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 31 DE DICIEMBRE", "2026-01-05");
+  eq(dic.ym, "2025-12", "diciembre asentado en enero es del año anterior");
+  // Sin fecha de asiento no se inventa el año.
+  eq(rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL"), null, "sin año y sin asiento, no hay rango");
+});
+
+// Hallazgo (abril 2026): el asiento de fin de mes de la VISA de St. Georges no dice a que banco entro
+// ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026"), asi que clasificarBancoPorTexto daba null y la linea se
+// descartaba antes de llegar al cotejo. Los cuatro dias de VISA STG salian como diferencias rojas
+// (77.01, 611.70, 260.97, 493.73) con el asiento hecho por el total exacto.
+test("un acumulado que no dice banco se rutea por monto contra los dias sin asiento propio", () => {
+  const reporte = [
+    { fecha: "2026-04-09", banco: "STG", metodo: "VISA", monto: 77.01, cajera: "A" },
+    { fecha: "2026-04-17", banco: "STG", metodo: "VISA", monto: 611.70, cajera: "A" },
+    { fecha: "2026-04-28", banco: "STG", metodo: "VISA", monto: 260.97, cajera: "A" },
+    { fecha: "2026-04-30", banco: "STG", metodo: "VISA", monto: 493.73, cajera: "A" },
+    // La VISA de Banistmo tiene su asiento diario: el acumulado no puede comersela.
+    { fecha: "2026-04-10", banco: "Banistmo", metodo: "VISA", monto: 800.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-10", debito: 0, credito: 800.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 1443.41, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(contarRojas(h), 0, "el acumulado cubre los cuatro dias de STG");
+});
+
+test("el acumulado sin banco no toca un dia que ya tiene su asiento", () => {
+  // El acumulado suma justo lo de un dia que YA esta asentado. Tomarlo dejaria el dia sin credito y el
+  // acumulado dado por bueno: los dos lados mal. El dia asentado no es candidato, asi que no cuadra.
+  const reporte = [{ fecha: "2026-04-10", banco: "Banistmo", metodo: "VISA", monto: 500.00, cajera: "A" }];
+  const cg = [
+    { fecha: "2026-04-10", debito: 0, credito: 500.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 500.00, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const sinRutear = h.filter(function(x){ return String(x.texto||"").indexOf("no dice a qué banco entró") >= 0; });
+  eq(sinRutear.length, 1, "el acumulado queda sin rutear y se avisa");
+});
+
+test("con dos formas de llegar al monto, el acumulado sin banco no se adivina", () => {
+  // 100 + 200 y 150 + 150 dan los mismos 300: elegir una dejaria dos dias sin credito por decision de la
+  // app. Se deja como hallazgo, igual que en el resto de las reglas de combinacion.
+  const reporte = [
+    { fecha: "2026-04-05", banco: "STG", metodo: "VISA", monto: 100.00, cajera: "A" },
+    { fecha: "2026-04-06", banco: "STG", metodo: "VISA", monto: 200.00, cajera: "A" },
+    { fecha: "2026-04-07", banco: "STG", metodo: "VISA", monto: 150.00, cajera: "A" },
+    { fecha: "2026-04-08", banco: "STG", metodo: "VISA", monto: 150.00, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 300.00, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const sinRutear = h.filter(function(x){ return String(x.texto||"").indexOf("no dice a qué banco entró") >= 0; });
+  eq(sinRutear.length, 1, "con dos combinaciones posibles no se rutea");
+});
+
+// Hallazgo: el Yappy solo entra a Banco General, pero swapDeBanco daba por "registrado en otro banco"
+// cada dia de Yappy cuyo Banco General quedaba vacio y Banistmo tenia excedente. Esos dias no contaban
+// como cubiertos y el acumulado del mes salia con una diferencia inventada.
+test("el Yappy de un dia no se toma por registrado en otro banco", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" },
+    // Banistmo con excedente el 14: el reporte no lo trae y el diario si.
+    { fecha: "2026-04-14", banco: "Banistmo", metodo: "VISA", monto: 100.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 0, credito: 900.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 14/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 66.40, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 0, "los dos dias de Yappy cuadran con el acumulado");
+});
+
+// Hallazgo (abril 2026): el reporte de cajeras trae 10 dias de Yappy por 612.95 y el asiento acumulado
+// registro 403.33. La diferencia (209.62) es real y tiene que salir: el acumulado no puede taparla.
+test("el acumulado que no alcanza la suma del reporte sale como diferencia", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 50.00, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-2", fila: 9 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 1, "la diferencia del acumulado sale");
+  cerca(acum[0].monto, 16.40, "el reporte suma 66.40 y el asiento 50.00");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

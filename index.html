@@ -1530,20 +1530,37 @@ function esAchOChequeSinBanco(desc){
 // Rango de fechas dentro de la descripción de un depósito acumulado, ej. "DEL 1 AL 31 DE ENERO 2026"
 // o "DEL 01/01/2026 AL 31/01/2026". Devuelve {ym:"YYYY-MM", diaIni, diaFin} o null si no es un rango.
 var MESES_DEP = {ENERO:1,FEBRERO:2,MARZO:3,ABRIL:4,MAYO:5,JUNIO:6,JULIO:7,AGOSTO:8,SEPTIEMBRE:9,OCTUBRE:10,NOVIEMBRE:11,DICIEMBRE:12};
-function rangoDeposito(desc){
+// El asiento se teclea a mano y el rango sale de varias formas: sin el "DEL" y con el dia pegado al "AL"
+// ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026"), o sin el año ("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL").
+// Con la forma estricta, esas dos lineas no se reconocian como acumulado y cada dia del metodo salia
+// como diferencia roja en el Paso 1 (abril de 2026: la VISA de STG y todo el Yappy del mes).
+// Cuando falta el año se toma el de la FECHA DEL ASIENTO: un acumulado se asienta al cerrar el rango,
+// nunca antes, asi que si el mes del texto es POSTERIOR al del asiento, el rango es del año anterior.
+function rangoDeposito(desc, fechaAsiento){
   var n = normTxt(desc);
-  var m = n.match(/DEL\s+(\d{1,2})\s+AL\s+(\d{1,2})\s+DE\s+([A-Z]+)\s+(\d{4})/);
+  function anioDe(mes){
+    var f = String(fechaAsiento||"");
+    if(f.length < 7) return null;
+    var y = parseInt(f.slice(0,4),10), mo = parseInt(f.slice(5,7),10);
+    if(!y || !mo) return null;
+    return mes > mo ? y - 1 : y;
+  }
+  var m = n.match(/(?:DEL\s+)?(\d{1,2})\s*AL\s+(\d{1,2})\s+DE\s+([A-Z]+)(?:\s+DE)?\s*(\d{4})?/);
   if(m){
     var mes = MESES_DEP[m[3]]; if(!mes) return null;
     var d1 = parseInt(m[1],10), d2 = parseInt(m[2],10); if(d1===d2) return null;
-    return { ym: m[4]+"-"+String(mes).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+    var anio = m[4] ? parseInt(m[4],10) : anioDe(mes);
+    if(!anio) return null;
+    return { ym: anio+"-"+String(mes).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
   }
   var m2 = n.match(/DEL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s+AL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
   if(m2){
-    var d1=parseInt(m2[1],10), mo=parseInt(m2[5],10), yy=(m2[6]||m2[3]||"");
-    var d2=parseInt(m2[4],10); if(yy.length===2) yy="20"+yy; if(!yy) return null;
-    if(d1===d2 && parseInt(m2[2],10)===mo) return null;
-    return { ym: yy+"-"+String(mo).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+    var da=parseInt(m2[1],10), mo=parseInt(m2[5],10), yy=(m2[6]||m2[3]||"");
+    var db=parseInt(m2[4],10); if(yy.length===2) yy="20"+yy;
+    if(da===db && parseInt(m2[2],10)===mo) return null;
+    var anio2 = yy ? parseInt(yy,10) : anioDe(mo);
+    if(!anio2) return null;
+    return { ym: anio2+"-"+String(mo).padStart(2,"0"), diaIni: Math.min(da,db), diaFin: Math.max(da,db) };
   }
   return null;
 }
@@ -1552,6 +1569,7 @@ function metodoDeposito(desc){
   var n = normTxt(desc);
   if(n.indexOf("VISA")!==-1) return "VISA";
   if(n.indexOf("CLAVE")!==-1) return "CLAVE";
+  if(n.indexOf("YAPPY")!==-1) return "YAPPY";
   if(n.indexOf("ACH")!==-1) return "ACH";
   if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
   return null;
@@ -1561,15 +1579,22 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
   // cuadre banco a banco. Se toma un solo lado (credito) para no doble-contar.
-  var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; });
+  // Un acumulado por rango que NO nombra banco ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026") entra igual:
+  // el bloque de abajo lo saca del cotejo diario y lo rutea por monto. Sin esto se descartaba aca mismo
+  // y cada dia de ese metodo salia como diferencia roja aunque el asiento estuviera hecho.
+  var cajaFiltrada = diarioCaja.filter(function(x){
+    if(!(x.credito>0)) return false;
+    if(clasificarBancoPorTexto(x.descripcion)) return true;
+    return !!(rangoDeposito(x.descripcion, x.fecha) && metodoDeposito(x.descripcion));
+  });
   // Depósitos ACUMULADOS por rango de fechas (ej. "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO"):
   // el sistema a veces difiere un método al fin de mes en un solo monto. Se sacan del cotejo día por día
   // y se reconcilian aparte contra la SUMA de los montos diarios de ese método+banco del reporte del rango.
   var batches = [];
   cajaFiltrada = cajaFiltrada.filter(function(x){
-    var rango = rangoDeposito(x.descripcion), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
-    if(rango && met && bk){
-      batches.push({ banco:bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
+    var rango = rangoDeposito(x.descripcion, x.fecha), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
+    if(rango && met){
+      batches.push({ banco:bk || "", sinBanco: !bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
         monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0 });
       return false;
     }
@@ -1579,6 +1604,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     function(x){ return x.credito; });
   function batchDe(entry){
     for(var i=0;i<batches.length;i++){ var b=batches[i];
+      if(b.sinBanco) continue;   // sin banco en el texto no se puede rutear por banco: va por monto, mas abajo
       if(b.banco===entry.banco && b.metodo===entry.metodo && entry.fecha && entry.fecha.slice(0,7)===b.ym){
         var dia=parseInt(entry.fecha.slice(8,10),10);
         if(dia>=b.diaIni && dia<=b.diaFin) return b;
@@ -1599,6 +1625,10 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   // "bancos diferentes"); en cualquier otro caso el método se difirió limpio y lo cubre el batch.
   var BANCOS_DEP = ["STG","Banistmo"];
   function swapDeBanco(B, D){
+    // Solo hay swap entre los bancos que reciben los MISMOS metodos (tarjeta, cheque, ACH). El Yappy solo
+    // entra a Banco General: sin esto, cada dia de Yappy se tomaba por "registrado en otro banco" porque
+    // Banistmo tenia excedente ese dia, y el acumulado del mes quedaba con una diferencia inventada.
+    if(BANCOS_DEP.indexOf(B) === -1) return false;
     if((cajaPorBancoDia[B+"|"+D]||0) >= tolerancia) return false;
     var esperado = repFullBD[B+"|"+D]||0; if(esperado <= tolerancia) return false;
     for(var i=0;i<BANCOS_DEP.length;i++){ var B2=BANCOS_DEP[i]; if(B2===B) continue;
@@ -1610,7 +1640,52 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   Object.keys(batchedBD).forEach(function(k){
     var p=k.split("|"); if(!swapDeBanco(p[0], p[1])) cubiertoK[k]=true;
   });
+  /* ---- Acumulado por rango que no dice a que banco entro ----
+     "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026" por B/ 1,443.41: el metodo y el rango estan, el banco no.
+     No se puede rutear por texto, pero si por monto: los unicos dias que ese asiento puede estar
+     cubriendo son los del mismo metodo que NO tienen su propio credito en el diario (los que ya tienen
+     asiento diario estan pagos y no entran). Si esos dias suman exacto el monto del asiento — y de UNA
+     sola manera — el acumulado los cubre. Si hay dos combinaciones posibles no se adivina: queda como
+     diferencia, igual que en el resto de la app. */
+  var cajaPorBMD = {};
+  cajaFiltrada.forEach(function(x){
+    var bk2 = clasificarBancoPorTexto(x.descripcion), m2 = metodoDeposito(x.descripcion);
+    if(!bk2 || !m2) return;
+    var k2 = bk2+"|"+m2+"|"+x.fecha;
+    cajaPorBMD[k2] = Math.round(((cajaPorBMD[k2]||0) + x.credito)*100)/100;
+  });
+  var cubiertasSinBanco = [];
+  batches.forEach(function(b){
+    if(!b.sinBanco) return;
+    var cand = reporte.filter(function(x){
+      if(x.metodo !== b.metodo || !(x.monto > tolerancia) || !x.fecha) return false;
+      if(x.fecha.slice(0,7) !== b.ym) return false;
+      var dia = parseInt(x.fecha.slice(8,10),10);
+      if(dia < b.diaIni || dia > b.diaFin) return false;
+      if(cubiertasSinBanco.indexOf(x) !== -1) return false;                 // ya la tomo otro acumulado
+      return (cajaPorBMD[x.banco+"|"+b.metodo+"|"+x.fecha]||0) <= tolerancia; // el dia no tiene asiento propio
+    });
+    if(!cand.length) return;
+    var elegidas = null;
+    // El caso normal: el asiento difiere TODOS los dias sueltos del metodo. Se prueba primero, asi no se
+    // enumeran subconjuntos de un mes entero.
+    var todo = Math.round(cand.reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+    if(Math.abs(todo - b.monto) <= tolerancia) elegidas = cand;
+    else {
+      var sols = solucionesSuma(cand.map(function(x){ return x.monto; }), b.monto, tolerancia, Math.min(cand.length, 20), 1);
+      if(sols && sols.length === 1) elegidas = sols[0].map(function(i){ return cand[i]; });
+    }
+    if(!elegidas || !elegidas.length) return;
+    var bancosB = {};
+    elegidas.forEach(function(x){ cubiertasSinBanco.push(x); b.cubierto += x.monto; bancosB[x.banco] = true; });
+    b.cubierto = Math.round(b.cubierto*100)/100;
+    b.resuelto = true;
+    var bks = Object.keys(bancosB);
+    b.banco = bks.length === 1 ? bks[0] : "";   // si cubre un solo banco, queda etiquetado
+    b.bancos = bks;
+  });
   var repParaDia = reporte.filter(function(x){
+    if(cubiertasSinBanco.indexOf(x) !== -1) return false;
     var b=batchDe(x);
     if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; return false; }
     return true;
@@ -1956,12 +2031,25 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   }
 
   batches.forEach(function(b){
+    var enBk = b.banco ? " " + b.banco : "";
+    // No dice banco y no hubo forma de saber que dias cubre: sin eso el monto no se puede cotejar con nada.
+    if(b.sinBanco && !b.resuelto){
+      hallazgos.push({
+        fecha:b.fecha, banco:"", monto:b.monto, clase:"diff",
+        texto: "Depósito acumulado " + b.metodo + " (\"" + String(b.desc).trim() + "\") por B/ " + fmt(b.monto) +
+               ": el asiento no dice a qué banco entró y los días del " + b.diaIni + " al " + b.diaFin +
+               " sin crédito propio no suman ese monto de una sola forma, así que no se puede saber qué está " +
+               "cubriendo. Agregá el banco en la descripción del asiento.",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
+      return;
+    }
     var diff = Math.round((b.cubierto - b.monto)*100)/100;
     if(Math.abs(diff) > tolerancia){
       hallazgos.push({
         fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
-        texto: "Depósito acumulado " + b.metodo + " " + b.banco + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
-               fmt(b.monto) + " pero la suma de los depósitos diarios de " + b.metodo + " " + b.banco +
+        texto: "Depósito acumulado " + b.metodo + enBk + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
+               fmt(b.monto) + " pero la suma de los depósitos diarios de " + b.metodo + enBk +
                " del reporte (días " + b.diaIni + " al " + b.diaFin + ") es B/ " + fmt(b.cubierto) +
                " (dif. B/ " + fmt(diff) + "). Revisa si algún día quedó registrado en otro banco o método.",
         fuente: "Reporte consolidado de caja / Diario Caja General"
@@ -2273,7 +2361,7 @@ function retencionDelRango(retVisaPorDia, rg){
 function conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolerancia){
   poolDiario.forEach(function(d){
     if(d.usado) return;
-    var rg = rangoDeposito(d.descripcion);
+    var rg = rangoDeposito(d.descripcion, d.fecha);
     if(!rg) return;
     var cands = poolDelMetodo(poolEstado, d.descripcion);
     if(!cands || !cands.length) return;
@@ -2471,7 +2559,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   if(retVisaPorDia){
     poolDiario.forEach(function(d){
       if(normTxt(d.descripcion).indexOf("VISA")===-1) return;
-      if(rangoDeposito(d.descripcion)) return; // acumulado del período: su retención es la del RANGO, no la de un día
+      if(rangoDeposito(d.descripcion, d.fecha)) return; // acumulado del período: su retención es la del RANGO, no la de un día
       var r = retVisaPorDia[d.fecha];
       if(r==null) return;
       d.montoConc = Math.round((d.monto - r)*100)/100;
@@ -3085,7 +3173,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // se le restan las retenciones de esos días y se busca el conjunto de créditos que sumen el neto.
       // Sin esto, el acumulado del mes queda como "en tránsito" aunque ya haya compensado completo.
       if(!combo && retVisaPorDia && normTxt(dep.descripcion).indexOf("VISA")!==-1){
-        var rg = rangoDeposito(dep.descripcion);
+        var rg = rangoDeposito(dep.descripcion, dep.fecha);
         if(rg){
           var retPeriodo = 0;
           Object.keys(retVisaPorDia).forEach(function(f){
@@ -3202,7 +3290,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       }
       if(combo){
         // A que venta pago cada linea: el Paso 4 no puede volver a usar una remision que ya pago otra venta.
-        combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion) ? "rango" : dep.fecha; });
+        combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion, dep.fecha) ? "rango" : dep.fecha; });
         return;
       } // cuadrado
       if(partesHalladas) return; // coteja: el banco lo reflejó separado, tal como lo desglosa el informe
