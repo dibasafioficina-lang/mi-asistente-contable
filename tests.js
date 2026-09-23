@@ -3398,6 +3398,90 @@ test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había ac
   eq(c2.ok, true);
 });
 
+test("el efectivo asentado en una linea se parte: ventanilla suelta + camion en un deposito mixto", () => {
+  // 12-mar-2026: el asiento junta el camion y la ventanilla del dia en un solo credito de 25.28 (25.00 del
+  // Brinks + 0.28 de ventanilla); antes venian en dos lineas. El banco los acredito separados el 16: los
+  // 0.28 como linea suelta y los 25.00 dentro del ACH de 5,025.00, cuyo resto son los 5,000.00 del
+  // prestamo interno que solo esta en el diario del banco. Buscando el total tal cual, ninguna de las dos
+  // partes aparecia y los 25.28 salian como diferencia teniendolas las dos en el estado.
+  const cg = [{ fecha: "2026-03-12", debito: 0, credito: 25.28, descripcion: "DEPOSITO BRINKS DEL 12/03/2026", referencia: "ME-00000001886", fila: 7 }];
+  const est = function(){ return [
+    { fecha: "2026-03-16", descripcion: "Descripción", debito: 0, credito: 0.28, fila: 3 },
+    { fecha: "2026-03-16", descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 130326 David", debito: 0, credito: 5025.00, fila: 4 }
+  ]; };
+  const diarioStg = [{ fecha: "2026-03-16", debito: 5000.00, credito: 0, descripcion: "dueños/préstamo interno - caja", referencia: "PDN-000000050", fila: 11 }];
+  const dec = function(){ STATE.decisiones = { efectivo: { firmaCaja: firmaDiario(cg), banco: "STG", filas: { 7: true } } }; };
+  dec();
+  const h = paso2(cg, [], est(), null, null, null, 7, 0.01, null, null, { STG: diarioStg });
+  eq(contarRojas(h), 0, "el efectivo compensó partido en dos");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /partido/.test(x.motivo || ""); });
+  eq(inf.length, 1, "y se informa cómo compensó");
+  if (inf[0].texto.indexOf("0.28") < 0 || inf[0].texto.indexOf("25.00") < 0) {
+    throw new Error("tiene que nombrar las dos partes: " + inf[0].texto);
+  }
+  // Sin el navegador del banco no hay con que explicar los 5,000.00, y ahi si es una diferencia.
+  dec();
+  eq(contarRojas(paso2(cg, [], est(), null, null, null, 7, 0.01, null, null)), 1,
+     "sin el diario del banco el resto del depósito no se explica");
+});
+
+test("el camion de dos dias en un solo ACH, y cada ventanilla en su dia", () => {
+  // 16 y 17-mar-2026: 41.56 y 44.29, cada uno en una sola linea. El banco acredito las ventanillas el 18
+  // (1.56 y 4.29) y los dos Brinks de 40.00 juntos, como un ACH de 80.00 el 19. Ademas de cuadrar, cada
+  // ventanilla tiene que quedar en SU dia: con la asignacion cruzada el total da igual, pero el hallazgo
+  // diria 37.27 y 42.73 del camion, importes que nunca existieron.
+  const cg = [
+    { fecha: "2026-03-16", debito: 0, credito: 41.56, descripcion: "DEPOSITO BRINKS DEL 16/03/2026", referencia: "ME-00000001890", fila: 8 },
+    { fecha: "2026-03-17", debito: 0, credito: 44.29, descripcion: "DEPOSITO BRINKS DEL 17/03/2026", referencia: "ME-00000001891", fila: 9 }
+  ];
+  const est = [
+    { fecha: "2026-03-18", descripcion: "Descripción", debito: 0, credito: 1.56, fila: 5 },
+    { fecha: "2026-03-18", descripcion: "Descripción", debito: 0, credito: 4.29, fila: 6 },
+    { fecha: "2026-03-19", descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 180326 David", debito: 0, credito: 80.00, fila: 7 }
+  ];
+  STATE.decisiones = { efectivo: { firmaCaja: firmaDiario(cg), banco: "STG", filas: { 8: true, 9: true } } };
+  const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null, { STG: [] });
+  eq(contarRojas(h), 0, "los dos días compensaron en el mismo ACH");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /partido/.test(x.motivo || ""); });
+  eq(inf.length, 2);
+  const d16 = inf.filter(function(x){ return x.fecha === "2026-03-16"; })[0];
+  const d17 = inf.filter(function(x){ return x.fecha === "2026-03-17"; })[0];
+  if (d16.texto.indexOf("1.56") < 0 || d16.texto.indexOf("40.00") < 0) {
+    throw new Error("el 16 lleva su ventanilla de 1.56 y 40.00 del camión: " + d16.texto);
+  }
+  if (d17.texto.indexOf("4.29") < 0 || d17.texto.indexOf("40.00") < 0) {
+    throw new Error("el 17 lleva su ventanilla de 4.29 y 40.00 del camión: " + d17.texto);
+  }
+});
+
+test("una remision paga el mismo metodo de dos dias seguidos", () => {
+  // 15 y 16-mar-2026: los asientos de 189.06 y 394.95 dicen VISA pero traen VISA + CLAVE. Las VISA
+  // compensan sueltas (90.25 el 16, 251.78 el 17) y las CLAVE van JUNTAS en una sola remision:
+  // 98.81 + 143.17 = 241.98 el 17. Buscando cada parte por su cuenta no aparecia ninguna CLAVE, el
+  // desglose se revertia entero y los dos asientos salian como diferencia con su plata en el banco.
+  const cg = [
+    { fecha: "2026-03-15", debito: 0, credito: 189.06, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 15/03/2026", referencia: "ME-00000001889", fila: 2 },
+    { fecha: "2026-03-16", debito: 0, credito: 394.95, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 16/03/2026", referencia: "ME-00000001890", fila: 3 }
+  ];
+  const reporte = [
+    { fecha: "2026-03-15", banco: "Banistmo", metodo: "VISA", monto: 90.25, cajera: "A" },
+    { fecha: "2026-03-15", banco: "Banistmo", metodo: "CLAVE", monto: 98.81, cajera: "A" },
+    { fecha: "2026-03-16", banco: "Banistmo", metodo: "VISA", monto: 251.78, cajera: "A" },
+    { fecha: "2026-03-16", banco: "Banistmo", metodo: "CLAVE", monto: 143.17, cajera: "A" }
+  ];
+  const est = [
+    { fecha: "2026-03-16", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 90.25, fila: 2 },
+    { fecha: "2026-03-17", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 251.78, fila: 3 },
+    { fecha: "2026-03-17", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 241.98, fila: 4 }
+  ];
+  STATE.decisiones = {};
+  const h = paso2(cg, est, [], null, null, null, 7, 0.01, reporte, null);
+  eq(contarRojas(h), 0, "los dos asientos compensaron");
+  eq(h.filter(esEnTransito).length, 0, "y no queda nada en tránsito");
+  // La remision agrupada se consume UNA sola vez: no puede pagar los dos dias por separado.
+  eq(est.filter(function(x){ return x.credito === 241.98; }).length, 1);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

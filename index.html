@@ -2920,6 +2920,15 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
 
   Object.keys(estados).forEach(function(banco){
     var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
+    /* ---- Una remision que paga el mismo metodo de dos dias ----
+       El banco junta en UNA sola remision las partidas del mismo metodo de dos dias seguidos: en marzo de
+       2026 la CLAVE del 1-mar (752.77) y la del 2-mar (590.65) entraron como una remision de 1,343.42 el
+       3-mar, y la del 15 (98.81) con la del 16 (143.17) como 241.98 el 17. Buscando cada parte sola no
+       aparece ninguna y los cuatro asientos de VISA Banistmo —2,536.20— salian como diferencia teniendo su
+       plata en el banco. Cuando una parte se cubre asi, la del dia contiguo se anota aca para que al
+       procesar ese dia no vuelva a pedir la misma linea ni la cuente dos veces. */
+    var cubiertasPorAgrupada = {};
+    function clavePorParte(p){ return String(p.fecha) + "|" + normTxt(p.metodo) + "|" + Math.round((p.monto||0)*100); }
     // Descargo repartido en varias lineas que citan su fecha de origen: se aparta entero antes de conciliar,
     // igual que el descargo de una sola linea (ver el punto 0 de abajo).
     if(heredadosP2){
@@ -3049,6 +3058,25 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
                normTxt(p.metodo).indexOf("VISA")!==-1){
               c = buscarCombinacion(poolP, dep.fecha, Math.round((p.monto - retVisaPorDia[p.fecha])*100)/100,
                                     ventDesglose, tolerancia);
+            }
+            // Ya la pago una remision agrupada que consumio el dia contiguo: cuenta como hallada y no
+            // consume ninguna linea (el array vacio hace que el marcado de abajo no toque el pool).
+            if(!c && cubiertasPorAgrupada[clavePorParte(p)]) c = [];
+            // Si no, se prueba la suma con la partida del MISMO metodo de un dia contiguo. Se exige que la
+            // remision exista por el total exacto: sin eso, sumar de a dos convertiria cualquier importe en
+            // "compensado" a fuerza de probar combinaciones.
+            if(!c){
+              var vecinas = (reporte||[]).filter(function(q){
+                return q.banco===banco && normTxt(q.metodo)===normTxt(p.metodo) && q.fecha!==p.fecha &&
+                       q.monto>0 && daysBetween(q.fecha, p.fecha)<=3 && !cubiertasPorAgrupada[clavePorParte(q)];
+              }).sort(function(a,b){ return daysBetween(a.fecha,p.fecha) - daysBetween(b.fecha,p.fecha); });
+              for(var v=0; v<vecinas.length && !c; v++){
+                var juntas = Math.round((p.monto + vecinas[v].monto)*100)/100;
+                var cj = buscarCombinacion(poolP, dep.fecha, juntas, ventDesglose, tolerancia);
+                if(!cj) continue;
+                cubiertasPorAgrupada[clavePorParte(vecinas[v])] = true;
+                c = cj;
+              }
             }
             if(c){
               c.forEach(function(k){
@@ -3267,6 +3295,123 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             mixtos.push({ d:d, e:e, otros: otros.map(function(k){ return ajenos[k]; }) });
             return;
           }
+        });
+        /* ---- Efectivo asentado en UNA linea que el banco parte en dos ----
+           Desde marzo de 2026 el asiento junta el camion y la ventanilla del dia en un solo credito
+           ("DEPOSITO BRINKS DEL 12/03/2026" por 25.28 = 25.00 de Brinks + 0.28 de ventanilla); antes venian
+           en dos lineas y consolidarEfectivoDelDia las sumaba, asi que ese mecanismo quedo sin efecto.
+           El banco los sigue acreditando separados: la ventanilla como linea suelta y el Brinks dentro de
+           su ACH —solo, junto con el de otros dias, o dentro de un deposito mixto—. Buscando el total tal
+           cual no aparece ninguna de las dos partes: los 25.28 del 12-mar salian como diferencia teniendo
+           sus 0.28 en el estado del 16 y sus 25.00 dentro del ACH de 5,025.00 de ese mismo dia (el resto,
+           5,000.00, es el prestamo de los duenos que solo esta en el diario del banco).
+           Se parte el credito en dos, con dos resguardos para no partir por conveniencia: la parte de
+           ventanilla tiene que estar en el estado por su importe EXACTO y ser chica (el maximo visto en un
+           dia es 12.87, de ahi el tope de 20), y la parte del camion tiene que encontrarse despues por sus
+           propios medios. Si cualquiera de las dos falla, el efectivo sigue saliendo como diferencia. */
+        var TOPE_VENTANILLA = 20;
+        // Lineas chicas del estado que pueden ser la ventanilla de ese dia.
+        function sueltasEf(d){
+          return candEf.filter(function(cv){
+            return !cv.usado && cv.fecha >= d.fecha && cv.monto <= TOPE_VENTANILLA && cv.monto < d.monto &&
+                   distanciaBancaria(d.fecha, cv.fecha) <= Math.max(ventanaDias, 10);
+          });
+        }
+        function marcarPartido(d, cv, resto, e, otros){
+          cv.usado = true; d.usado = true;
+          partidosOk.push({ d:d, centavos:cv, resto:resto, e:e, otros:otros||[] });
+        }
+        var partidosOk = [];
+        /* 1) Uno o dos dias en un solo ACH del camion. La suma de los creditos menos el ACH es lo que se
+           fue por ventanilla, y tiene que estar en el estado como una linea suelta por cada dia: el ACH de
+           80.00 del 19-mar-2026 trae los 40.00 del 16 y los 40.00 del 17, y sus ventanillas entraron el 18
+           como 1.56 y 4.29 (41.56 + 44.29 - 80.00 = 5.85 = 1.56 + 4.29). */
+        candEf.forEach(function(e){
+          if(e.usado || !esBrinks(e.descripcion)) return;
+          var cand = poolDiaEf.filter(function(d){
+            return !d.usado && d.fecha <= e.fecha && distanciaBancaria(d.fecha, e.fecha) <= Math.max(ventanaDias, 10);
+          });
+          function probar(S){
+            if(e.usado) return false;
+            var suma = Math.round(S.reduce(function(a,x){ return a + x.monto; }, 0)*100)/100;
+            var falta = Math.round((suma - e.monto)*100)/100;
+            if(falta <= tolerancia) return false;            // sin ventanilla que explicar no es un partido
+            var vistas = [];
+            S.forEach(function(d){ sueltasEf(d).forEach(function(cv){ if(vistas.indexOf(cv) === -1) vistas.push(cv); }); });
+            var ps = vistas.map(function(cv){ return { fecha:cv.fecha, monto:cv.monto, usado:false, ref:cv }; });
+            var combo = buscarSubsetSuma(ps, e.fecha, falta, 400, tolerancia, S.length);
+            if(!combo || combo.length !== S.length) return false;   // una linea de ventanilla por dia, ni mas ni menos
+            /* A que dia va cada linea de ventanilla. El total cuadra con cualquier asignacion, pero el
+               hallazgo nombra importes: con 41.56 y 44.29 contra el ACH de 80.00, asignar 1.56 al primero y
+               4.29 al segundo deja 40.00 y 40.00 —lo que el camion entrego—, y al reves daria 37.27 y 42.73,
+               que no existieron. Gana la asignacion cuyos restos quedan mas cerca de un multiplo de 5. */
+            var lineas = combo.map(function(k){ return ps[k].ref; });
+            var mejor = null;
+            function evaluar(asig){
+              var suciedad = 0;
+              for(var i=0;i<S.length;i++){
+                if(asig[i].monto >= S[i].monto) return;
+                var r = Math.round((S[i].monto - asig[i].monto)*100)/100;
+                if(r <= tolerancia) return;
+                var mod = Math.round(r*100) % 500;
+                suciedad += Math.min(mod, 500 - mod);
+              }
+              if(!mejor || suciedad < mejor.suciedad) mejor = { asig:asig.slice(), suciedad:suciedad };
+            }
+            evaluar(lineas);
+            if(S.length === 2) evaluar([lineas[1], lineas[0]]);
+            if(!mejor) return false;
+            S.forEach(function(d, i){
+              var cv = mejor.asig[i];
+              marcarPartido(d, cv, Math.round((d.monto - cv.monto)*100)/100, e, []);
+            });
+            e.usado = true;
+            return true;
+          }
+          for(var a=0; a<cand.length; a++){
+            if(probar([cand[a]])) return;
+            for(var b=a+1; b<cand.length; b++){ if(probar([cand[a], cand[b]])) return; }
+          }
+        });
+        /* 2) La parte del camion dentro de un deposito MIXTO: el sobrante lo explican debitos del diario
+           del banco que no pasan por Caja General. Igual que la pasada de mixtos de arriba, pero restando
+           solo la parte del camion: los 25.28 del 12-mar-2026 son 0.28 de ventanilla (acreditada el 16) y
+           25.00 dentro del ACH de 5,025.00 de ese dia, cuyo resto son los 5,000.00 del prestamo interno.
+           Se prueban TODAS las particiones posibles: quedarse con la primera linea suelta que encaje
+           dejaba el resto en un importe que el camion nunca entrego y el efectivo seguia sin aparecer. */
+        if(ajenos.length) poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var opciones = sueltasEf(d);
+          for(var o=0; o<opciones.length && !d.usado; o++){
+            var cv = opciones[o];
+            var resto = Math.round((d.monto - cv.monto)*100)/100;
+            if(resto <= tolerancia) continue;
+            for(var i=0;i<candEf.length;i++){
+              var e = candEf[i];
+              if(e.usado || e === cv || e.fecha < d.fecha || e.monto - resto <= tolerancia) continue;
+              if(distanciaBancaria(d.fecha, e.fecha) > Math.max(ventanaDias, 10)) continue;
+              var otros2 = buscarSubsetSuma(ajenos, e.fecha, Math.round((e.monto - resto)*100)/100, Math.max(ventanaDias, 10), tolerancia, 3, "atras");
+              if(!otros2) continue;
+              otros2.forEach(function(k){ ajenos[k].usado = true; });
+              e.usado = true;
+              marcarPartido(d, cv, resto, e, otros2.map(function(k){ return ajenos[k]; }));
+              break;
+            }
+          }
+        });
+        partidosOk.forEach(function(m){
+          var desc = String(m.d.descripcion||"").trim();
+          hallazgos.push({ fecha:m.d.fecha, banco:bancoEf, monto:m.d.monto, clase:"informativo", concepto:desc,
+            comprobante: refME(m.d.src.referencia), motivo:"el banco lo acredit\u00f3 partido en dos",
+            texto: bancoEf + " " + m.d.fecha + ": el efectivo de B/ " + fmt(m.d.monto) + " (\"" + desc + "\") lo acredit\u00f3 el banco " +
+                   "en dos partes: B/ " + fmt(m.centavos.monto) + " de ventanilla el " + m.centavos.fecha + " y B/ " + fmt(m.resto) +
+                   " del cami\u00f3n" + (m.otros.length
+                     ? " dentro del dep\u00f3sito de B/ " + fmt(m.e.monto) + " del " + m.e.fecha + ", junto con " +
+                       m.otros.map(function(o){ return "B/ " + fmt(o.monto) + " de " + (String(o.referencia||"").trim() || "otro asiento"); }).join(" y ") +
+                       ", que est\u00e1 en el diario de " + bancoEf + " y no pasa por Caja General"
+                     : " en el ACH de B/ " + fmt(m.e.monto) + " del " + m.e.fecha + (Math.abs(m.e.monto - m.resto) > tolerancia ? ", que trae tambi\u00e9n el de otros d\u00edas" : "")) +
+                   ". El asiento junta las dos partes en una sola l\u00ednea, as\u00ed que no hay nada que registrar." + refComprobante(m.d.src.referencia),
+            fuente: "Diario Caja General / Diario " + bancoEf + " / Estado de cuenta " + bancoEf });
         });
         mixtos.forEach(function(m){
           var desc = String(m.d.descripcion||"").trim();
