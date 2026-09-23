@@ -3631,6 +3631,26 @@ test("un asiento que acumula el mes sin decirlo en su texto tampoco queda en tra
   eq(contarRojas(h2) + h2.filter(esEnTransito).length, 1, "con un solo día no se da por compensado");
 });
 
+test("el acumulado del mes cuadra aunque el banco lo haya acreditado en nueve dias", () => {
+  // 30-abr-2026: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL" por 403.33 contra NUEVE depositos del estado.
+  // El texto declara el rango pero sin año, asi que rangoDeposito no lo lee y no entra por el acumulado
+  // del periodo; quedaba el cotejo por bloques, que probaba hasta 8 lineas. Con nueve se caia justo cuando
+  // mas hacia falta, y las ocho que no cuadraban salian como "no aparece registrado en el diario".
+  const nav = [{ fecha: "2026-04-30", debito: 403.33, credito: 0, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-00000001932", fila: 3 }];
+  const montos = [[ "2026-04-02", 23.85 ], [ "2026-04-03", 39.27 ], [ "2026-04-08", 70.57 ], [ "2026-04-15", 52.40 ],
+                  [ "2026-04-16", 14.00 ], [ "2026-04-18", 21.39 ], [ "2026-04-19", 65.22 ], [ "2026-04-26", 111.65 ],
+                  [ "2026-04-28", 4.98 ]];
+  const est = montos.map(function(m, i){
+    return { fecha: m[0], descripcion: "DEPOSITO YAPPY - POS PE", debito: 0, credito: m[1], fila: i + 2 };
+  });
+  cerca(Math.round(montos.reduce(function(a, m){ return a + m[1]; }, 0)*100)/100, 403.33, "los nueve suman el asiento");
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "los nueve créditos cuadran contra el acumulado");
+  eq(c.faltanEnBanco.length, 0);
+  eq(c.bloques.length, 1);
+  eq(c.bloques[0].creditos.length, 9);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

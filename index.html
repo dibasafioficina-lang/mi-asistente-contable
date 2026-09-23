@@ -2577,7 +2577,12 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
       if(d.usado) return;
       var es = pend(poolEstado, true).filter(function(e){ return e.fecha <= d.fecha; });
       if(es.length < 3 || diasDe(es) < 3) return;
-      var idx = unica(es.map(function(e){ return e.monto; }), montoConc(d), 8);
+      // Hasta 20 lineas: el acumulado de un mes son tantas como dias acredito el banco. Con el tope en 8
+      // se caia justo cuando mas hacia falta —el Yappy de abril de 2026 entro en 9 depositos— y ademas el
+      // corte no se notaba: la partida salia como diferencia igual que si no existiera. solucionesSuma
+      // tiene su propio tope de nodos y devuelve null si se corta, asi que un mes patologico no cuelga la
+      // pestaña: simplemente no cuadra y se reporta.
+      var idx = unica(es.map(function(e){ return e.monto; }), montoConc(d), 20);
       if(!idx || idx.length < 3) return;
       var sel = idx.map(function(i){ return es[i]; });
       if(diasDe(sel) < 3) return;
@@ -3124,7 +3129,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         var diasAc = {};
         libresAc.forEach(function(e){ diasAc[e.fecha] = true; });
         if(libresAc.length >= 3 && Object.keys(diasAc).length >= 3){
-          var solsAc = solucionesSuma(libresAc.map(function(e){ return e.monto; }), objetivo, tolerancia, 8, 1);
+          // Hasta 20 lineas, por lo mismo que la pasada de bloques del Paso 3: el acumulado de un mes son
+          // tantas lineas como dias acredito el banco.
+          var solsAc = solucionesSuma(libresAc.map(function(e){ return e.monto; }), objetivo, tolerancia, 20, 1);
           if(solsAc && solsAc.length === 1 && solsAc[0].length >= 3){
             var diasSel = {};
             solsAc[0].forEach(function(i){ diasSel[libresAc[i].fecha] = true; });
