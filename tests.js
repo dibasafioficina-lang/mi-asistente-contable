@@ -3754,6 +3754,112 @@ test("el acumulado que no alcanza la suma del reporte sale como diferencia", () 
   cerca(acum[0].monto, 16.40, "el reporte suma 66.40 y el asiento 50.00");
 });
 
+// Hallazgo (abril 2026): el Yappy se asienta en UN solo crédito de fin de mes, así que la venta del día no
+// tiene su crédito ese día. `ventasSinDeposito` lo denunciaba como "venta que entró y no salió por ningún
+// depósito" — ocho veces en abril (111.56 el 25) — y en marzo esas partidas viajaron al resumen del mes
+// siguiente con el banco del efectivo (STG) en vez de Banco General, donde no compensan nunca.
+function ventasPendientes(h){
+  return h.filter(function(x){ return String(x.concepto||"").indexOf("pendiente de identificar") >= 0; });
+}
+test("el método que un acumulado de fin de mes cubre no es una venta sin depositar", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 52.40, credito: 0, descripcion: "REPORTE DE VENTA DEL 14/04/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-04-15", debito: 14.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 15/04/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-04-30", debito: 0, credito: 66.40, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-04-01", null)).length, 0,
+     "el acumulado cubre esos dos días");
+});
+
+test("sin el asiento acumulado, la venta sin depositar SÍ sale", () => {
+  // La regla no puede taparlo por ser Yappy: lo tapa el asiento. Si no existe, es plata sin depositar.
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 52.40, credito: 0, descripcion: "REPORTE DE VENTA DEL 14/04/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-04-15", debito: 14.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 15/04/2026", referencia: "ME-2", fila: 2 }
+  ];
+  const v = ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-04-01", null));
+  eq(v.length, 2, "las dos siguen saliendo");
+  // Y el banco sale del MÉTODO que falta, no de donde compensó el efectivo: el Yappy va a Banco General.
+  eq(v[0].banco, "Banco General", "el banco sale del método del informe");
+  eq(v[1].banco, "Banco General");
+});
+
+// Hallazgo (abril 2026): un cobro con tarjeta partido entre los dos POS. El informe lo reportó el 28 y la
+// contabilidad lo asentó el 29, así que salían dos diferencias de 38.17 que se cancelan. Pero la del 28 cae
+// en los últimos días del mes y el Paso 1 la clasifica EN TRÁNSITO, así que colapsarCompensados —que solo
+// miraba las de clase "diff"— no las juntaba: una salía roja y la otra viajaba al resumen del mes siguiente.
+test("la mitad que quedó como fin de mes se cancela con su diferencia y no viaja al resumen", () => {
+  const reporte = [
+    { fecha: "2026-04-28", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" },
+    { fecha: "2026-04-29", banco: "Banistmo", metodo: "VISA", monto: 100.00, cajera: "A" }
+  ];
+  // El asiento del 29 trae las dos: los 100 del día y los 38.17 del 28.
+  const cg = [{ fecha: "2026-04-29", debito: 0, credito: 138.17,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 29/04/2026", referencia: "ME-1", fila: 5 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(contarRojas(h), 0, "no queda ninguna diferencia");
+  eq(h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 38.17) < 0.01; }).length, 0,
+     "y la de fin de mes ya no viaja al resumen");
+  const av = h.filter(function(x){ return String(x.concepto||"") === "Diferencias que se compensan"; });
+  eq(av.length, 1, "queda un solo aviso");
+});
+
+test("dos partidas de fin de mes que se cancelan entre sí NO se colapsan", () => {
+  // Sin ninguna diferencia real en el grupo no hay error de día que corregir, y colapsarlas las sacaría del
+  // resumen del mes siguiente sin motivo.
+  const reporte = [
+    { fecha: "2026-04-28", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" },
+    { fecha: "2026-04-29", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" }
+  ];
+  const h = paso1(reporte, [], null, 0.01, [], "2026-04-01", null);
+  eq(h.filter(esEnTransito).length, 2, "las dos siguen en tránsito");
+  eq(h.filter(function(x){ return String(x.concepto||"") === "Diferencias que se compensan"; }).length, 0);
+});
+
+// Hallazgo (abril 2026): el asiento describe el PROBLEMA y no el método ("DEPOSITO BANISTMO SE LE DESCONTO
+// AL CLIENTE 38.17 EL DIA 28/4 EN ST GEORGES, BANISTMO NO REFLEJA BAUCHER..."), así que
+// compatibleConRemision le prohibía tomar su propia remisión CLAVE — la misma fecha y el mismo importe.
+test("un asiento que no nombra el método toma su remisión del mismo día", () => {
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BANISTMO SE LE DESCONTO AL CLIENTE 38.17 EL DIA 28/4 EN ST GEORGES" }];
+  const est = [{ fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2,
+                 descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314" }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el asiento compensa");
+  eq(c.faltanEnDiario.length, 0, "y la línea del estado queda registrada");
+});
+
+test("con dos líneas posibles del mismo importe, el asiento sin método no se adivina", () => {
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BANISTMO SE LE DESCONTO AL CLIENTE 38.17 EL DIA 28/4" }];
+  const est = [
+    { fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01" },
+    { fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 3, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//02" }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "no se elige ninguna");
+  eq(c.faltanEnDiario.length, 2);
+});
+
+test("un asiento que SÍ nombra su método sigue sin poder tomar una remisión de otro", () => {
+  // El resguardo de siempre: el efectivo no se come la remisión de una venta con tarjeta.
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BRINKS DEL 29/04/2026" }];
+  const est = [{ fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2,
+                 descripcion: "CR REMISION - V/MC PAGO DE FACTURACION" }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "el efectivo no toma la remisión de tarjeta");
+  eq(c.faltanEnDiario.length, 1);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
