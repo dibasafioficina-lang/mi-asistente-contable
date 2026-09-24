@@ -3860,6 +3860,69 @@ test("un asiento que SÍ nombra su método sigue sin poder tomar una remisión d
   eq(c.faltanEnDiario.length, 1);
 });
 
+// Hallazgo (marzo 2026): el asiento del Yappy del mes se digitó "DEPOSITOS POR YAPPY 404.49" — sin declarar
+// "DEL 1 AL 31" —, así que el mecanismo de acumulados no lo veía y sus seis días salían como ventas sin
+// depositar. Su plata YA había compensado: el estado de Banco General de marzo trae los seis depósitos.
+test("un acumulado que no declara el rango igual cubre los días de su método", () => {
+  const reporte = [
+    { fecha: "2026-03-18", banco: "Banco General", metodo: "YAPPY", monto: 89.83, cajera: "A" },
+    { fecha: "2026-03-19", banco: "Banco General", metodo: "YAPPY", monto: 24.59, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-03-18", debito: 89.83, credito: 0, descripcion: "REPORTE DE VENTA DEL 18/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-19", debito: 24.59, credito: 0, descripcion: "REPORTE DE VENTA DEL 19/03/2026", referencia: "ME-2", fila: 2 },
+    // Sin rango en el texto, y por MÁS de la suma: el de marzo traía además un depósito que no era Yappy.
+    { fecha: "2026-03-31", debito: 0, credito: 404.49, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-03-01", null)).length, 0,
+     "el asiento del cierre los cubre");
+});
+
+test("un acumulado sin rango que NO alcanza no cubre nada", () => {
+  const reporte = [
+    { fecha: "2026-03-18", banco: "Banco General", metodo: "YAPPY", monto: 89.83, cajera: "A" },
+    { fecha: "2026-03-19", banco: "Banco General", metodo: "YAPPY", monto: 24.59, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-03-18", debito: 89.83, credito: 0, descripcion: "REPORTE DE VENTA DEL 18/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-19", debito: 24.59, credito: 0, descripcion: "REPORTE DE VENTA DEL 19/03/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-03-31", debito: 0, credito: 50.00, descripcion: "DEPOSITOS POR YAPPY 50.00", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-03-01", null)).length, 2,
+     "con 50.00 no se cubren 114.42: las dos siguen saliendo");
+});
+
+// Hallazgo (abril 2026): el informe trae 612.95 de Yappy y el asiento acumulado 403.33, así que el acumulado
+// salía con una diferencia de 209.62. Pero el asiento cuadra al centavo con los NUEVE depósitos que el banco
+// acreditó: los 209.62 son el Yappy del 30-abr, que compensa en mayo. No es una diferencia, es tránsito.
+test("la cola del rango que el banco aún no acreditó queda en tránsito, no como diferencia", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" },
+    { fecha: "2026-04-30", banco: "Banco General", metodo: "YAPPY", monto: 209.62, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 66.40,
+                descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-1", fila: 3 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 0, "el acumulado no sale como diferencia");
+  const t = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 209.62) < 0.01; });
+  eq(t.length, 1, "la cola queda en tránsito y viaja al resumen");
+});
+
+test("lo que sobra después de la cola de fin de mes sigue siendo diferencia", () => {
+  // La cola explica 209.62 y la diferencia es 259.62: los 50 de más son una diferencia real.
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 50.00, cajera: "A" },
+    { fecha: "2026-04-30", banco: "Banco General", metodo: "YAPPY", monto: 209.62, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 0.01,
+                descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-1", fila: 3 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; }).length, 1,
+     "la diferencia que la cola no explica sale igual");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

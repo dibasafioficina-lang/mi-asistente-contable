@@ -1612,7 +1612,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     var rango = rangoDeposito(x.descripcion, x.fecha), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
     if(rango && met){
       batches.push({ banco:bk || "", sinBanco: !bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
-        monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0 });
+        monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0, filas:[] });
       return false;
     }
     return true;
@@ -1694,7 +1694,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     }
     if(!elegidas || !elegidas.length) return;
     var bancosB = {};
-    elegidas.forEach(function(x){ cubiertasSinBanco.push(x); b.cubierto += x.monto; bancosB[x.banco] = true; });
+    elegidas.forEach(function(x){ cubiertasSinBanco.push(x); b.cubierto += x.monto; b.filas.push(x); bancosB[x.banco] = true; });
     b.cubierto = Math.round(b.cubierto*100)/100;
     b.resuelto = true;
     var bks = Object.keys(bancosB);
@@ -1715,10 +1715,37 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     difDiaP1[x.fecha] = Math.round(((difDiaP1[x.fecha]||0) + x.monto)*100)/100;
   }
   cubiertasSinBanco.forEach(anotarDiferido);
+  /* ---- Acumulado de fin de mes que NO declara el rango en su texto ----
+     "DEPOSITOS POR YAPPY 404.49" del 31-mar-2026: difiere el metodo del mes entero pero sin decir "DEL 1 AL
+     31", asi que el mecanismo de batches no lo ve. Sus dias tampoco tienen credito propio, y salian como
+     "venta que entro y no salio por ningun deposito": seis partidas que viajaban al resumen del mes
+     siguiente cuando su plata ya habia compensado — el estado de Banco General de marzo trae los seis
+     depositos de Yappy y ese asiento los acredito.
+     Se lo reconoce por monto: un credito del cierre, con metodo reconocible, que ALCANZA para cubrir los
+     dias sueltos de ese metodo. No se exige igualdad porque el asiento puede traer algo mas: el de marzo
+     son 404.49 e incluye un deposito de 157.94 que en el banco no figura como Yappy. Ese exceso es otra
+     cosa y lo reporta el cotejo del dia; lo que esta anotacion dice es solo que los dias sueltos salieron. */
+  (function(){
+    var finPer = ultimoDiaMes(cajaFiltrada.map(function(x){ return x.fecha; }));
+    if(!finPer) return;
+    cajaFiltrada.forEach(function(x){
+      if(x.fecha !== finPer || rangoDeposito(x.descripcion, x.fecha)) return;
+      var met = metodoDeposito(x.descripcion);
+      if(!met) return;
+      var sueltos = reporte.filter(function(q){
+        return q.metodo === met && q.monto > tolerancia && q.fecha && q.fecha < finPer &&
+               (cajaPorBMD[q.banco+"|"+met+"|"+q.fecha]||0) <= tolerancia;
+      });
+      if(sueltos.length < 2) return;
+      var suma = Math.round(sueltos.reduce(function(a,q){ return a+q.monto; },0)*100)/100;
+      if(x.credito < suma - tolerancia) return;   // no alcanza para cubrirlos: no se da por cubierto nada
+      sueltos.forEach(anotarDiferido);
+    });
+  })();
   var repParaDia = reporte.filter(function(x){
     if(cubiertasSinBanco.indexOf(x) !== -1) return false;
     var b=batchDe(x);
-    if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; anotarDiferido(x); return false; }
+    if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; b.filas.push(x); anotarDiferido(x); return false; }
     return true;
   });
   var repPorBancoDia = sumBy(repParaDia, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
@@ -1895,7 +1922,13 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
      28-feb, que estaban bien: sus asientos van en marzo.
      No se silencia: se clasifica EN TRANSITO, viaja al resumen del mes siguiente y si nunca llega a
      compensar se sigue arrastrando — que es como se detecta un deposito que no se hizo. */
-  var finMesP1 = ultimoDiaMes(Object.keys(dias));
+  // El mes dominante sale de TODAS las fechas del periodo, no solo de los dias que quedaron en el cotejo: si
+  // un acumulado se llevo las filas del reporte, `dias` queda corto y el borde de mes se perdia — con eso la
+  // cola del rango dejaba de reconocerse como fin de mes y volvia a salir como diferencia.
+  var finMesP1 = ultimoDiaMes(Object.keys(dias).concat(
+    (reporte||[]).map(function(x){ return x.fecha; }),
+    (diarioCaja||[]).map(function(x){ return x.fecha; })
+  ).filter(Boolean));
   function esFinDeMesP1(f){
     if(!finMesP1 || !f || f > finMesP1) return false;
     return distanciaBancaria(f, finMesP1) <= 3;
@@ -2076,6 +2109,37 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
       return;
     }
     var diff = Math.round((b.cubierto - b.monto)*100)/100;
+    /* ---- Lo de los ULTIMOS dias del rango puede no estar acreditado todavia ----
+       El asiento acumulado solo puede incluir lo que el banco ya acredito, y lo de los ultimos dias compensa
+       el mes siguiente. En abril de 2026 el informe trae 612.95 de Yappy y el asiento 403.33: la diferencia
+       (209.62) es exactamente el Yappy del 30-abr, que el estado de Banco General acredita en mayo — el
+       asiento cuadra al centavo con los nueve depositos que el banco SI acredito. Cuando la diferencia se
+       explica por la cola del rango, esas partidas quedan en transito y viajan al resumen, que es lo que
+       son; lo que sobre de ahi sigue siendo diferencia. */
+    if(diff > tolerancia && (b.filas||[]).length){
+      var cola = b.filas.slice().sort(function(p,q){ return String(p.fecha) < String(q.fecha) ? 1 : -1; });
+      var acum = 0, colaFin = [];
+      for(var ci=0; ci<cola.length && acum < diff - tolerancia; ci++){
+        if(!esFinDeMesP1(cola[ci].fecha)) break;   // ya no es fin de mes: el resto es diferencia real
+        acum = Math.round((acum + cola[ci].monto)*100)/100;
+        colaFin.push(cola[ci]);
+      }
+      if(colaFin.length && Math.abs(acum - diff) <= tolerancia){
+        var detCola = colaFin.map(function(q){ return q.fecha + " B/ " + fmt(q.monto); }).join(" + ");
+        hallazgos.push({
+          fecha: colaFin[0].fecha, banco: colaFin[0].banco || b.banco, monto: diff, clase:"en_transito",
+          concepto:"Depósito de fin de mes reportado por la cajera", comprobante:"",
+          partes: colaFin.map(function(q){ return { metodo:q.metodo, monto:q.monto }; }),
+          motivo:"depósito de fin de mes — el crédito se registra al compensar",
+          texto: (colaFin[0].banco || b.banco) + ": el asiento acumulado de " + b.metodo + " registró B/ " + fmt(b.monto) +
+                 " y el informe de cajeras trae B/ " + fmt(b.cubierto) + " en el período. La diferencia (B/ " + fmt(diff) +
+                 ") es lo de los últimos días — " + detCola + " —, que el banco compensa el mes siguiente: " +
+                 "el asiento solo pudo incluir lo ya acreditado. Queda en tránsito y viaja al resumen del próximo mes.",
+          fuente: "Reporte consolidado de caja / Diario Caja General"
+        });
+        return;
+      }
+    }
     if(Math.abs(diff) > tolerancia){
       hallazgos.push({
         fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
@@ -2204,6 +2268,10 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     });
   })();
 
+  // Que dia y cuanto difirio un acumulado de fin de mes: el Paso 1 es el unico que lo sabe (ve que asiento
+  // cubrio que dias). El cierre lo hereda para no recalcular las ventas sin deposito sin esa informacion —
+  // sin esto las seis partidas de Yappy de marzo volvian a aparecer en el resumen por la puerta de atras.
+  decisiones().diferidos = { firmaCaja: firmaDiario(diarioCaja), porDia: difDiaP1 };
   guardarDecisionDescargos(diarioCaja, transitoPrevio, descargos);   // los Pasos 2 y 3 heredan esta decision
   return colapsarCompensados(hallazgos, tolerancia);
 }
@@ -6833,7 +6901,11 @@ function ventasSinDeposito(opt){
   /* Metodos que ESTE mes se difirieron a fin de mes en un solo asiento acumulado ("DEPOSITOS POR YAPPY
      DEL 1 AL 30"): la venta del dia no tiene credito ese dia y eso no es un deposito que falte. Lo anota el
      Paso 1, que es el unico que sabe que acumulado cubrio que dias; sin el no se descuenta nada. */
-  var difDia = (opt && opt.difDia) || {};
+  var difDia = opt.difDia;
+  if(!difDia){
+    var decDif = STATE.decisiones && STATE.decisiones.diferidos;
+    difDia = (decDif && (!cg.length || decDif.firmaCaja === firmaDiario(cg))) ? decDif.porDia : {};
+  }
   // Lo que el Paso 1 dejo en transito ese dia (deposito reportado por la cajera, sin credito todavia).
   var transDia = (opt && opt.transDia) || {};
   if(!(opt && opt.transDia)) (Array.isArray(r.paso1) ? r.paso1 : []).forEach(function(x){
