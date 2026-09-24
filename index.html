@@ -3224,6 +3224,20 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
        aparece ninguna y los cuatro asientos de VISA Banistmo —2,536.20— salian como diferencia teniendo su
        plata en el banco. Cuando una parte se cubre asi, la del dia contiguo se anota aca para que al
        procesar ese dia no vuelva a pedir la misma linea ni la cuente dos veces. */
+    /* ---- El asiento no dice que es un deposito de CHEQUES ----
+       Al del 15-abr-2026 se le cayo el "CK" y quedo "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" — los otros
+       doce del mes dicen "CK DEL". El informe de cajeras si lo sabe: ese dia y banco reporta CHEQUE por ese
+       importe exacto, y su detalle lo trae partido en dos (208.14 + 200.42). Sin esto el consolidado salia
+       como diferencia roja Y ADEMAS sus dos cheques viajaban al resumen del mes siguiente: la misma plata
+       contada dos veces, y encima el cierre daba los cheques por no acreditados. */
+    function chequeSegunInforme(fecha, monto){
+      if(!reporte || !reporte.length) return false;
+      var tot = 0;
+      reporte.forEach(function(r){
+        if(r.fecha === fecha && r.banco === banco && r.metodo === "CHEQUE") tot = Math.round((tot + r.monto)*100)/100;
+      });
+      return tot > tolerancia && Math.abs(tot - monto) <= tolerancia;
+    }
     var cubiertasPorAgrupada = {};
     function clavePorParte(p){ return String(p.fecha) + "|" + normTxt(p.metodo) + "|" + Math.round((p.monto||0)*100); }
     // Descargo repartido en varias lineas que citan su fecha de origen: se aparta entero antes de conciliar,
@@ -3254,7 +3268,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
     cajaDep.forEach(function(dep){
       if(dep._descargo) return;
       // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
-      if(usarDetalleCheques && esChequeDesc(dep.descripcion)) return;
+      if(usarDetalleCheques && (esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito))) return;
       var pool = bancoCred[banco];
       var objetivo = dep.credito;
       // 0) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo: no tiene
@@ -3442,7 +3456,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         return;
       }
       // 3b) cheque no encontrado en su banco → buscar en los otros bancos
-      if(esChequeDesc(dep.descripcion)){
+      if(esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito)){
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
           if(b2===banco || otro) return;
@@ -6742,7 +6756,17 @@ function marcarChequesAcreditados(){
   // detalle completo del reporte, no solo los pendientes.
   var pool = det.map(function(x){ return {fecha:x.fecha, monto:x.monto, usado:false, depositado:false}; });
   diario.forEach(function(cr){
-    if(!(cr.credito>0) || !esChequeDesc(cr.descripcion)) return;
+    if(!(cr.credito>0)) return;
+    if(!esChequeDesc(cr.descripcion)){
+      // El asiento puede no decirlo (al del 15-abr-2026 se le cayo el "CK"). Se acepta solo si el detalle del
+      // informe de ESE dia y banco suma EXACTAMENTE el credito: es el deposito de esos cheques y ya salieron
+      // de Caja General. Sin la igualdad exacta no se toca — un credito de tarjeta no es un cheque.
+      var bkCr = clasificarBancoPorTexto(cr.descripcion);
+      if(!bkCr) return;
+      var totCk = Math.round(det.filter(function(x){ return x.banco===bkCr && x.fecha===cr.fecha; })
+                                .reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+      if(!(totCk > 0.005) || Math.abs(totCk - cr.credito) > 0.01) return;
+    }
     if(consumirClaveDescargo(descKeys, cr.fecha, cr.credito)) return;
     var combo = buscarSubsetSuma(pool, cr.fecha, cr.credito, 40, 0.01, 15, "atras");
     if(combo) combo.forEach(function(i){ pool[i].usado = true; pool[i].depositado = true; });

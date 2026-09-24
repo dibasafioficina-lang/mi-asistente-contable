@@ -3923,6 +3923,33 @@ test("lo que sobra después de la cola de fin de mes sigue siendo diferencia", (
      "la diferencia que la cola no explica sale igual");
 });
 
+// Hallazgo (abril 2026): al asiento del 15-abr se le cayó el "CK" y quedó "DEPOSITO DE BANISTMO DEL DEL
+// 15/04/2026" — los otros doce depósitos de cheque del mes dicen "CK DEL". La app no sabía que era un
+// depósito de cheques, así que el consolidado salía como diferencia roja Y ADEMÁS sus dos cheques (208.14 +
+// 200.42) viajaban al resumen del mes siguiente: la misma plata contada dos veces. Los cheques tardan — esos
+// dos entraron al banco el 20 de mayo.
+test("el asiento que no dice CK se reconoce por el CHEQUE del informe de ese día", () => {
+  const cg = [{ fecha: "2026-04-15", debito: 0, credito: 408.56, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" }];
+  const reporte = [{ fecha: "2026-04-15", banco: "Banistmo", metodo: "CHEQUE", monto: 408.56, cajera: "A" }];
+  const det = [{ fecha: "2026-04-15", banco: "Banistmo", monto: 208.14, fila: 29 },
+               { fecha: "2026-04-15", banco: "Banistmo", monto: 200.42, fila: 30 }];
+  const h = paso2(cg, [], [], null, null, det, 7, 0.01, reporte, null, {});
+  eq(contarRojas(h), 0, "el consolidado no sale como diferencia");
+  eq(h.filter(esEnTransito).length, 2, "y sus dos cheques quedan en tránsito, que es lo que son");
+});
+
+test("si el importe no cuadra con el cheque del informe, sigue siendo diferencia", () => {
+  // El resguardo: no se da por cheque cualquier asiento sin etiqueta. El informe tiene que respaldar el
+  // importe EXACTO, o un crédito de tarjeta pasaría por depósito de cheques.
+  const cg = [{ fecha: "2026-04-15", debito: 0, credito: 408.56, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" }];
+  const reporte = [{ fecha: "2026-04-15", banco: "Banistmo", metodo: "CHEQUE", monto: 300.00, cajera: "A" }];
+  const det = [{ fecha: "2026-04-15", banco: "Banistmo", monto: 300.00, fila: 29 }];
+  const h = paso2(cg, [], [], null, null, det, 7, 0.01, reporte, null, {});
+  eq(contarRojas(h), 1, "408.56 contra 300.00 del informe: no es el depósito de esos cheques");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
