@@ -3427,6 +3427,31 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           else { idxs.forEach(function(i){ pool[i].usado = false; delete pool[i].asignadoA; }); } // revertir: o cotejan todas, o ninguna
         }
       }
+      /* 3b) EL ASIENTO CONSOLIDA VARIOS METODOS Y EL INFORME NO TIENE ESE DIA.
+         Cuando el informe esta, el punto 3 desglosa el asiento y busca cada parte donde le toca. Sin el
+         informe no hay desglose: el asiento del 11-abr-2026 por 1,550.76 lleva la etiqueta "TARJETA VISA"
+         pero son VISA 982.09 + CLAVE 568.67, las dos acreditadas el 13-abr, y como poolDelMetodo reserva las
+         remisiones V/MC para los depositos que dicen VISA, la de CLAVE nunca podia entrar. Al informe de
+         cajeras de abril le falta la fila del 11, asi que salia como diferencia teniendo su plata en el banco.
+         Se prueba una combinacion de remisiones de tarjeta de CUALQUIER metodo, con cuatro candados: suma
+         exacta, combinacion UNICA, dentro de la ventana y hacia adelante, y tiene que MEZCLAR metodos —si
+         fueran todas del mismo, el punto 1 ya lo habria encontrado y esto no aporta nada. */
+      if(!combo && !partesHalladas && esDepositoTarjeta(dep.descripcion)){
+        var remis = pool.filter(function(e){
+          return !e.usado && (esRemisionVisa(e.desc) || esRemisionClave(e.desc)) && e.fecha >= dep.fecha &&
+                 distanciaBancaria(dep.fecha, e.fecha) <= Math.max(ventanaDias, 10);
+        });
+        if(remis.length >= 2){
+          var solsR = solucionesSuma(remis.map(function(e){ return e.monto; }), objetivo, tolerancia, 4, 1);
+          if(solsR && solsR.length === 1 && solsR[0].length >= 2){
+            var tiposR = {};
+            solsR[0].forEach(function(i){ tiposR[esRemisionVisa(remis[i].desc) ? "VMC" : "CLAVE"] = true; });
+            if(Object.keys(tiposR).length >= 2){
+              combo = solsR[0].map(function(i){ return pool.indexOf(remis[i]); }).filter(function(i){ return i >= 0; });
+            }
+          }
+        }
+      }
       if(combo){
         // A que venta pago cada linea: el Paso 4 no puede volver a usar una remision que ya pago otra venta.
         combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion, dep.fecha) ? "rango" : dep.fecha; });

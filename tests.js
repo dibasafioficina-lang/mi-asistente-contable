@@ -3950,6 +3950,53 @@ test("si el importe no cuadra con el cheque del informe, sigue siendo diferencia
   eq(contarRojas(h), 1, "408.56 contra 300.00 del informe: no es el depósito de esos cheques");
 });
 
+// Hallazgo (abril 2026): al informe de cajeras le falta la fila del 11-abr, así que el punto 3 no podía
+// desglosar el asiento de 1,550.76 ("DEPOSITO POR TARJETA VISA BANISTMO") — que son VISA 982.09 + CLAVE
+// 568.67, las dos acreditadas el 13-abr. poolDelMetodo reserva las remisiones V/MC para los depósitos que
+// dicen VISA, así que la de CLAVE nunca podía entrar y el asiento salía como diferencia.
+const REMIS_11 = [
+  { fecha: "2026-04-13", debito: 0, credito: 324.39, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 2 },
+  { fecha: "2026-04-13", debito: 0, credito: 57.47,  descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 3 },
+  { fecha: "2026-04-13", debito: 0, credito: 982.09, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 4 },
+  { fecha: "2026-04-13", debito: 0, credito: 568.67, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 5 }
+];
+test("un asiento de tarjeta cuadra mezclando remisiones V/MC y CLAVE cuando no hay informe", () => {
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 1550.76, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const h = paso2(cg, REMIS_11, [], null, null, null, 7, 0.01, null, null, {});
+  eq(contarRojas(h), 0, "el asiento cuadra contra las dos remisiones");
+  // Y toma las que le tocan: quedan libres las otras dos.
+  const nav = [{ fecha: "2026-04-11", debito: 1550.76, credito: 0, referencia: "ME-1", fila: 5,
+                 descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const c = conciliarBancoEstado(nav, REMIS_11, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 2, "deja libres las otras dos remisiones");
+  cerca(c.faltanEnDiario.reduce(function(a, x){ return a + x.monto; }, 0), 381.86, "las libres son 324.39 + 57.47");
+});
+
+test("con dos formas de sumar el asiento, no se mezcla nada", () => {
+  // 500 + 300 y 600 + 200 dan los mismos 800: elegir una le robaría las remisiones al depósito que sí las
+  // necesita. Se deja como diferencia, igual que en el resto de las reglas de combinación.
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 800.00, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const est = [
+    { fecha: "2026-04-13", debito: 0, credito: 500.00, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 2 },
+    { fecha: "2026-04-13", debito: 0, credito: 300.00, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 3 },
+    { fecha: "2026-04-13", debito: 0, credito: 600.00, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 4 },
+    { fecha: "2026-04-13", debito: 0, credito: 200.00, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 5 }
+  ];
+  eq(contarRojas(paso2(cg, est, [], null, null, null, 7, 0.01, null, null, {})), 1, "con dos combinaciones no se adivina");
+});
+
+test("el efectivo no cuadra mezclando remisiones de tarjeta", () => {
+  // El resguardo de siempre: solo un depósito de TARJETA puede compensar en remisiones de tarjeta.
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 1550.76, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO BRINKS DEL 11/04/2026" }];
+  const nav = [{ fecha: "2026-04-11", debito: 1550.76, credito: 0, referencia: "ME-1", fila: 5,
+                 descripcion: "DEPOSITO BRINKS DEL 11/04/2026" }];
+  const c = conciliarBancoEstado(nav, REMIS_11, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "el efectivo no toma remisiones de tarjeta");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
