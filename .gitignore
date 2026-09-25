@@ -3,3 +3,8 @@ node_modules/
 _*.js
 _*.html
 ~$*
+package.json
+package-lock.json
+en_transito_*.xlsx
+checklist_*.xlsx
+retenciones_*.xlsx

@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.08";
+var APP_VERSION="2026.10.13";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1158,11 +1158,24 @@ function grupoQueSeCancela(hallazgos, idx, inicio, n, usados, tol){
   rec(0, [], 0);
   return res;
 }
+/* ---- Una de las dos mitades quedo como "fin de mes" ----
+   El mismo deposito anotado en dos dias produce dos diferencias que suman cero, y eso es lo que colapsa
+   esta regla. Pero si la mitad positiva cae en los ultimos dias del mes, el Paso 1 la clasifica EN TRANSITO
+   —la cajera lo reporto y el credito va cuando el banco compense— y entonces las dos mitades ya no se
+   cancelan entre si: una sale como diferencia y la otra viaja al resumen del mes siguiente. Paso en abril
+   de 2026 con los 38.17 del cobro partido entre los dos POS: el informe los puso el 28 y la contabilidad
+   el 29, y la app los conto dos veces.
+   Se admiten al grupo, pero solo si hay al menos UNA diferencia real: dos partidas de fin de mes que se
+   cancelen entre si no son un error de dia, y colapsarlas las sacaria del resumen sin motivo. */
+function esFinDeMesTransito(h){
+  return h && h.clase === "en_transito" && /fin de mes/i.test(String(h.motivo||""));
+}
 function colapsarCompensados(hallazgos, tolerancia){
   var tol = tolerancia || 0.01;
   var idx = [];
   hallazgos.forEach(function(h,i){
-    if((h.clase||"diff")!=="diff") return;
+    var cl = h.clase||"diff";
+    if(cl!=="diff" && !esFinDeMesTransito(h)) return;
     if(typeof h.monto !== "number" || Math.abs(h.monto) <= tol) return;
     idx.push(i);
   });
@@ -1173,7 +1186,10 @@ function colapsarCompensados(hallazgos, tolerancia){
     for(var a=0; a<idx.length; a++){
       if(usados[idx[a]]) continue;
       var g = grupoQueSeCancela(hallazgos, idx, a, n, usados, tol);
-      if(g){ g.forEach(function(i){ usados[i]=true; }); grupos.push(g); }
+      if(!g) continue;
+      // Al menos una diferencia real en el grupo, o no se toca.
+      if(!g.some(function(i){ return (hallazgos[i].clase||"diff") === "diff"; })) continue;
+      g.forEach(function(i){ usados[i]=true; }); grupos.push(g);
     }
   }
   if(!grupos.length) return hallazgos;
@@ -1188,8 +1204,9 @@ function colapsarCompensados(hallazgos, tolerancia){
       concepto:"Diferencias que se compensan", comprobante:"", motivo:"anotado en otro día o columna",
       texto: (items[0].banco ? items[0].banco + ": " : "") + "estas " + items.length +
              " diferencias se cancelan entre sí, así que la plata está completa — lo que cambia es el día o la columna en que quedó anotada: " +
-             items.map(function(h){ return (h.fecha||"") + " B/ " + fmt(h.monto); }).join(" · ") +
-             ". Suman cero, así que el cotejo cierra. Corregí el reporte para que cada depósito quede en su día y su columna.",
+             items.map(function(h){ return (h.fecha||"") + " B/ " + fmt(h.monto) + (esFinDeMesTransito(h) ? " (el informe lo reportó ese día)" : ""); }).join(" · ") +
+             ". Suman cero, así que el cotejo cierra. Corregí el reporte para que cada depósito quede en su día y su columna." +
+             (items.some(esFinDeMesTransito) ? " Una de las dos venía como depósito de fin de mes: al cancelarse con la otra ya no viaja al resumen del mes siguiente." : ""),
       fuente: items[0].fuente || "Reporte consolidado de caja / Diario Caja General"
     });
   });
@@ -1530,20 +1547,37 @@ function esAchOChequeSinBanco(desc){
 // Rango de fechas dentro de la descripción de un depósito acumulado, ej. "DEL 1 AL 31 DE ENERO 2026"
 // o "DEL 01/01/2026 AL 31/01/2026". Devuelve {ym:"YYYY-MM", diaIni, diaFin} o null si no es un rango.
 var MESES_DEP = {ENERO:1,FEBRERO:2,MARZO:3,ABRIL:4,MAYO:5,JUNIO:6,JULIO:7,AGOSTO:8,SEPTIEMBRE:9,OCTUBRE:10,NOVIEMBRE:11,DICIEMBRE:12};
-function rangoDeposito(desc){
+// El asiento se teclea a mano y el rango sale de varias formas: sin el "DEL" y con el dia pegado al "AL"
+// ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026"), o sin el año ("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL").
+// Con la forma estricta, esas dos lineas no se reconocian como acumulado y cada dia del metodo salia
+// como diferencia roja en el Paso 1 (abril de 2026: la VISA de STG y todo el Yappy del mes).
+// Cuando falta el año se toma el de la FECHA DEL ASIENTO: un acumulado se asienta al cerrar el rango,
+// nunca antes, asi que si el mes del texto es POSTERIOR al del asiento, el rango es del año anterior.
+function rangoDeposito(desc, fechaAsiento){
   var n = normTxt(desc);
-  var m = n.match(/DEL\s+(\d{1,2})\s+AL\s+(\d{1,2})\s+DE\s+([A-Z]+)\s+(\d{4})/);
+  function anioDe(mes){
+    var f = String(fechaAsiento||"");
+    if(f.length < 7) return null;
+    var y = parseInt(f.slice(0,4),10), mo = parseInt(f.slice(5,7),10);
+    if(!y || !mo) return null;
+    return mes > mo ? y - 1 : y;
+  }
+  var m = n.match(/(?:DEL\s+)?(\d{1,2})\s*AL\s+(\d{1,2})\s+DE\s+([A-Z]+)(?:\s+DE)?\s*(\d{4})?/);
   if(m){
     var mes = MESES_DEP[m[3]]; if(!mes) return null;
     var d1 = parseInt(m[1],10), d2 = parseInt(m[2],10); if(d1===d2) return null;
-    return { ym: m[4]+"-"+String(mes).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+    var anio = m[4] ? parseInt(m[4],10) : anioDe(mes);
+    if(!anio) return null;
+    return { ym: anio+"-"+String(mes).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
   }
   var m2 = n.match(/DEL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s+AL\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
   if(m2){
-    var d1=parseInt(m2[1],10), mo=parseInt(m2[5],10), yy=(m2[6]||m2[3]||"");
-    var d2=parseInt(m2[4],10); if(yy.length===2) yy="20"+yy; if(!yy) return null;
-    if(d1===d2 && parseInt(m2[2],10)===mo) return null;
-    return { ym: yy+"-"+String(mo).padStart(2,"0"), diaIni: Math.min(d1,d2), diaFin: Math.max(d1,d2) };
+    var da=parseInt(m2[1],10), mo=parseInt(m2[5],10), yy=(m2[6]||m2[3]||"");
+    var db=parseInt(m2[4],10); if(yy.length===2) yy="20"+yy;
+    if(da===db && parseInt(m2[2],10)===mo) return null;
+    var anio2 = yy ? parseInt(yy,10) : anioDe(mo);
+    if(!anio2) return null;
+    return { ym: anio2+"-"+String(mo).padStart(2,"0"), diaIni: Math.min(da,db), diaFin: Math.max(da,db) };
   }
   return null;
 }
@@ -1552,6 +1586,7 @@ function metodoDeposito(desc){
   var n = normTxt(desc);
   if(n.indexOf("VISA")!==-1) return "VISA";
   if(n.indexOf("CLAVE")!==-1) return "CLAVE";
+  if(n.indexOf("YAPPY")!==-1) return "YAPPY";
   if(n.indexOf("ACH")!==-1) return "ACH";
   if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
   return null;
@@ -1561,16 +1596,23 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
   // cuadre banco a banco. Se toma un solo lado (credito) para no doble-contar.
-  var cajaFiltrada = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; });
+  // Un acumulado por rango que NO nombra banco ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026") entra igual:
+  // el bloque de abajo lo saca del cotejo diario y lo rutea por monto. Sin esto se descartaba aca mismo
+  // y cada dia de ese metodo salia como diferencia roja aunque el asiento estuviera hecho.
+  var cajaFiltrada = diarioCaja.filter(function(x){
+    if(!(x.credito>0)) return false;
+    if(clasificarBancoPorTexto(x.descripcion)) return true;
+    return !!(rangoDeposito(x.descripcion, x.fecha) && metodoDeposito(x.descripcion));
+  });
   // Depósitos ACUMULADOS por rango de fechas (ej. "DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO"):
   // el sistema a veces difiere un método al fin de mes en un solo monto. Se sacan del cotejo día por día
   // y se reconcilian aparte contra la SUMA de los montos diarios de ese método+banco del reporte del rango.
   var batches = [];
   cajaFiltrada = cajaFiltrada.filter(function(x){
-    var rango = rangoDeposito(x.descripcion), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
-    if(rango && met && bk){
-      batches.push({ banco:bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
-        monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0 });
+    var rango = rangoDeposito(x.descripcion, x.fecha), met = metodoDeposito(x.descripcion), bk = clasificarBancoPorTexto(x.descripcion);
+    if(rango && met){
+      batches.push({ banco:bk || "", sinBanco: !bk, metodo:met, ym:rango.ym, diaIni:rango.diaIni, diaFin:rango.diaFin,
+        monto:x.credito, fecha:x.fecha, desc:x.descripcion, ref:x.referencia, cubierto:0, filas:[] });
       return false;
     }
     return true;
@@ -1579,6 +1621,7 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     function(x){ return x.credito; });
   function batchDe(entry){
     for(var i=0;i<batches.length;i++){ var b=batches[i];
+      if(b.sinBanco) continue;   // sin banco en el texto no se puede rutear por banco: va por monto, mas abajo
       if(b.banco===entry.banco && b.metodo===entry.metodo && entry.fecha && entry.fecha.slice(0,7)===b.ym){
         var dia=parseInt(entry.fecha.slice(8,10),10);
         if(dia>=b.diaIni && dia<=b.diaFin) return b;
@@ -1599,6 +1642,10 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   // "bancos diferentes"); en cualquier otro caso el método se difirió limpio y lo cubre el batch.
   var BANCOS_DEP = ["STG","Banistmo"];
   function swapDeBanco(B, D){
+    // Solo hay swap entre los bancos que reciben los MISMOS metodos (tarjeta, cheque, ACH). El Yappy solo
+    // entra a Banco General: sin esto, cada dia de Yappy se tomaba por "registrado en otro banco" porque
+    // Banistmo tenia excedente ese dia, y el acumulado del mes quedaba con una diferencia inventada.
+    if(BANCOS_DEP.indexOf(B) === -1) return false;
     if((cajaPorBancoDia[B+"|"+D]||0) >= tolerancia) return false;
     var esperado = repFullBD[B+"|"+D]||0; if(esperado <= tolerancia) return false;
     for(var i=0;i<BANCOS_DEP.length;i++){ var B2=BANCOS_DEP[i]; if(B2===B) continue;
@@ -1610,9 +1657,95 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   Object.keys(batchedBD).forEach(function(k){
     var p=k.split("|"); if(!swapDeBanco(p[0], p[1])) cubiertoK[k]=true;
   });
+  /* ---- Acumulado por rango que no dice a que banco entro ----
+     "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026" por B/ 1,443.41: el metodo y el rango estan, el banco no.
+     No se puede rutear por texto, pero si por monto: los unicos dias que ese asiento puede estar
+     cubriendo son los del mismo metodo que NO tienen su propio credito en el diario (los que ya tienen
+     asiento diario estan pagos y no entran). Si esos dias suman exacto el monto del asiento — y de UNA
+     sola manera — el acumulado los cubre. Si hay dos combinaciones posibles no se adivina: queda como
+     diferencia, igual que en el resto de la app. */
+  var cajaPorBMD = {};
+  cajaFiltrada.forEach(function(x){
+    var bk2 = clasificarBancoPorTexto(x.descripcion), m2 = metodoDeposito(x.descripcion);
+    if(!bk2 || !m2) return;
+    var k2 = bk2+"|"+m2+"|"+x.fecha;
+    cajaPorBMD[k2] = Math.round(((cajaPorBMD[k2]||0) + x.credito)*100)/100;
+  });
+  var cubiertasSinBanco = [];
+  batches.forEach(function(b){
+    if(!b.sinBanco) return;
+    var cand = reporte.filter(function(x){
+      if(x.metodo !== b.metodo || !(x.monto > tolerancia) || !x.fecha) return false;
+      if(x.fecha.slice(0,7) !== b.ym) return false;
+      var dia = parseInt(x.fecha.slice(8,10),10);
+      if(dia < b.diaIni || dia > b.diaFin) return false;
+      if(cubiertasSinBanco.indexOf(x) !== -1) return false;                 // ya la tomo otro acumulado
+      return (cajaPorBMD[x.banco+"|"+b.metodo+"|"+x.fecha]||0) <= tolerancia; // el dia no tiene asiento propio
+    });
+    if(!cand.length) return;
+    var elegidas = null;
+    // El caso normal: el asiento difiere TODOS los dias sueltos del metodo. Se prueba primero, asi no se
+    // enumeran subconjuntos de un mes entero.
+    var todo = Math.round(cand.reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+    if(Math.abs(todo - b.monto) <= tolerancia) elegidas = cand;
+    else {
+      var sols = solucionesSuma(cand.map(function(x){ return x.monto; }), b.monto, tolerancia, Math.min(cand.length, 20), 1);
+      if(sols && sols.length === 1) elegidas = sols[0].map(function(i){ return cand[i]; });
+    }
+    if(!elegidas || !elegidas.length) return;
+    var bancosB = {};
+    elegidas.forEach(function(x){ cubiertasSinBanco.push(x); b.cubierto += x.monto; b.filas.push(x); bancosB[x.banco] = true; });
+    b.cubierto = Math.round(b.cubierto*100)/100;
+    b.resuelto = true;
+    var bks = Object.keys(bancosB);
+    b.banco = bks.length === 1 ? bks[0] : "";   // si cubre un solo banco, queda etiquetado
+    b.bancos = bks;
+  });
+  /* ---- Lo que un acumulado de fin de mes cubre no tiene credito el dia que se cobro ----
+     La venta del dia entra a Caja General y sale cuando se deposita, pero un metodo diferido a fin de mes
+     no sale ese dia: sale el 30, en un solo asiento. Sin anotarlo, `ventasSinDeposito` lo denunciaba como
+     "venta que entro y no salio por ningun deposito" — el Yappy de abril de 2026 salia asi ocho veces
+     (111.56 el 25-abr, y los otros siete dias), y en marzo esas partidas viajaron al resumen del mes
+     siguiente con el banco del efectivo en vez de Banco General, donde no compensan nunca.
+     Se anota SOLO lo que un acumulado real cubrio: si el asiento no existe, el pendiente sigue saliendo. */
+  var difDiaP1 = {};
+  function anotarDiferido(x){
+    // La VISA de St. Georges ya la descuenta visaDia con el informe de retenciones, exista o no el asiento.
+    if(x.banco === "STG" && normTxt(x.metodo).indexOf("VISA") !== -1) return;
+    difDiaP1[x.fecha] = Math.round(((difDiaP1[x.fecha]||0) + x.monto)*100)/100;
+  }
+  cubiertasSinBanco.forEach(anotarDiferido);
+  /* ---- Acumulado de fin de mes que NO declara el rango en su texto ----
+     "DEPOSITOS POR YAPPY 404.49" del 31-mar-2026: difiere el metodo del mes entero pero sin decir "DEL 1 AL
+     31", asi que el mecanismo de batches no lo ve. Sus dias tampoco tienen credito propio, y salian como
+     "venta que entro y no salio por ningun deposito": seis partidas que viajaban al resumen del mes
+     siguiente cuando su plata ya habia compensado — el estado de Banco General de marzo trae los seis
+     depositos de Yappy y ese asiento los acredito.
+     Se lo reconoce por monto: un credito del cierre, con metodo reconocible, que ALCANZA para cubrir los
+     dias sueltos de ese metodo. No se exige igualdad porque el asiento puede traer algo mas: el de marzo
+     son 404.49 e incluye un deposito de 157.94 que en el banco no figura como Yappy. Ese exceso es otra
+     cosa y lo reporta el cotejo del dia; lo que esta anotacion dice es solo que los dias sueltos salieron. */
+  (function(){
+    var finPer = ultimoDiaMes(cajaFiltrada.map(function(x){ return x.fecha; }));
+    if(!finPer) return;
+    cajaFiltrada.forEach(function(x){
+      if(x.fecha !== finPer || rangoDeposito(x.descripcion, x.fecha)) return;
+      var met = metodoDeposito(x.descripcion);
+      if(!met) return;
+      var sueltos = reporte.filter(function(q){
+        return q.metodo === met && q.monto > tolerancia && q.fecha && q.fecha < finPer &&
+               (cajaPorBMD[q.banco+"|"+met+"|"+q.fecha]||0) <= tolerancia;
+      });
+      if(sueltos.length < 2) return;
+      var suma = Math.round(sueltos.reduce(function(a,q){ return a+q.monto; },0)*100)/100;
+      if(x.credito < suma - tolerancia) return;   // no alcanza para cubrirlos: no se da por cubierto nada
+      sueltos.forEach(anotarDiferido);
+    });
+  })();
   var repParaDia = reporte.filter(function(x){
+    if(cubiertasSinBanco.indexOf(x) !== -1) return false;
     var b=batchDe(x);
-    if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; return false; }
+    if(b && cubiertoK[x.banco+"|"+x.fecha]){ b.cubierto += x.monto; b.filas.push(x); anotarDiferido(x); return false; }
     return true;
   });
   var repPorBancoDia = sumBy(repParaDia, function(x){return x.banco+"|"+x.fecha;}, function(x){return x.monto;});
@@ -1628,10 +1761,27 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
      excedente sobre el reporte que alcance para cubrirlo. Sin la segunda, un depósito legítimo del mes que
      por casualidad coincida en monto con una partida en tránsito se borraría del cotejo sin decir nada. */
   var descargos = [], avisosDescargo = [];
+  // Acumulados de fin de mes que traen adentro el descargo del transito anterior: el Paso 3 lo hereda para
+  // no pedirle al banco un importe que incluye plata que el Paso 0 ya dio por compensada.
+  var descargosEnAcumulado = [];
   if(transitoPrevio && transitoPrevio.length){
     var poolPrev = transitoPrevio.filter(pasaPorCajaGeneral).map(function(t){
-      return { fecha:t.fecha, monto:t.monto, banco:t.banco, concepto:t.concepto, partes:t.partes, usado:false };
+      return { fecha:t.fecha, monto:t.monto, banco:t.banco, concepto:t.concepto, partes:t.partes, usado:false, compensada:false };
     });
+    /* Cuales de esas partidas el Paso 0 vio COMPENSAR en el banco este mes. Es la evidencia que habilita
+       reconocer un descargo embutido en un asiento acumulado: sin ella, cualquier importe que coincida por
+       casualidad se daria por descargado. Se cruza por banco + fecha + importe, igual que poolParaDescargos. */
+    (function(){
+      var dec = STATE.decisiones && STATE.decisiones.transito;
+      (dec && dec.compensadas ? dec.compensadas : []).forEach(function(ch){
+        if(ch.sentido === "debito") return;
+        for(var i=0;i<poolPrev.length;i++){
+          var o = poolPrev[i];
+          if(!o.compensada && o.banco === ch.banco && Math.abs(o.monto - ch.monto) < 0.005 &&
+             o.fecha === (ch.fechaOrig || ch.fecha)){ o.compensada = true; return; }
+        }
+      });
+    })();
     function recalcCajaP1(){
       cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
         function(x){ return x.credito; });
@@ -1789,7 +1939,13 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
      28-feb, que estaban bien: sus asientos van en marzo.
      No se silencia: se clasifica EN TRANSITO, viaja al resumen del mes siguiente y si nunca llega a
      compensar se sigue arrastrando — que es como se detecta un deposito que no se hizo. */
-  var finMesP1 = ultimoDiaMes(Object.keys(dias));
+  // El mes dominante sale de TODAS las fechas del periodo, no solo de los dias que quedaron en el cotejo: si
+  // un acumulado se llevo las filas del reporte, `dias` queda corto y el borde de mes se perdia — con eso la
+  // cola del rango dejaba de reconocerse como fin de mes y volvia a salir como diferencia.
+  var finMesP1 = ultimoDiaMes(Object.keys(dias).concat(
+    (reporte||[]).map(function(x){ return x.fecha; }),
+    (diarioCaja||[]).map(function(x){ return x.fecha; })
+  ).filter(Boolean));
   function esFinDeMesP1(f){
     if(!finMesP1 || !f || f > finMesP1) return false;
     return distanciaBancaria(f, finMesP1) <= 3;
@@ -1945,6 +2101,30 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
         });
         return;
       }
+      /* ---- Efectivo asentado al cierre que el informe de la cajera no trae ----
+         Al reves del caso de arriba: el credito a Caja General YA se hizo, asi que la plata salio de la
+         cuenta y lo que queda en transito es del lado del banco — el Paso 2 hereda esta misma linea por
+         `decisiones().efectivo.filas` y la busca en el estado de cuenta, que es donde corresponde
+         reportarla. Emitirla acá como diferencia la contaba dos veces (roja en el Paso 1 y transito en el
+         Paso 2), y como transito de Caja General habria inflado el saldo de apertura del mes siguiente.
+         Lo que si falta de verdad es la linea en el informe de la cajera: eso es lo que dice el aviso.
+         Caso real: 28-may-2026, "DEPOSITO DEL 28/5/2026" por B/ 73.00 en ventanilla, con el informe en
+         B/ 0.00 ese dia. Solo al cierre: un efectivo sin reportar en medio del mes sigue siendo rojo,
+         porque ahi no hay rezago del banco que lo explique. */
+      if(diffEf < -tolerancia && ls.length && esFinDeMesP1(f)){
+        hallazgos.push({
+          fecha:f, banco:"", monto:Math.round(Math.abs(diffEf)*100)/100, clase:"aviso",
+          concepto:"Efectivo asentado que el informe de la cajera no trae", comprobante:"",
+          motivo:"falta la línea en el reporte consolidado de caja",
+          texto: "Efectivo " + f + ": Caja General acreditó B/ " + fmt(b) + enCaja + " y el informe de la cajera " +
+                 (a > 0 ? "solo trae B/ " + fmt(a) + (det ? " (" + det + ")" : "") : "no lo trae") +
+                 " (falta B/ " + fmt(Math.abs(diffEf)) + "). Es de los últimos días del mes: el asiento ya sacó la plata de " +
+                 "Caja General y el Paso 2 la busca en el banco, así que acá no hay descuadre — lo que falta es la línea " +
+                 "en el informe de la cajera." + comprobanteTxt(f),
+          fuente: "Reporte consolidado de caja (efectivo) / Diario Caja General"
+        });
+        return;
+      }
       hallazgos.push({
         fecha:f, banco:"", monto:diffEf, clase:"diff", concepto:"Efectivo", comprobante:"",
         texto: "Efectivo " + f + ": la cajera reportó B/ " + fmt(a) + (det ? " (" + det + ")" : "") + " y Caja General acreditó B/ " + fmt(b) +
@@ -1956,12 +2136,91 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   }
 
   batches.forEach(function(b){
+    var enBk = b.banco ? " " + b.banco : "";
+    // No dice banco y no hubo forma de saber que dias cubre: sin eso el monto no se puede cotejar con nada.
+    if(b.sinBanco && !b.resuelto){
+      hallazgos.push({
+        fecha:b.fecha, banco:"", monto:b.monto, clase:"diff",
+        texto: "Depósito acumulado " + b.metodo + " (\"" + String(b.desc).trim() + "\") por B/ " + fmt(b.monto) +
+               ": el asiento no dice a qué banco entró y los días del " + b.diaIni + " al " + b.diaFin +
+               " sin crédito propio no suman ese monto de una sola forma, así que no se puede saber qué está " +
+               "cubriendo. Agregá el banco en la descripción del asiento.",
+        fuente: "Reporte consolidado de caja / Diario Caja General"
+      });
+      return;
+    }
     var diff = Math.round((b.cubierto - b.monto)*100)/100;
+    /* ---- Lo de los ULTIMOS dias del rango puede no estar acreditado todavia ----
+       El asiento acumulado solo puede incluir lo que el banco ya acredito, y lo de los ultimos dias compensa
+       el mes siguiente. En abril de 2026 el informe trae 612.95 de Yappy y el asiento 403.33: la diferencia
+       (209.62) es exactamente el Yappy del 30-abr, que el estado de Banco General acredita en mayo — el
+       asiento cuadra al centavo con los nueve depositos que el banco SI acredito. Cuando la diferencia se
+       explica por la cola del rango, esas partidas quedan en transito y viajan al resumen, que es lo que
+       son; lo que sobre de ahi sigue siendo diferencia. */
+    if(diff > tolerancia && (b.filas||[]).length){
+      var cola = b.filas.slice().sort(function(p,q){ return String(p.fecha) < String(q.fecha) ? 1 : -1; });
+      var acum = 0, colaFin = [];
+      for(var ci=0; ci<cola.length && acum < diff - tolerancia; ci++){
+        if(!esFinDeMesP1(cola[ci].fecha)) break;   // ya no es fin de mes: el resto es diferencia real
+        acum = Math.round((acum + cola[ci].monto)*100)/100;
+        colaFin.push(cola[ci]);
+      }
+      if(colaFin.length && Math.abs(acum - diff) <= tolerancia){
+        var detCola = colaFin.map(function(q){ return q.fecha + " B/ " + fmt(q.monto); }).join(" + ");
+        hallazgos.push({
+          fecha: colaFin[0].fecha, banco: colaFin[0].banco || b.banco, monto: diff, clase:"en_transito",
+          concepto:"Depósito de fin de mes reportado por la cajera", comprobante:"",
+          partes: colaFin.map(function(q){ return { metodo:q.metodo, monto:q.monto }; }),
+          motivo:"depósito de fin de mes — el crédito se registra al compensar",
+          texto: (colaFin[0].banco || b.banco) + ": el asiento acumulado de " + b.metodo + " registró B/ " + fmt(b.monto) +
+                 " y el informe de cajeras trae B/ " + fmt(b.cubierto) + " en el período. La diferencia (B/ " + fmt(diff) +
+                 ") es lo de los últimos días — " + detCola + " —, que el banco compensa el mes siguiente: " +
+                 "el asiento solo pudo incluir lo ya acreditado. Queda en tránsito y viaja al resumen del próximo mes.",
+          fuente: "Reporte consolidado de caja / Diario Caja General"
+        });
+        return;
+      }
+    }
+    /* ---- El acumulado trae adentro el DESCARGO del transito del mes anterior ----
+       El credito a Caja General se registra cuando el banco COMPENSA, asi que una partida que quedo en
+       circulacion el mes pasado se descarga este mes. Si ese descargo se digita DENTRO del asiento acumulado
+       del metodo —en vez de en su propio asiento del dia que compenso— el acumulado registra MAS de lo que el
+       informe de cajeras trae en el rango, y la diferencia salia como roja.
+       Caso real: 31-may-2026, "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO" por B/ 973.96 = 764.34 del Yappy de
+       mayo + 209.62 del Yappy del 30-abr, que quedo en circulacion y el banco acredito el 1-may. Las dos
+       cosas son legitimas; lo que faltaba era que la app entendiera el asiento.
+       Solo con la evidencia del Paso 0: misma cuenta bancaria, el Paso 0 tiene que haberla visto COMPENSAR
+       este mes, y la combinacion tiene que ser UNICA. Sin eso queda como diferencia, igual que siempre. */
+    if(diff < -tolerancia && poolPrev){
+      var faltaD = Math.round(-diff*100)/100;
+      var candD = poolPrev.filter(function(p){ return !p.usado && p.compensada && p.banco === b.banco; });
+      var solsD = candD.length ? solucionesSuma(candD.map(function(p){ return p.monto; }), faltaD, tolerancia, 6, 1) : null;
+      if(solsD && solsD.length === 1){
+        var partD = solsD[0].map(function(i){ return candD[i]; });
+        partD.forEach(function(p){ p.usado = true; });
+        descargosEnAcumulado.push({ banco:b.banco, fecha:b.fecha, monto:b.monto, descargo:faltaD });
+        hallazgos.push({
+          fecha:b.fecha, banco:b.banco, monto:faltaD, clase:"informativo",
+          concepto:"Descargo de tránsito incluido en el acumulado", comprobante: refME(b.ref),
+          partidas: partD.map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
+          motivo:"el asiento acumulado trae el descargo del mes anterior",
+          texto: b.banco + ": el asiento acumulado de " + b.metodo + " registró B/ " + fmt(b.monto) +
+                 " y el informe de cajeras trae B/ " + fmt(b.cubierto) + " en el período. La diferencia (B/ " +
+                 fmt(faltaD) + ") es el descargo de " + partD.length + " partida(s) que venían en tránsito del mes " +
+                 "anterior y el banco compensó este mes: " +
+                 partD.map(function(p){ return p.fecha + " B/ " + fmt(p.monto); }).join(", ") +
+                 ". El asiento junta las dos cosas y las dos son correctas, así que no hay nada que corregir — " +
+                 "queda más claro si el descargo se fecha el día que el banco compensó, pero no es un error.",
+          fuente: "Reporte consolidado de caja / Resumen en tránsito del mes anterior / Diario Caja General"
+        });
+        return;
+      }
+    }
     if(Math.abs(diff) > tolerancia){
       hallazgos.push({
         fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
-        texto: "Depósito acumulado " + b.metodo + " " + b.banco + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
-               fmt(b.monto) + " pero la suma de los depósitos diarios de " + b.metodo + " " + b.banco +
+        texto: "Depósito acumulado " + b.metodo + enBk + " (\"" + String(b.desc).trim() + "\"): el sistema registró B/ " +
+               fmt(b.monto) + " pero la suma de los depósitos diarios de " + b.metodo + enBk +
                " del reporte (días " + b.diaIni + " al " + b.diaFin + ") es B/ " + fmt(b.cubierto) +
                " (dif. B/ " + fmt(diff) + "). Revisa si algún día quedó registrado en otro banco o método.",
         fuente: "Reporte consolidado de caja / Diario Caja General"
@@ -2080,11 +2339,18 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
       });
     });
     var bancoEfP1 = (STATE.decisiones && STATE.decisiones.efectivo && STATE.decisiones.efectivo.banco) || null;
-    ventasSinDeposito({ cg:diarioCaja, visaDia:visaDiaP1, transDia:transDiaP1, claves:clavesP1 }).forEach(function(v){
+    ventasSinDeposito({ cg:diarioCaja, visaDia:visaDiaP1, difDia:difDiaP1, transDia:transDiaP1, claves:clavesP1, reporte:reporte }).forEach(function(v){
       hallazgos.push(itemVentaSinDeposito(v, bancoEfP1));
     });
   })();
 
+  // Que dia y cuanto difirio un acumulado de fin de mes: el Paso 1 es el unico que lo sabe (ve que asiento
+  // cubrio que dias). El cierre lo hereda para no recalcular las ventas sin deposito sin esa informacion —
+  // sin esto las seis partidas de Yappy de marzo volvian a aparecer en el resumen por la puerta de atras.
+  decisiones().diferidos = { firmaCaja: firmaDiario(diarioCaja), porDia: difDiaP1 };
+  // El Paso 3 tiene que buscar en el banco el importe del acumulado MENOS el descargo que trae adentro: esa
+  // parte la consumio el Paso 0 contra el credito del dia que compenso, asi que ya no esta libre en el estado.
+  decisiones().acumDescargo = { firmaCaja: firmaDiario(diarioCaja), lista: descargosEnAcumulado };
   guardarDecisionDescargos(diarioCaja, transitoPrevio, descargos);   // los Pasos 2 y 3 heredan esta decision
   return colapsarCompensados(hallazgos, tolerancia);
 }
@@ -2111,6 +2377,31 @@ function primerDiaMes(fechas){
 // Detecta Brinks en cualquiera de sus variantes: "Brinks Panama" (junto) o "Brink S Panama" (con espacio,
 // como aparece en el estado de cuenta de STG). Por eso se busca "BRINK" y no "BRINKS".
 function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
+/* ---- El ACH de Brinks dice QUE DIA se retiro el efectivo ----
+   "Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi" = el retiro del 13/05/26, que el banco acredita
+   uno o dos dias despues. Sin leer esa fecha, para el cotejo todos los ACH son intercambiables mientras el
+   importe cuadre, y uno se va al dia equivocado dejando huerfano al que le tocaba: en mayo de 2026 el
+   asiento del 4-may (452.22) cuadro con 65.00 + 385.00 + 2.22 llevandose el ACH del retiro del 13-may, y el
+   efectivo del 12-may (66.66 = 65.00 + 1.66) salio como "no aparece en el estado de cuenta".
+   Confirmado por Diba (25-sep-2026): esa fecha es la del retiro en el local. */
+function fechaRetiroBrinks(desc){
+  if(!esBrinks(desc)) return null;
+  var m = String(desc||"").match(/(?:^|\D)(\d{2})(\d{2})(\d{2})(?:\D|$)/);
+  if(!m) return null;
+  var d = parseInt(m[1],10), mo = parseInt(m[2],10), y = 2000 + parseInt(m[3],10);
+  if(d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+  return y + "-" + String(mo).padStart(2,"0") + "-" + String(d).padStart(2,"0");
+}
+/* Brinks no puede retirar el dia F el efectivo que entro a caja DESPUES: un asiento muy anterior al retiro
+   no es suyo. Solo se corta ese caso —el imposible—; si el retiro es anterior o del mismo dia que el
+   asiento no se restringe nada, porque el asiento se digita a veces dias despues del retiro. */
+var ACH_ANTICIPO_MAX = 3;   // dias habiles de anticipo tolerados entre el asiento y el retiro
+function retiroCompatible(descEstado, fechaAsiento){
+  var f = fechaRetiroBrinks(descEstado);
+  if(!f || !fechaAsiento) return true;          // el texto no dice la fecha: como siempre
+  if(f <= fechaAsiento) return true;            // el retiro es anterior o del mismo dia: normal
+  return distanciaBancaria(fechaAsiento, f) <= ACH_ANTICIPO_MAX;
+}
 // Depósito de EFECTIVO del diario: el camión de valores (Brinks) o el que se lleva a ventanilla
 // ("DEPOSITO DEL 09/6/2026"). Se distingue de los depósitos por tarjeta (VISA/CLAVE/Yappy), de los ACH y
 // de los cheques, porque solo el efectivo se comporta como se describe en consolidarEfectivoDelDia.
@@ -2142,6 +2433,14 @@ function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
     }
   }
   return mejor ? mejor.sel : null;
+}
+/* El efectivo SE NOMBRA, aunque no diga un metodo de tarjeta: el camion dice Brinks y la ventanilla es
+   "DEPOSITO DEL <fecha>" y nada mas. Queda fuera de la pasada 4 de conciliarBancoEstado — si no, un Brinks
+   de 38.17 se comeria la remision de tarjeta de 38.17 del mismo dia, que es justo lo que
+   compatibleConRemision existe para impedir. */
+function esEfectivoConNombre(desc){
+  if(esBrinks(desc)) return true;
+  return /^DEPOSITOS?\s+DEL\s+\d/.test(normTxt(desc));
 }
 function esDepositoEfectivo(desc){
   var n = normTxt(desc);
@@ -2273,7 +2572,7 @@ function retencionDelRango(retVisaPorDia, rg){
 function conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolerancia){
   poolDiario.forEach(function(d){
     if(d.usado) return;
-    var rg = rangoDeposito(d.descripcion);
+    var rg = rangoDeposito(d.descripcion, d.fecha);
     if(!rg) return;
     var cands = poolDelMetodo(poolEstado, d.descripcion);
     if(!cands || !cands.length) return;
@@ -2362,6 +2661,18 @@ function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia, direc
     if(Math.abs(montoConc(pool[idxs[a]]) + montoConc(pool[idxs[b]]) + montoConc(pool[idxs[c]]) - objetivo) <= tolerancia) return [idxs[a],idxs[b],idxs[c]];
   }
   return null;
+}
+/* ---- Cuanto antes del cierre un deposito ya no alcanza a compensar ----
+   El Paso 3 lo decide por metodo desde hace meses (esBrinks 5 dias, tarjeta 3, el resto 0) y el Paso 1 con
+   una ventana de 3 dias bancarios. El Paso 2 era el unico que exigia el ULTIMO DIA CALENDARIO exacto, asi
+   que cuando el mes termina en fin de semana el ultimo dia CON ACTIVIDAD no calificaba: la CLAVE del sabado
+   30-may-2026 por B/ 1,352.68 salia como diferencia porque el mes cerraba el domingo 31, y su remision
+   entra en junio. Se unifica el criterio con el del Paso 3, medido en dias BANCARIOS —que es lo que tarda
+   el banco— en vez de dias de calendario. */
+function lagFinMes(desc){
+  if(esBrinks(desc)) return 5;
+  var n = normTxt(desc);
+  return /TARJETA|VISA|CLAVE|YAPPY/.test(n) ? 3 : 0;
 }
 function esChequeDesc(desc){
   var n = normTxt(desc);
@@ -2454,14 +2765,40 @@ function marcarNeutros(diario){
     }
   });
 }
+/* ---- Una transaccion ANULADA se va con su contrapartida ----
+   El sistema anula un movimiento marcando UNA linea "ABORTED", pero la transaccion son las dos: la original y
+   la que la reversa, bajo el mismo comprobante. Filtrando solo la que lleva la palabra, la otra se queda en el
+   cotejo y compite con el asiento bueno por la misma linea del banco: una cuadra y la otra viaja al resumen
+   mes tras mes sin poder compensar nunca.
+   Dos casos reales, los dos traspasos entre cuentas propias que se anularon y se volvieron a registrar:
+     27-mar-2026  PAY0004263 (anulado) + PAY0004264 por B/ 1,003.34 — el banco lo acredito una vez, el 27.
+     24-abr-2026  PAY0004295 (anulado) + PAY0004300 por B/   650.00 — idem, el 24.
+   Es la misma regla que el Modulo 2 ya aplica en parseRetenciones y que CLAUDE.md documenta: la anulada se
+   excluye JUNTO CON su contrapartida. El Modulo 1 filtraba solo la linea marcada. */
+function refsAnuladasDiario(arr){
+  var refs = {};
+  (arr||[]).forEach(function(x){
+    if(normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED") === -1) return;
+    var r = String(x.referencia==null ? "" : x.referencia).trim();
+    if(r) refs[r] = true;
+  });
+  return refs;
+}
 function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
   marcarNeutros(diarioDeb);
+  // Las dos listas se miran por separado: un comprobante anulado en el diario no anula nada en el estado.
+  var anuladasDeb = refsAnuladasDiario(diarioDeb), anuladasCred = refsAnuladasDiario(estadoCred);
   function limpio(arr, campo){
     // Se excluyen: _chqUsado (ya emparejado por la pasada de cheques/Paso 0), _transitoUsado (línea del
     // estado que compensó una partida en tránsito del mes anterior: su asiento es del mes pasado, no de
     // este) y _neutro (traspaso interno de neto cero, no llega al estado de cuenta).
-    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
+    var anuladas = (campo === "debito") ? anuladasDeb : anuladasCred;
+    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro &&
+        normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1 &&
+        !anuladas[String(x.referencia==null ? "" : x.referencia).trim()]; })
+      // _montoConc: el Paso 3 lo marca en un asiento acumulado que trae adentro el descargo del transito
+      // anterior (ver marcarAcumuladosConDescargo). undefined deja que montoConc() use el monto, como siempre.
+      .map(function(x){ return {fecha:x.fecha, monto:x[campo], montoConc:x._montoConc, descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
   }
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
@@ -2471,7 +2808,7 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   if(retVisaPorDia){
     poolDiario.forEach(function(d){
       if(normTxt(d.descripcion).indexOf("VISA")===-1) return;
-      if(rangoDeposito(d.descripcion)) return; // acumulado del período: su retención es la del RANGO, no la de un día
+      if(rangoDeposito(d.descripcion, d.fecha)) return; // acumulado del período: su retención es la del RANGO, no la de un día
       var r = retVisaPorDia[d.fecha];
       if(r==null) return;
       d.montoConc = Math.round((d.monto - r)*100)/100;
@@ -2521,9 +2858,111 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
                                   esAchDesc(e.descripcion) ? null : "atras");
     if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); e.usado=true; }
   });
+  /* ---- 3) GRUPO contra GRUPO: el mismo total repartido de otra forma ----
+     Las pasadas 1 y 2 prueban un asiento contra varios creditos y un credito contra varios asientos, pero
+     no grupo contra grupo, y el banco hace justo eso. Dos casos de marzo de 2026:
+     - Un asiento acumula el metodo de todo el mes sin declarar el rango en su texto ("DEPOSITOS POR YAPPY
+       404.49" del 31-mar) mientras el banco lo fue acreditando dia por dia en siete depositos. Como la
+       descripcion no dice "DEL 1 AL 31", conciliarAcumuladoPeriodo no lo ve, y siete lineas exceden el
+       tope de cinco de la pasada 1.
+     - El banco reagrupa: las tarjetas del 27 y 28 (VISA 546.65 + 739.62) entraron el 30 como dos
+       remisiones de 824.01 + 462.26. El total es el mismo —1,286.27— pero ninguna linea coincide con
+       ninguna, asi que las remisiones salian como diferencia Y los asientos inflaban el transito.
+     Resguardos: mismo tipo de linea a los dos lados, suma EXACTA, ventana, y —lo que de verdad protege—
+     la combinacion tiene que ser UNICA. Con dos formas de llegar al mismo total, elegir una seria
+     adivinar: se deja como diferencia, que es lo que paso con los 270.30 y 328.16 del 11-mar, depositos
+     que no estan en ningun archivo y tienen que seguir apareciendo. */
+  function tipoConc(desc, esEstado){
+    if(esEstado){
+      if(esRemisionVisa(desc)) return "VMC";
+      if(esRemisionClave(desc)) return "CLAVE";
+      return "OTRO";
+    }
+    var n = normTxt(desc);
+    if(n.indexOf("VISA")!==-1 || n.indexOf("V/MC")!==-1) return "VMC";
+    if(n.indexOf("CLAVE")!==-1) return "CLAVE";
+    return "OTRO";
+  }
+  var bloques = [];
+  var VENT_BLOQUE = Math.max(ventanaDias, 10);
+  function cerrarBloque(ds, es){
+    var fd = ds.map(function(x){ return x.fecha; }).sort();
+    var fe = es.map(function(x){ return x.fecha; }).sort();
+    if(distanciaBancaria(fd[0], fe[fe.length-1]) > VENT_BLOQUE) return false;
+    ds.forEach(function(x){ x.usado = true; });
+    es.forEach(function(x){ x.usado = true; });
+    bloques.push({ debitos:ds.slice(), creditos:es.slice(),
+                   total: Math.round(ds.reduce(function(a,x){ return a + montoConc(x); },0)*100)/100 });
+    return true;
+  }
+  // Una sola manera de llegar al total, o no se toca.
+  function unica(montos, objetivo, maxN){
+    var sols = solucionesSuma(montos, objetivo, tolerancia, maxN, 1);
+    return (sols && sols.length === 1) ? sols[0] : null;
+  }
+  ["VMC","CLAVE","OTRO"].forEach(function(t){
+    function pend(arr, esEstado){
+      return arr.filter(function(x){ return !x.usado && tipoConc(x.descripcion, esEstado) === t; });
+    }
+    /* a) un asiento que acumula el metodo de varios dias del periodo y se digita al cierre: sus creditos
+       son ANTERIORES al asiento. Se exige que abarquen 3 o mas DIAS distintos, porque con uno o dos lo
+       normal es al reves —el banco acredita el dia del deposito o despues— y aceptar lo anterior daria por
+       compensado un efectivo antes de entregarse: el Brinks de 1,313.10 del 27-jun-2026 "cuadraria" con
+       los cuatro certificados del 22 y el 23 que no son suyos. */
+    function diasDe(xs){ var m = {}; xs.forEach(function(x){ m[x.fecha] = true; }); return Object.keys(m).length; }
+    pend(poolDiario, false).forEach(function(d){
+      if(d.usado) return;
+      var es = pend(poolEstado, true).filter(function(e){ return e.fecha <= d.fecha; });
+      if(es.length < 3 || diasDe(es) < 3) return;
+      // Hasta 20 lineas: el acumulado de un mes son tantas como dias acredito el banco. Con el tope en 8
+      // se caia justo cuando mas hacia falta —el Yappy de abril de 2026 entro en 9 depositos— y ademas el
+      // corte no se notaba: la partida salia como diferencia igual que si no existiera. solucionesSuma
+      // tiene su propio tope de nodos y devuelve null si se corta, asi que un mes patologico no cuelga la
+      // pestaña: simplemente no cuadra y se reporta.
+      var idx = unica(es.map(function(e){ return e.monto; }), montoConc(d), 20);
+      if(!idx || idx.length < 3) return;
+      var sel = idx.map(function(i){ return es[i]; });
+      if(diasDe(sel) < 3) return;
+      cerrarBloque([d], sel);
+    });
+    // b) varios asientos contra varios creditos, con el mismo total repartido distinto.
+    var es2 = pend(poolEstado, true);
+    for(var a=0; a<es2.length; a++){
+      for(var b=a+1; b<es2.length; b++){
+        if(es2[a].usado || es2[b].usado) continue;
+        var grupoE = [es2[a], es2[b]];
+        var suma = Math.round((es2[a].monto + es2[b].monto)*100)/100;
+        var ultima = grupoE.map(function(x){ return x.fecha; }).sort().slice(-1)[0];
+        var ds = pend(poolDiario, false).filter(function(x){ return x.fecha <= ultima; });
+        if(ds.length < 2) continue;
+        var idxD = unica(ds.map(function(x){ return montoConc(x); }), suma, 4);
+        if(!idxD || idxD.length < 2) continue;
+        cerrarBloque(idxD.map(function(i){ return ds[i]; }), grupoE);
+      }
+    }
+  });
+  /* ---- 4) El asiento no dice el metodo y su linea del estado es una remision ----
+     compatibleConRemision reserva las remisiones de tarjeta para depositos que digan tarjeta, y con razon:
+     sin eso el efectivo se come la remision de una venta con tarjeta. Pero deja afuera al asiento que
+     describe el PROBLEMA en vez del metodo — el 29-abr-2026 "DEPOSITO BANISTMO SE LE DESCONTO AL CLIENTE
+     38.17 EL DIA 28/4 EN ST GEORGES, BANISTMO NO REFLEJA BAUCHER..." tenia su remision CLAVE de 38.17 en el
+     estado, el mismo dia y por el mismo importe, y no la podia tomar: salia como diferencia por los dos
+     lados (el asiento sin compensar y la linea sin asiento).
+     Va al final, cuando todos los que SI nombran su metodo ya eligieron, y con tres candados: el asiento no
+     nombra ningun metodo, la fecha es la MISMA (no una ventana) y hay UNA sola linea libre con ese importe
+     ese dia. Con dos posibles no se toca. */
+  poolDiario.forEach(function(d){
+    if(d.usado || metodoDeposito(d.descripcion) || esEfectivoConNombre(d.descripcion)) return;
+    var cand = poolEstado.filter(function(e){
+      return !e.usado && e.fecha === d.fecha && Math.abs(e.monto - montoConc(d)) <= tolerancia;
+    });
+    if(cand.length !== 1) return;
+    cand[0].usado = true; d.usado = true;
+  });
   return {
     faltanEnBanco: poolDiario.filter(function(d){ return !d.usado; }),   // en el diario, no en el estado
-    faltanEnDiario: poolEstado.filter(function(e){ return !e.usado; })   // en el estado, no en el diario
+    faltanEnDiario: poolEstado.filter(function(e){ return !e.usado; }),  // en el estado, no en el diario
+    bloques: bloques                                                    // cuadraron como bloque, no 1 a 1
   };
 }
 
@@ -2656,6 +3095,28 @@ function marcarLineasHeredadas(filas, lineas, campo, marca){
   return halladas;
 }
 function refME(ref){ var r = String(ref==null ? "" : ref).trim(); return /^ME-/i.test(r) ? r : ""; }
+/* ---- El acumulado del navegador del banco trae adentro un descargo ya compensado ----
+   El Paso 1 detecta que un asiento acumulado registra el metodo del mes MAS el descargo de una partida que
+   venia en transito (ver "El acumulado trae adentro el DESCARGO"). Del lado del banco ese asiento es un solo
+   debito por el total, pero su linea del estado ya no esta libre: el Paso 0 la consumio cuando vio compensar
+   la partida. Buscando el total, el Paso 3 no lo encuentra nunca y devuelve una diferencia por CADA credito
+   del estado — en mayo de 2026 el Yappy salia en 15. Se le marca el importe conciliable (total menos
+   descargo) y el cotejo busca eso, que es lo que el banco todavia tiene por acreditar.
+   Solo con la decision del Paso 1 y sobre el diario del mismo banco: sin eso no se toca nada. */
+function marcarAcumuladosConDescargo(banco, diario, tolerancia){
+  var dec = STATE.decisiones && STATE.decisiones.acumDescargo;
+  if(!dec || !dec.lista || !dec.lista.length || !diario || !diario.length) return;
+  dec.lista.forEach(function(a){
+    if(a.banco !== banco || !(a.descargo > 0)) return;
+    for(var i=0;i<diario.length;i++){
+      var x = diario[i];
+      if(x._montoConc != null || !(x.debito > 0)) continue;
+      if(x.fecha !== a.fecha || Math.abs(x.debito - a.monto) > 0.005) continue;
+      x._montoConc = Math.round((a.monto - a.descargo)*100)/100;
+      return;
+    }
+  });
+}
 // Cheques: los clarea el Paso 2 contra el desglose del informe. El Paso 3 recibe que lineas del estado se
 // usaron y cuanto suma el desglose, y solo verifica que el navegador del banco registre ese mismo total.
 /* ---- Asiento repetido en el navegador del banco ----
@@ -2920,6 +3381,29 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
 
   Object.keys(estados).forEach(function(banco){
     var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
+    /* ---- Una remision que paga el mismo metodo de dos dias ----
+       El banco junta en UNA sola remision las partidas del mismo metodo de dos dias seguidos: en marzo de
+       2026 la CLAVE del 1-mar (752.77) y la del 2-mar (590.65) entraron como una remision de 1,343.42 el
+       3-mar, y la del 15 (98.81) con la del 16 (143.17) como 241.98 el 17. Buscando cada parte sola no
+       aparece ninguna y los cuatro asientos de VISA Banistmo —2,536.20— salian como diferencia teniendo su
+       plata en el banco. Cuando una parte se cubre asi, la del dia contiguo se anota aca para que al
+       procesar ese dia no vuelva a pedir la misma linea ni la cuente dos veces. */
+    /* ---- El asiento no dice que es un deposito de CHEQUES ----
+       Al del 15-abr-2026 se le cayo el "CK" y quedo "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" — los otros
+       doce del mes dicen "CK DEL". El informe de cajeras si lo sabe: ese dia y banco reporta CHEQUE por ese
+       importe exacto, y su detalle lo trae partido en dos (208.14 + 200.42). Sin esto el consolidado salia
+       como diferencia roja Y ADEMAS sus dos cheques viajaban al resumen del mes siguiente: la misma plata
+       contada dos veces, y encima el cierre daba los cheques por no acreditados. */
+    function chequeSegunInforme(fecha, monto){
+      if(!reporte || !reporte.length) return false;
+      var tot = 0;
+      reporte.forEach(function(r){
+        if(r.fecha === fecha && r.banco === banco && r.metodo === "CHEQUE") tot = Math.round((tot + r.monto)*100)/100;
+      });
+      return tot > tolerancia && Math.abs(tot - monto) <= tolerancia;
+    }
+    var cubiertasPorAgrupada = {};
+    function clavePorParte(p){ return String(p.fecha) + "|" + normTxt(p.metodo) + "|" + Math.round((p.monto||0)*100); }
     // Descargo repartido en varias lineas que citan su fecha de origen: se aparta entero antes de conciliar,
     // igual que el descargo de una sola linea (ver el punto 0 de abajo).
     if(heredadosP2){
@@ -2948,7 +3432,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
     cajaDep.forEach(function(dep){
       if(dep._descargo) return;
       // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
-      if(usarDetalleCheques && esChequeDesc(dep.descripcion)) return;
+      if(usarDetalleCheques && (esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito))) return;
       var pool = bancoCred[banco];
       var objetivo = dep.credito;
       // 0) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo: no tiene
@@ -2992,7 +3476,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       // se le restan las retenciones de esos días y se busca el conjunto de créditos que sumen el neto.
       // Sin esto, el acumulado del mes queda como "en tránsito" aunque ya haya compensado completo.
       if(!combo && retVisaPorDia && normTxt(dep.descripcion).indexOf("VISA")!==-1){
-        var rg = rangoDeposito(dep.descripcion);
+        var rg = rangoDeposito(dep.descripcion, dep.fecha);
         if(rg){
           var retPeriodo = 0;
           Object.keys(retVisaPorDia).forEach(function(f){
@@ -3023,6 +3507,31 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           combo = combo.map(function(k){ return pool.indexOf(poolAch[k]); }).filter(function(k){ return k>=0; });
         }
       }
+      /* 2d) EL ASIENTO ACUMULA VARIOS DIAS Y NO LO DICE EN SU TEXTO. El Yappy de marzo de 2026 se asienta
+         el 31 en un solo credito ("DEPOSITOS POR YAPPY 404.49") y el banco lo fue acreditando dia por dia
+         en siete depositos del 19 al 29: son mas lineas de las que prueba el match directo, y como el texto
+         no declara el rango tampoco entra por 2b. Sin esto el asiento salia en transito por ser del ultimo
+         dia del mes y viajaba al resumen del mes siguiente habiendo compensado completo.
+         Mismos resguardos que el cotejo por bloques del Paso 3: la combinacion tiene que ser UNICA y
+         abarcar 3 o mas DIAS distintos. Con uno o dos dias lo normal es al reves —el banco acredita el dia
+         del deposito o despues— y aceptar lo anterior daria por compensado un efectivo antes de entregarse. */
+      if(!combo){
+        var libresAc = pool.filter(function(e){ return !e.usado && e.fecha <= dep.fecha; });
+        var diasAc = {};
+        libresAc.forEach(function(e){ diasAc[e.fecha] = true; });
+        if(libresAc.length >= 3 && Object.keys(diasAc).length >= 3){
+          // Hasta 20 lineas, por lo mismo que la pasada de bloques del Paso 3: el acumulado de un mes son
+          // tantas lineas como dias acredito el banco.
+          var solsAc = solucionesSuma(libresAc.map(function(e){ return e.monto; }), objetivo, tolerancia, 20, 1);
+          if(solsAc && solsAc.length === 1 && solsAc[0].length >= 3){
+            var diasSel = {};
+            solsAc[0].forEach(function(i){ diasSel[libresAc[i].fecha] = true; });
+            if(Object.keys(diasSel).length >= 3){
+              combo = solsAc[0].map(function(i){ return pool.indexOf(libresAc[i]); }).filter(function(i){ return i>=0; });
+            }
+          }
+        }
+      }
       // 3) el navegador consolidó varios métodos en un solo asiento y el banco los acreditó por separado.
       // Se consulta el INFORME DE CAJA —la referencia del desglose— y se busca cada partida en el estado.
       var desglose = null, partesHalladas = null, halladasN = 0;
@@ -3050,6 +3559,25 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
               c = buscarCombinacion(poolP, dep.fecha, Math.round((p.monto - retVisaPorDia[p.fecha])*100)/100,
                                     ventDesglose, tolerancia);
             }
+            // Ya la pago una remision agrupada que consumio el dia contiguo: cuenta como hallada y no
+            // consume ninguna linea (el array vacio hace que el marcado de abajo no toque el pool).
+            if(!c && cubiertasPorAgrupada[clavePorParte(p)]) c = [];
+            // Si no, se prueba la suma con la partida del MISMO metodo de un dia contiguo. Se exige que la
+            // remision exista por el total exacto: sin eso, sumar de a dos convertiria cualquier importe en
+            // "compensado" a fuerza de probar combinaciones.
+            if(!c){
+              var vecinas = (reporte||[]).filter(function(q){
+                return q.banco===banco && normTxt(q.metodo)===normTxt(p.metodo) && q.fecha!==p.fecha &&
+                       q.monto>0 && daysBetween(q.fecha, p.fecha)<=3 && !cubiertasPorAgrupada[clavePorParte(q)];
+              }).sort(function(a,b){ return daysBetween(a.fecha,p.fecha) - daysBetween(b.fecha,p.fecha); });
+              for(var v=0; v<vecinas.length && !c; v++){
+                var juntas = Math.round((p.monto + vecinas[v].monto)*100)/100;
+                var cj = buscarCombinacion(poolP, dep.fecha, juntas, ventDesglose, tolerancia);
+                if(!cj) continue;
+                cubiertasPorAgrupada[clavePorParte(vecinas[v])] = true;
+                c = cj;
+              }
+            }
             if(c){
               c.forEach(function(k){
                 var idx = pool.indexOf(poolP[k]);   // poolP puede ser un subconjunto: se marca en el pool real
@@ -3063,9 +3591,34 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           else { idxs.forEach(function(i){ pool[i].usado = false; delete pool[i].asignadoA; }); } // revertir: o cotejan todas, o ninguna
         }
       }
+      /* 3b) EL ASIENTO CONSOLIDA VARIOS METODOS Y EL INFORME NO TIENE ESE DIA.
+         Cuando el informe esta, el punto 3 desglosa el asiento y busca cada parte donde le toca. Sin el
+         informe no hay desglose: el asiento del 11-abr-2026 por 1,550.76 lleva la etiqueta "TARJETA VISA"
+         pero son VISA 982.09 + CLAVE 568.67, las dos acreditadas el 13-abr, y como poolDelMetodo reserva las
+         remisiones V/MC para los depositos que dicen VISA, la de CLAVE nunca podia entrar. Al informe de
+         cajeras de abril le falta la fila del 11, asi que salia como diferencia teniendo su plata en el banco.
+         Se prueba una combinacion de remisiones de tarjeta de CUALQUIER metodo, con cuatro candados: suma
+         exacta, combinacion UNICA, dentro de la ventana y hacia adelante, y tiene que MEZCLAR metodos —si
+         fueran todas del mismo, el punto 1 ya lo habria encontrado y esto no aporta nada. */
+      if(!combo && !partesHalladas && esDepositoTarjeta(dep.descripcion)){
+        var remis = pool.filter(function(e){
+          return !e.usado && (esRemisionVisa(e.desc) || esRemisionClave(e.desc)) && e.fecha >= dep.fecha &&
+                 distanciaBancaria(dep.fecha, e.fecha) <= Math.max(ventanaDias, 10);
+        });
+        if(remis.length >= 2){
+          var solsR = solucionesSuma(remis.map(function(e){ return e.monto; }), objetivo, tolerancia, 4, 1);
+          if(solsR && solsR.length === 1 && solsR[0].length >= 2){
+            var tiposR = {};
+            solsR[0].forEach(function(i){ tiposR[esRemisionVisa(remis[i].desc) ? "VMC" : "CLAVE"] = true; });
+            if(Object.keys(tiposR).length >= 2){
+              combo = solsR[0].map(function(i){ return pool.indexOf(remis[i]); }).filter(function(i){ return i >= 0; });
+            }
+          }
+        }
+      }
       if(combo){
         // A que venta pago cada linea: el Paso 4 no puede volver a usar una remision que ya pago otra venta.
-        combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion) ? "rango" : dep.fecha; });
+        combo.forEach(function(i){ pool[i].usado = true; pool[i].asignadoA = rangoDeposito(dep.descripcion, dep.fecha) ? "rango" : dep.fecha; });
         return;
       } // cuadrado
       if(partesHalladas) return; // coteja: el banco lo reflejó separado, tal como lo desglosa el informe
@@ -3078,7 +3631,10 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
       var concepto = String(dep.descripcion||"").trim();
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
-      if(ultimoDia && dep.fecha===ultimoDia){
+      // Con desglose del informe manda el punto 3c, que distingue "no compenso NADA" (transito) de "compenso
+      // a medias" (diferencia a revisar). El borde de mes no puede tragarse esa distincion: ampliar su
+      // ventana sin este guard daba por transito una compensacion parcial del 27-feb-2026.
+      if(!desglose && ultimoDia && dep.fecha <= ultimoDia && distanciaBancaria(dep.fecha, ultimoDia) <= lagFinMes(dep.descripcion)){
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
           // Si el asiento consolida varios metodos, se anota su desglose: el Paso 3 ve esos metodos por
@@ -3092,7 +3648,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         return;
       }
       // 3b) cheque no encontrado en su banco → buscar en los otros bancos
-      if(esChequeDesc(dep.descripcion)){
+      if(esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito)){
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
           if(b2===banco || otro) return;
@@ -3237,9 +3793,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         var candEf = poolEstEf.filter(function(e){ return !esRemisionVisa(e.descripcion) && !esRemisionClave(e.descripcion); });
         poolDiaEf.forEach(function(d){
           if(d.usado) return;
-          var c = esBrinks(d.descripcion) ? buscarBrinks(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
-          if(!c) c = combinacionMasCercana(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
-          if(c){ c.forEach(function(i){ candEf[i].usado = true; }); d.usado = true; }
+          // Los ACH cuyo retiro es muy posterior al asiento no son de este efectivo (ver fechaRetiroBrinks).
+          // Comparte los objetos del pool, asi que marcar `usado` en el subconjunto marca el pool real.
+          var poolD = candEf.filter(function(e){ return retiroCompatible(e.descripcion, d.fecha); });
+          var c = esBrinks(d.descripcion) ? buscarBrinks(poolD, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
+          if(!c) c = combinacionMasCercana(poolD, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
+          if(c){ c.forEach(function(i){ poolD[i].usado = true; }); d.usado = true; }
         });
         /* Deposito MIXTO: Brinks retira el efectivo de Caja General junto con otra plata que no pasa por
            Caja General (la caja menuda que los duenos prestan, registrada solo en el diario del banco) y el
@@ -3267,6 +3826,123 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             mixtos.push({ d:d, e:e, otros: otros.map(function(k){ return ajenos[k]; }) });
             return;
           }
+        });
+        /* ---- Efectivo asentado en UNA linea que el banco parte en dos ----
+           Desde marzo de 2026 el asiento junta el camion y la ventanilla del dia en un solo credito
+           ("DEPOSITO BRINKS DEL 12/03/2026" por 25.28 = 25.00 de Brinks + 0.28 de ventanilla); antes venian
+           en dos lineas y consolidarEfectivoDelDia las sumaba, asi que ese mecanismo quedo sin efecto.
+           El banco los sigue acreditando separados: la ventanilla como linea suelta y el Brinks dentro de
+           su ACH —solo, junto con el de otros dias, o dentro de un deposito mixto—. Buscando el total tal
+           cual no aparece ninguna de las dos partes: los 25.28 del 12-mar salian como diferencia teniendo
+           sus 0.28 en el estado del 16 y sus 25.00 dentro del ACH de 5,025.00 de ese mismo dia (el resto,
+           5,000.00, es el prestamo de los duenos que solo esta en el diario del banco).
+           Se parte el credito en dos, con dos resguardos para no partir por conveniencia: la parte de
+           ventanilla tiene que estar en el estado por su importe EXACTO y ser chica (el maximo visto en un
+           dia es 12.87, de ahi el tope de 20), y la parte del camion tiene que encontrarse despues por sus
+           propios medios. Si cualquiera de las dos falla, el efectivo sigue saliendo como diferencia. */
+        var TOPE_VENTANILLA = 20;
+        // Lineas chicas del estado que pueden ser la ventanilla de ese dia.
+        function sueltasEf(d){
+          return candEf.filter(function(cv){
+            return !cv.usado && cv.fecha >= d.fecha && cv.monto <= TOPE_VENTANILLA && cv.monto < d.monto &&
+                   distanciaBancaria(d.fecha, cv.fecha) <= Math.max(ventanaDias, 10);
+          });
+        }
+        function marcarPartido(d, cv, resto, e, otros){
+          cv.usado = true; d.usado = true;
+          partidosOk.push({ d:d, centavos:cv, resto:resto, e:e, otros:otros||[] });
+        }
+        var partidosOk = [];
+        /* 1) Uno o dos dias en un solo ACH del camion. La suma de los creditos menos el ACH es lo que se
+           fue por ventanilla, y tiene que estar en el estado como una linea suelta por cada dia: el ACH de
+           80.00 del 19-mar-2026 trae los 40.00 del 16 y los 40.00 del 17, y sus ventanillas entraron el 18
+           como 1.56 y 4.29 (41.56 + 44.29 - 80.00 = 5.85 = 1.56 + 4.29). */
+        candEf.forEach(function(e){
+          if(e.usado || !esBrinks(e.descripcion)) return;
+          var cand = poolDiaEf.filter(function(d){
+            return !d.usado && d.fecha <= e.fecha && distanciaBancaria(d.fecha, e.fecha) <= Math.max(ventanaDias, 10);
+          });
+          function probar(S){
+            if(e.usado) return false;
+            var suma = Math.round(S.reduce(function(a,x){ return a + x.monto; }, 0)*100)/100;
+            var falta = Math.round((suma - e.monto)*100)/100;
+            if(falta <= tolerancia) return false;            // sin ventanilla que explicar no es un partido
+            var vistas = [];
+            S.forEach(function(d){ sueltasEf(d).forEach(function(cv){ if(vistas.indexOf(cv) === -1) vistas.push(cv); }); });
+            var ps = vistas.map(function(cv){ return { fecha:cv.fecha, monto:cv.monto, usado:false, ref:cv }; });
+            var combo = buscarSubsetSuma(ps, e.fecha, falta, 400, tolerancia, S.length);
+            if(!combo || combo.length !== S.length) return false;   // una linea de ventanilla por dia, ni mas ni menos
+            /* A que dia va cada linea de ventanilla. El total cuadra con cualquier asignacion, pero el
+               hallazgo nombra importes: con 41.56 y 44.29 contra el ACH de 80.00, asignar 1.56 al primero y
+               4.29 al segundo deja 40.00 y 40.00 —lo que el camion entrego—, y al reves daria 37.27 y 42.73,
+               que no existieron. Gana la asignacion cuyos restos quedan mas cerca de un multiplo de 5. */
+            var lineas = combo.map(function(k){ return ps[k].ref; });
+            var mejor = null;
+            function evaluar(asig){
+              var suciedad = 0;
+              for(var i=0;i<S.length;i++){
+                if(asig[i].monto >= S[i].monto) return;
+                var r = Math.round((S[i].monto - asig[i].monto)*100)/100;
+                if(r <= tolerancia) return;
+                var mod = Math.round(r*100) % 500;
+                suciedad += Math.min(mod, 500 - mod);
+              }
+              if(!mejor || suciedad < mejor.suciedad) mejor = { asig:asig.slice(), suciedad:suciedad };
+            }
+            evaluar(lineas);
+            if(S.length === 2) evaluar([lineas[1], lineas[0]]);
+            if(!mejor) return false;
+            S.forEach(function(d, i){
+              var cv = mejor.asig[i];
+              marcarPartido(d, cv, Math.round((d.monto - cv.monto)*100)/100, e, []);
+            });
+            e.usado = true;
+            return true;
+          }
+          for(var a=0; a<cand.length; a++){
+            if(probar([cand[a]])) return;
+            for(var b=a+1; b<cand.length; b++){ if(probar([cand[a], cand[b]])) return; }
+          }
+        });
+        /* 2) La parte del camion dentro de un deposito MIXTO: el sobrante lo explican debitos del diario
+           del banco que no pasan por Caja General. Igual que la pasada de mixtos de arriba, pero restando
+           solo la parte del camion: los 25.28 del 12-mar-2026 son 0.28 de ventanilla (acreditada el 16) y
+           25.00 dentro del ACH de 5,025.00 de ese dia, cuyo resto son los 5,000.00 del prestamo interno.
+           Se prueban TODAS las particiones posibles: quedarse con la primera linea suelta que encaje
+           dejaba el resto en un importe que el camion nunca entrego y el efectivo seguia sin aparecer. */
+        if(ajenos.length) poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var opciones = sueltasEf(d);
+          for(var o=0; o<opciones.length && !d.usado; o++){
+            var cv = opciones[o];
+            var resto = Math.round((d.monto - cv.monto)*100)/100;
+            if(resto <= tolerancia) continue;
+            for(var i=0;i<candEf.length;i++){
+              var e = candEf[i];
+              if(e.usado || e === cv || e.fecha < d.fecha || e.monto - resto <= tolerancia) continue;
+              if(distanciaBancaria(d.fecha, e.fecha) > Math.max(ventanaDias, 10)) continue;
+              var otros2 = buscarSubsetSuma(ajenos, e.fecha, Math.round((e.monto - resto)*100)/100, Math.max(ventanaDias, 10), tolerancia, 3, "atras");
+              if(!otros2) continue;
+              otros2.forEach(function(k){ ajenos[k].usado = true; });
+              e.usado = true;
+              marcarPartido(d, cv, resto, e, otros2.map(function(k){ return ajenos[k]; }));
+              break;
+            }
+          }
+        });
+        partidosOk.forEach(function(m){
+          var desc = String(m.d.descripcion||"").trim();
+          hallazgos.push({ fecha:m.d.fecha, banco:bancoEf, monto:m.d.monto, clase:"informativo", concepto:desc,
+            comprobante: refME(m.d.src.referencia), motivo:"el banco lo acredit\u00f3 partido en dos",
+            texto: bancoEf + " " + m.d.fecha + ": el efectivo de B/ " + fmt(m.d.monto) + " (\"" + desc + "\") lo acredit\u00f3 el banco " +
+                   "en dos partes: B/ " + fmt(m.centavos.monto) + " de ventanilla el " + m.centavos.fecha + " y B/ " + fmt(m.resto) +
+                   " del cami\u00f3n" + (m.otros.length
+                     ? " dentro del dep\u00f3sito de B/ " + fmt(m.e.monto) + " del " + m.e.fecha + ", junto con " +
+                       m.otros.map(function(o){ return "B/ " + fmt(o.monto) + " de " + (String(o.referencia||"").trim() || "otro asiento"); }).join(" y ") +
+                       ", que est\u00e1 en el diario de " + bancoEf + " y no pasa por Caja General"
+                     : " en el ACH de B/ " + fmt(m.e.monto) + " del " + m.e.fecha + (Math.abs(m.e.monto - m.resto) > tolerancia ? ", que trae tambi\u00e9n el de otros d\u00edas" : "")) +
+                   ". El asiento junta las dos partes en una sola l\u00ednea, as\u00ed que no hay nada que registrar." + refComprobante(m.d.src.referencia),
+            fuente: "Diario Caja General / Diario " + bancoEf + " / Estado de cuenta " + bancoEf });
         });
         mixtos.forEach(function(m){
           var desc = String(m.d.descripcion||"").trim();
@@ -3477,6 +4153,9 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     } else {
       conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3, !!heredadosP3);
     }
+    // Un acumulado que trae adentro el descargo del transito anterior se coteja por el importe que el banco
+    // todavia tiene por acreditar, no por el total del asiento (el resto lo consumio el Paso 0).
+    marcarAcumuladosConDescargo(cfg.nombre, cfg.diario, tolerancia);
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
@@ -3577,6 +4256,23 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
       });
     });
 
+    // Lo que cuadro como BLOQUE, no linea por linea: se informa con los dos lados a la vista para que la
+    // equivalencia se pueda auditar. No es una diferencia ni hay nada que registrar.
+    (conc.bloques||[]).forEach(function(b){
+      var lado = function(xs, campo){
+        return xs.map(function(x){ return x.fecha + " B/ " + fmt(campo==="monto" ? x.monto : montoConc(x)); }).join(" + ");
+      };
+      hallazgos.push({
+        fecha: b.creditos.map(function(x){ return x.fecha; }).sort().slice(-1)[0], banco: cfg.nombre,
+        monto: b.total, clase:"informativo", concepto:"Cuadra como bloque", comprobante:"",
+        motivo:"el banco lo acreditó repartido de otra forma",
+        texto: cfg.nombre + ": " + b.debitos.length + " asiento(s) del diario por B/ " + fmt(b.total) + " (" + lado(b.debitos) +
+               ") cuadran contra " + b.creditos.length + " línea(s) del estado por el mismo total (" + lado(b.creditos, "monto") +
+               "). Ninguna coincide una a una —el banco acreditó el mismo dinero repartido de otra forma— y la suma solo " +
+               "se alcanza de una manera, así que el bloque cuadra. No hay nada que registrar.",
+        fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre
+      });
+    });
     /* ---- SALIDAS: fuera del alcance ----
        Este módulo coteja lo que pasa por CAJA GENERAL. Los pagos (cheques emitidos, ACH a proveedores,
        planillas) y los cargos propios del banco (comisiones, ITBMS, retenciones, timbres) salen directo de
@@ -3823,6 +4519,7 @@ function computaPaso(pasoKey, raws, opts){
     var chequesDet = raws.reporte ? parseChequesDetalle(raws.reporte) : null;
     STATE.chequesDetalle = chequesDet;   // el desglose del saldo los cruza contra los creditos CK del diario
     var reporteCajas = raws.reporte ? parseReporteConsolidado(raws.reporte) : null;
+    STATE.reporteCajas = reporteCajas;   // el cierre lo usa para deducir el banco de un deposito pendiente
     var trPrev2 = transitoPrevioDe(raws);
     var diariosBanco = {};
     try{
@@ -6257,7 +6954,17 @@ function marcarChequesAcreditados(){
   // detalle completo del reporte, no solo los pendientes.
   var pool = det.map(function(x){ return {fecha:x.fecha, monto:x.monto, usado:false, depositado:false}; });
   diario.forEach(function(cr){
-    if(!(cr.credito>0) || !esChequeDesc(cr.descripcion)) return;
+    if(!(cr.credito>0)) return;
+    if(!esChequeDesc(cr.descripcion)){
+      // El asiento puede no decirlo (al del 15-abr-2026 se le cayo el "CK"). Se acepta solo si el detalle del
+      // informe de ESE dia y banco suma EXACTAMENTE el credito: es el deposito de esos cheques y ya salieron
+      // de Caja General. Sin la igualdad exacta no se toca — un credito de tarjeta no es un cheque.
+      var bkCr = clasificarBancoPorTexto(cr.descripcion);
+      if(!bkCr) return;
+      var totCk = Math.round(det.filter(function(x){ return x.banco===bkCr && x.fecha===cr.fecha; })
+                                .reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+      if(!(totCk > 0.005) || Math.abs(totCk - cr.credito) > 0.01) return;
+    }
     if(consumirClaveDescargo(descKeys, cr.fecha, cr.credito)) return;
     var combo = buscarSubsetSuma(pool, cr.fecha, cr.credito, 40, 0.01, 15, "atras");
     if(combo) combo.forEach(function(i){ pool[i].usado = true; pool[i].depositado = true; });
@@ -6404,12 +7111,23 @@ function partidasYaAcreditadas(){ return clasificarTransito().fuera; }
 // Con 'opt' la calcula el Paso 1 con sus propios datos (su casa); sin 'opt', el cierre la calcula desde
 // STATE igual que siempre, para el caso en que no haya reporte de cajeras y el Paso 1 no llegue a correr.
 function ventasSinDeposito(opt){
-  var cg = (opt && opt.cg) || STATE.diarioCaja || [];
+  var tolPend = 0.15;   // el pendiente difiere del metodo en los centavos del faltante/sobrante del dia
+  opt = opt || {};
+  if(!opt.reporte) opt.reporte = STATE.reporteCajas || null;
+  var cg = opt.cg || STATE.diarioCaja || [];
   if(!cg.length) return [];
   var r = STATE.results || {};
   // Ventas VISA STG por dia, del informe de retenciones: su credito no llega hasta fin de mes.
   var visaDia = (opt && opt.visaDia) || {};
   if(!(opt && opt.visaDia)) (STATE.retVisaDetalle || []).forEach(function(d){ visaDia[d.fecha] = Math.round(((visaDia[d.fecha]||0) + d.bruto)*100)/100; });
+  /* Metodos que ESTE mes se difirieron a fin de mes en un solo asiento acumulado ("DEPOSITOS POR YAPPY
+     DEL 1 AL 30"): la venta del dia no tiene credito ese dia y eso no es un deposito que falte. Lo anota el
+     Paso 1, que es el unico que sabe que acumulado cubrio que dias; sin el no se descuenta nada. */
+  var difDia = opt.difDia;
+  if(!difDia){
+    var decDif = STATE.decisiones && STATE.decisiones.diferidos;
+    difDia = (decDif && (!cg.length || decDif.firmaCaja === firmaDiario(cg))) ? decDif.porDia : {};
+  }
   // Lo que el Paso 1 dejo en transito ese dia (deposito reportado por la cajera, sin credito todavia).
   var transDia = (opt && opt.transDia) || {};
   if(!(opt && opt.transDia)) (Array.isArray(r.paso1) ? r.paso1 : []).forEach(function(x){
@@ -6440,16 +7158,36 @@ function ventasSinDeposito(opt){
   Object.keys(comp).forEach(function(k){
     var c = comp[k];
     if(!(c.venta > 0)) return;
-    var visa = visaDia[c.fecha] || 0, trans = transDia[c.fecha] || 0;
-    var pend = Math.round((c.venta - c.acreditado - visa - trans)*100)/100;
+    var visa = visaDia[c.fecha] || 0, trans = transDia[c.fecha] || 0, dif = difDia[c.fecha] || 0;
+    var pend = Math.round((c.venta - c.acreditado - visa - trans - dif)*100)/100;
     if(pend <= 1) return;   // hasta un dolar es redondeo de faltantes/sobrantes, no una omision
     out.push({ ref:c.ref, fecha:c.fecha, venta:c.venta, acreditado:c.acreditado,
-               visa:visa, reportado:trans, pendiente:pend });
+               visa:visa, reportado:trans, diferido:dif, pendiente:pend,
+               // El banco sale del METODO que falta, no de donde compenso el efectivo: ver bancoDeMetodoRep.
+               metodo: metodoDelPendiente(opt && opt.reporte, c.fecha, pend, tolPend) });
   });
   out.sort(function(a,b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
   return out;
 }
 
+/* ---- De que metodo es lo que falta ----
+   Para que la partida viaje al mes siguiente necesita BANCO: el Paso 0 agrupa por banco para cotejarla
+   contra el estado de cuenta. Asumir el banco del efectivo manda la partida al banco equivocado cuando lo
+   que falta no es efectivo — en marzo de 2026 seis partidas de Yappy viajaron como St. Georges y en Banco
+   General no las esperaba nadie: ahi no compensan nunca y se arrastran mes tras mes.
+   Se identifica por el importe: si el informe de cajeras de ese dia trae UN solo metodo cuyo monto es el
+   pendiente (con los centavos del faltante/sobrante de margen), ese es. Si hay dos que encajan, o ninguno,
+   se devuelve null y el banco se deduce como antes. */
+function metodoDelPendiente(reporte, fecha, pendiente, tol){
+  if(!reporte || !reporte.length) return null;
+  var hit = null, n = 0;
+  reporte.forEach(function(x){
+    if(x.fecha !== fecha || !(x.monto > 0)) return;
+    if(Math.abs(x.monto - pendiente) > tol) return;
+    n++; hit = { metodo:x.metodo, banco:x.banco };
+  });
+  return n === 1 ? hit : null;
+}
 /* ---- Donde compensa el efectivo ----
    Una venta que entro y no salio por ningun deposito tiene que viajar al mes siguiente como cualquier
    otra partida en transito, y para eso necesita banco: el Paso 0 agrupa por banco para cotejar contra el
@@ -6473,22 +7211,29 @@ function bancoDelEfectivo(){
 // que una venta no llego al banco.
 function partidasVentaSinDeposito(){
   var banco = bancoDelEfectivo();
-  return ventasSinDeposito().map(function(v){ return itemVentaSinDeposito(v, banco); });
+  return ventasSinDeposito({ reporte: STATE.reporteCajas }).map(function(v){ return itemVentaSinDeposito(v, banco); });
 }
 // La partida con forma de hallazgo. La arma el Paso 1, que es su casa, y tambien el cierre cuando no hubo
 // reporte de cajeras y el Paso 1 no llego a correr.
 function itemVentaSinDeposito(v, banco){
   var falta = "B/ " + fmt(v.pendiente) + " de la venta del " + v.fecha;
+  // El banco del METODO identificado manda sobre el del efectivo: el Yappy compensa en Banco General, no
+  // donde entro el camion, y una partida con el banco equivocado no compensa nunca.
+  var porMetodo = v.metodo && v.metodo.banco ? v.metodo.banco : null;
+  var bk = porMetodo || banco || "";
   return {
-    fecha: v.fecha, banco: banco || "", monto: v.pendiente, clase: "en_transito",
+    fecha: v.fecha, banco: bk, monto: v.pendiente, clase: "en_transito",
     concepto: "Depósito pendiente de identificar", comprobante: v.ref,
     motivo: "la venta entró a Caja General y no salió por ningún depósito",
     texto: "El " + v.fecha + " entró una venta de B/ " + fmt(v.venta) + " a Caja General. " +
       (v.acreditado > 0.005 ? "Se acreditaron B/ " + fmt(v.acreditado) + " de depósitos" : "No se acreditó ningún depósito") +
       (v.visa > 0.005 ? " (más B/ " + fmt(v.visa) + " de VISA St. Georges, que se acredita a fin de mes)" : "") +
+      (v.diferido > 0.005 ? " (más B/ " + fmt(v.diferido) + " que el asiento acumulado de fin de mes cubre)" : "") +
       (v.reportado > 0.005 ? " y la cajera reportó B/ " + fmt(v.reportado) + " depositados" : " y la cajera no reportó depósito") +
       ": quedan " + falta + " sin explicar. Se arrastra al mes siguiente hasta que el depósito aparezca en el banco. " +
-      (banco ? "Se asume " + banco + " porque es donde compensó el efectivo de este mes; si fue otro banco, corregilo en el resumen."
+      (porMetodo
+        ? "El informe de cajeras de ese día trae " + v.metodo.metodo + " por ese mismo importe, así que va a " + porMetodo + "."
+        : bk ? "Se asume " + bk + " porque es donde compensó el efectivo de este mes; si fue otro banco, corregilo en el resumen."
              : "No se pudo deducir a qué banco va: completá el banco en el resumen en tránsito antes de usarlo el mes que viene."),
     fuente: "Diario Caja General / Reporte consolidado de caja",
     _paso: "ventas"
@@ -7548,6 +8293,47 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 1, "adelante");
       if(!combo) combo = comboMismoDia(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 3);
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
+    });
+    /* Paso A2: la partida compenso POR PARTES, no de una vez.
+       Una partida de fin de mes trae su desglose por medio de pago —el deposito del 27-feb-2026 son
+       CHEQUE 1,463.08 + VISA 1,124.69 + CLAVE 983.83— y el banco acredita cada medio por su cuenta: las
+       dos tarjetas el 2-mar, y los cheques repartidos en tres depositos (864.62 el 2, mas 270.30 y 328.16
+       el 11). Buscando el total de 3,571.60 no aparece nunca, asi que la partida viajaba al resumen del
+       mes siguiente habiendo compensado completa, y sus dos depositos del 11 salian como plata que nadie
+       registro. Se coteja medio por medio contra el pool que le toca a cada uno.
+       Dos resguardos: tienen que cuadrar TODAS las partes —con una sola que falte la partida sigue
+       pendiente entera, porque media compensacion no es una compensacion— y la combinacion de cada parte
+       tiene que ser UNICA, que es lo que impide armar el importe juntando depositos de cualquier lado. */
+    function poolDeMetodo(metodo){
+      var m = normTxt(metodo);
+      if(m.indexOf("CLAVE")!==-1) return poolClave;
+      if(m.indexOf("VISA")!==-1 || m.indexOf("V/MC")!==-1) return poolVisa;
+      if(m.indexOf("CHEQUE")!==-1 || m==="CK") return poolDep;
+      return poolCred;
+    }
+    chs.forEach(function(ch){
+      if(ch.usado || !Array.isArray(ch.partes) || ch.partes.length < 2) return;
+      var usar = [];
+      var todas = ch.partes.every(function(pt){
+        if(!(pt.monto > tolerancia)) return true;                 // una parte en cero no pide nada
+        var pool = poolDeMetodo(pt.metodo);
+        var vent = ventanaTransito({ concepto: pt.metodo });
+        var libres = pool.filter(function(o){
+          return !o.usado && usar.indexOf(o) === -1 && o.fecha >= ch.fecha &&
+                 distanciaBancaria(ch.fecha, o.fecha) <= vent;
+        });
+        if(!libres.length) return false;
+        var sols = solucionesSuma(libres.map(function(o){ return o.monto; }), pt.monto, tolerancia, 6, 1);
+        if(!sols || sols.length !== 1) return false;
+        sols[0].forEach(function(i){ usar.push(libres[i]); });
+        return true;
+      });
+      if(!todas || !usar.length) return;
+      usar.forEach(function(o){ o.usado = true; });
+      ch.usado = true;
+      ch.porPartes = true;
+      // La fecha en que termino de compensar: la ultima linea que consumio.
+      ch.compensoEn = usar.slice().sort(function(a,b){ return a.fecha < b.fecha ? -1 : 1; }).slice(-1)[0];
     });
     // Paso B: cada línea del estado no usada contra una combinación de partidas del MISMO pool (el banco
     // a veces junta varias en una), hacia atrás.

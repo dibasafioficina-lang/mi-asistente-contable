@@ -17,6 +17,17 @@ node tests.js
 
 `tests.js` congela los casos reales corregidos a mano (montos con coma decimal o `:` pegado al número, nombres con typos y la Ñ rota, alias de empleados, neteo, cuadre, y los casos de Yenifer / Itza / Esther / ME-1970). **Correrlo antes de publicar cualquier cambio.** Si un test falla y el comportamiento nuevo es el correcto, actualizar la expectativa dejando anotado el hallazgo que lo motivó.
 
+## Flujo de trabajo (git)
+
+Nada se queda sin guardar: el contenedor de una sesión remota se borra por inactividad y lo que no esté pusheado se pierde. Después de **cada** cambio:
+
+1. Correr las pruebas (ver arriba).
+2. Resumir qué cambió y **preguntar antes de commitear y pushear** — el push nunca va automático.
+3. Con el visto bueno: commit descriptivo + `git push -u origin <rama de trabajo>`.
+4. Avisar si el árbol queda sucio al cerrar el turno, aunque el cambio esté a medias.
+
+Si el cambio tocó `index.html`, preguntar además si se republica la página privada de claude.ai, para que no quede detrás del repo. No abrir un pull request salvo que se pida explícitamente.
+
 ## Controles de integridad (Módulo 2)
 
 Verifica su propia lectura contra los totales que el navegador declara al pie (`Saldo Total Mostrado`, `Balance Final`) y detecta comprobantes duplicados. Si el cuadre falla, o si hay comprobantes sin desglose por empleado, **los resultados se bloquean** — cualquier cifra por persona sería incompleta. Las transacciones anuladas (`ABORTED`) se excluyen junto con su contrapartida y se reportan como partida conciliatoria del cuadre.

@@ -2990,6 +2990,316 @@ test("el efectivo de la cajera se coteja contra Caja General en el Paso 1", () =
   if (rojas[0].texto.indexOf("Efectivo 2026-03-10") < 0) throw new Error("debe decir que es el efectivo: " + rojas[0].texto);
 });
 
+/* Al cierre, Caja General puede tener el credito de un efectivo que el informe de la cajera no trae. El
+   credito YA se hizo, asi que la plata salio de la cuenta: lo que queda en transito es del lado del banco y
+   lo reporta el Paso 2 (hereda la misma linea). Emitirlo tambien como diferencia en el Paso 1 lo contaba
+   dos veces. Caso real: 28-may-2026, "DEPOSITO DEL 28/5/2026" por 73.00 en ventanilla, informe en 0.00. */
+test("el efectivo asentado al cierre que el informe no trae es aviso, no diferencia (28-may-2026)", () => {
+  STATE.decisiones = {};
+  const rep = [{ fecha: "2026-05-28", banco: "STG", metodo: "VISA", monto: 100.00, cajera: "A" }];
+  rep.efectivo = [{ fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 }];
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-28", "DEPOSITO POR TARJETA VISA STG DEL 28/05/2026", 100.00),
+    lineaCG("2026-05-28", "DEPOSITO DEL 28/5/2026", 73.00),
+    lineaCG("2026-05-29", "DEPOSITO POR TARJETA VISA STG DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  eq(contarRojas(h), 0, "el efectivo de ventanilla del cierre no es una diferencia");
+  const av = h.filter(function(x){ return esAviso(x) && /informe de la cajera no trae/.test(x.concepto || ""); });
+  eq(av.length, 1, "sale como aviso de archivo de origen");
+  cerca(av[0].monto, 73.00, "el monto del aviso es lo que falta en el informe");
+  eq(av[0].fecha, "2026-05-28");
+  if (av[0].texto.indexOf("falta es la línea en el informe de la cajera") < 0)
+    throw new Error("el aviso debe decir que falta la linea en el informe: " + av[0].texto);
+  // Y no viaja como transito de Caja General: eso inflaria el saldo de apertura del mes siguiente.
+  eq(h.filter(function(x){ return esEnTransito(x) && Math.abs((x.monto||0) - 73.00) < 0.005; }).length, 0,
+     "el credito ya se hizo: no es transito DENTRO de Caja General");
+});
+
+/* El guard: el aviso es solo para el cierre. En medio del mes no hay rezago del banco que lo explique, asi
+   que un efectivo asentado que la cajera no reporto sigue siendo una diferencia roja. */
+test("un efectivo asentado sin reportar en MEDIO del mes sigue siendo diferencia", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 }];
+  const cg = [
+    lineaCG("2026-05-10", "DEPOSITO DEL 10/5/2026", 73.00),
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-29", "DEPOSITO BRINKS DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "el 10 de mayo no es cierre: la diferencia queda");
+  eq(rojas[0].fecha, "2026-05-10");
+  cerca(rojas[0].monto, -73.00, "sigue con el signo de siempre");
+});
+
+/* Y el caso inverso no cambia: cuando la cajera SI reporto y Caja General no acredito, la plata sigue
+   DENTRO de la cuenta y viaja al resumen como transito. */
+test("el efectivo de cierre reportado y sin asentar sigue siendo tránsito", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [
+    { fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 },
+    { fecha: "2026-05-29", tipo: "VENTANILLA", monto: 73.00 }
+  ];
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-29", "DEPOSITO POR TARJETA VISA STG DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  eq(contarRojas(h), 0);
+  const fin = h.filter(function(x){ return esEnTransito(x) && /Efectivo de fin de mes/.test(x.concepto || ""); });
+  eq(fin.length, 1, "sin credito a Caja General, sigue adentro y viaja al resumen");
+  cerca(fin[0].monto, 73.00);
+});
+
+/* Un asiento acumulado de fin de mes puede traer adentro el descargo de una partida que venia en transito:
+   el credito a Caja General va cuando el banco COMPENSA, asi que lo del mes pasado se descarga este mes y a
+   veces se digita dentro del mismo asiento del metodo. Entonces el acumulado registra MAS de lo que el
+   informe trae en el rango. Caso real: 31-may-2026, "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO" por 973.96 =
+   764.34 del Yappy de mayo + 209.62 del Yappy del 30-abr, que el banco acredito el 1-may. */
+function decisionTransitoCompensada(items){
+  STATE.decisiones = STATE.decisiones || {};
+  STATE.decisiones.transito = { compensadas: items.map(function(t){
+    return { banco:t.banco, fecha:t.fecha, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, sentido:"credito" }; }) };
+}
+test("el acumulado que trae adentro el descargo del tránsito no es diferencia (31-may-2026, Yappy 209.62)", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  [["2026-05-12",0.64],["2026-05-14",38.90],["2026-05-16",124.88],["2026-05-22",76.98],["2026-05-30",41.70]]
+    .forEach(function(p){ rep.push({ fecha:p[0], banco:"Banco General", metodo:"YAPPY", monto:p[1], cajera:"A" }); });
+  const suma = 0.64 + 38.90 + 124.88 + 76.98 + 41.70;            // 283.10 del mes
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  decisionTransitoCompensada(transito);                           // el Paso 0 la vio compensar
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", Math.round((suma + 209.62)*100)/100)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  eq(contarRojas(h), 0, "el asiento incluye el descargo: no es una diferencia");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /Descargo de tránsito incluido/.test(x.concepto || ""); });
+  eq(inf.length, 1, "se informa el descargo que trae adentro");
+  cerca(inf[0].monto, 209.62);
+  eq(inf[0].partidas.length, 1);
+  cerca(inf[0].partidas[0].monto, 209.62);
+  // Y queda la decisión para que el Paso 3 no le pida al banco el total del asiento.
+  const dec = STATE.decisiones.acumDescargo;
+  eq(!!dec && dec.lista.length, 1, "el Paso 3 hereda el ajuste");
+  cerca(dec.lista[0].descargo, 209.62);
+  cerca(dec.lista[0].monto, Math.round((suma + 209.62)*100)/100);
+});
+
+/* El guard: sin la evidencia del Paso 0 de que la partida COMPENSÓ, no se reconoce nada. Si no, cualquier
+   importe que coincida por casualidad con una partida vieja se daría por descargado. */
+test("sin la evidencia de que compensó, el acumulado sigue siendo diferencia", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  rep.push({ fecha:"2026-05-12", banco:"Banco General", metodo:"YAPPY", monto:100.00, cajera:"A" });
+  rep.push({ fecha:"2026-05-30", banco:"Banco General", metodo:"YAPPY", monto:50.00, cajera:"A" });
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  // NO se declara compensada: el Paso 0 no la vio cerrar en el banco.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 359.62)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "sin evidencia de compensación, la diferencia queda");
+  cerca(rojas[0].monto, -209.62);
+});
+
+/* Y el guard de siempre: con dos partidas compensadas del mismo importe que podrían explicarlo, no se
+   adivina cuál es. */
+test("con dos partidas posibles, el descargo del acumulado no se adivina", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  rep.push({ fecha:"2026-05-12", banco:"Banco General", metodo:"YAPPY", monto:100.00, cajera:"A" });
+  rep.push({ fecha:"2026-05-30", banco:"Banco General", metodo:"YAPPY", monto:50.00, cajera:"A" });
+  const transito = [
+    { fecha:"2026-04-29", banco:"Banco General", monto:60.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" },
+    { fecha:"2026-04-30", banco:"Banco General", monto:60.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" },
+    { fecha:"2026-04-28", banco:"Banco General", monto:120.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" }
+  ];
+  decisionTransitoCompensada(transito);
+  // 120.00 se alcanza de dos formas: la partida de 120.00, o 60.00 + 60.00.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 270.00)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "dos combinaciones posibles: no se toca");
+  cerca(rojas[0].monto, -120.00);
+});
+
+/* La otra mitad: del lado del banco ese acumulado es UN debito por el total, pero su linea del estado ya no
+   esta libre — el Paso 0 la consumio al ver compensar la partida. Buscando el total no aparece nunca y el
+   Paso 3 devolvia una diferencia por CADA credito del estado: en mayo de 2026 el Yappy salia en 15. */
+test("el Paso 3 coteja el acumulado por el importe neto del descargo que trae adentro", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  [["2026-05-12",100.00],["2026-05-20",80.00],["2026-05-30",50.00]]
+    .forEach(function(p){ rep.push({ fecha:p[0], banco:"Banco General", metodo:"YAPPY", monto:p[1], cajera:"A" }); });
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  decisionTransitoCompensada(transito);
+  // El asiento del mes: 230.00 del Yappy de mayo + 209.62 del descargo de abril = 439.62.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 439.62)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", transito)), 0, "el Paso 1 lo reconoce");
+  // El navegador de Banco General trae el mismo asiento del lado del debito.
+  const navBG = [{ fecha:"2026-05-31", debito:439.62, credito:0, descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO",
+                   referencia:"ME-00000001964", fila:2 }];
+  // El estado acredita el Yappy dia por dia; el 209.62 del 1-may es el que compenso la partida de abril y lo
+  // aparta el Paso 0 (aca se marca a mano: el test llama al paso suelto).
+  const estBG = [
+    { fecha:"2026-05-01", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:209.62, fila:2, _transitoUsado:true },
+    { fecha:"2026-05-13", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:100.00, fila:3 },
+    { fecha:"2026-05-21", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:80.00, fila:4 },
+    { fecha:"2026-05-31", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:50.00, fila:5 }
+  ];
+  const h = paso3([], [], [], [], navBG, estBG, 7, 0.01, null, null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x) && x.banco === "Banco General"; });
+  eq(rojas.length, 0, "el asiento cuadra por 230.00 contra los tres créditos del mes");
+});
+
+/* Guard del Paso 3: sin la decisión del Paso 1 no se ajusta nada — el asiento se sigue cotejando por su
+   total, que es el comportamiento de siempre. */
+test("sin la decisión del Paso 1, el Paso 3 coteja el acumulado por su total", () => {
+  STATE.decisiones = {};
+  const navBG = [{ fecha:"2026-05-31", debito:439.62, credito:0, descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO",
+                   referencia:"ME-00000001964", fila:2 }];
+  const estBG = [
+    { fecha:"2026-05-13", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:100.00, fila:3 },
+    { fecha:"2026-05-21", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:80.00, fila:4 },
+    { fecha:"2026-05-31", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:50.00, fila:5 }
+  ];
+  const h = paso3([], [], [], [], navBG, estBG, 7, 0.01, null, null);
+  // 230.00 no es 439.62: el asiento queda en tránsito y los créditos sin asiento.
+  if (!h.some(function(x){ return x.banco === "Banco General" && Math.abs((x.monto||0) - 439.62) < 0.01; }))
+    throw new Error("el asiento debe seguir cotejándose por su total");
+});
+
+/* El ACH de Brinks dice en su texto QUE DIA se retiro el efectivo ("D08563bsafe 130526" = 13/05/26) y el
+   banco lo acredita uno o dos dias despues. Sin leer esa fecha todos los ACH son intercambiables mientras el
+   importe cuadre, y uno se va al dia equivocado: en mayo de 2026 el asiento del 4-may (452.22) cuadro con
+   65.00 + 385.00 + 2.22 llevandose el ACH del retiro del 13-may, y el efectivo del 12-may (66.66 = 65.00 del
+   ACH + 1.66 de ventanilla) salia como "no aparece en el estado de cuenta". Brinks no puede haber retirado el
+   13 el efectivo que entro a caja el 4. */
+test("fechaRetiroBrinks lee la fecha del retiro y no confunde el código de la remesa", () => {
+  eq(fechaRetiroBrinks("Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi"), "2026-05-13");
+  eq(fechaRetiroBrinks("Ach De Brink S Panama S.A. - D08563bsafe 270526 "), "2026-05-27");
+  eq(fechaRetiroBrinks("Ach De Brinks Panama, S.A. - D08563bsafe 300426 Davi"), "2026-04-30");
+  eq(fechaRetiroBrinks("ACH DE BRINKS PANAMA"), null, "sin fecha en el texto no se inventa");
+  eq(fechaRetiroBrinks("Remisión V/Mc 016005605 Liq. No. 3884415"), null, "no es un Brinks");
+  eq(fechaRetiroBrinks("Ach De Brinks - 995626 x"), null, "mes 56 no existe: no se toma");
+});
+test("un ACH de Brinks no lo toma un asiento muy anterior a su retiro (12-may-2026, 66.66)", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [
+    { fecha:"2026-05-04", tipo:"BRINK", monto:452.22 },
+    { fecha:"2026-05-12", tipo:"BRINK", monto:66.66 }
+  ];
+  const cg = [
+    lineaCG("2026-05-04", "DEPOSITO BRINKS DEL 04/05/2026", 452.22),
+    lineaCG("2026-05-12", "DEPOSITO BRINKS DEL 12/05/2026", 66.66)
+  ];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", null)), 0, "el Paso 1 los ve asentados");
+  // Los mismos importes de mayo de 2026: la ÚNICA forma de llegar a 452.22 pasa por el ACH de 65.00, que es
+  // del retiro del 13. Sin el guard, el asiento del 4 se lo lleva y el del 12 queda sin compensar.
+  const estS = [
+    { fecha:"2026-05-08", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 070526 Davi", credito:385.00, debito:0, fila:2 },
+    { fecha:"2026-05-06", descripcion:"Descripción", credito:2.22, debito:0, fila:3 },
+    { fecha:"2026-05-14", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi", credito:65.00, debito:0, fila:4 },
+    { fecha:"2026-05-15", descripcion:"Descripción", credito:1.66, debito:0, fila:5 }
+  ];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.filter(function(x){ return Math.abs(x.monto - 66.66) < 0.01; }).length, 0,
+     "el efectivo del 12 cuadra con el ACH de su retiro (65.00) + su ventanilla (1.66)");
+  // El del 4 queda sin compensar, que es lo correcto: su ACH no está en este estado de cuenta.
+  eq(rojas.length, 1, "solo queda el del 4, cuyo ACH no aparece");
+  cerca(rojas[0].monto, 452.22);
+});
+/* El guard del guard: cuando el retiro es ANTERIOR o del mismo día que el asiento no se restringe nada — el
+   asiento se digita a veces días después del retiro, y cortar ahí dejaría sin compensar cosas que cuadran. */
+test("un ACH cuyo retiro es anterior al asiento sigue pudiendo compensarlo", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha:"2026-05-04", tipo:"BRINK", monto:108.00 }];
+  const cg = [lineaCG("2026-05-04", "DEPOSITO BRINKS DEL 04/05/2026", 108.00)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", null)), 0);
+  // El retiro fue el 30-abr y el asiento se digitó el 4-may: es el mismo dinero.
+  const estS = [{ fecha:"2026-05-04", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 300426 Davi", credito:108.00, debito:0, fila:2 }];
+  eq(contarRojas(paso2(cg, [], estS, null, null, null, 7, 0.01, null, null)), 0, "el retiro previo al asiento cuadra igual");
+});
+
+/* El sistema anula un movimiento marcando UNA linea "ABORTED", pero la transaccion son las dos: la original y
+   la que la reversa, bajo el mismo comprobante. Filtrando solo la que lleva la palabra, la otra competia con
+   el asiento bueno por la misma linea del banco. Dos casos reales, los dos traspasos entre cuentas propias
+   anulados y vueltos a registrar el mismo dia: 1,003.34 el 27-mar-2026 y 650.00 el 24-abr-2026. */
+test("una transacción anulada se excluye junto con su contrapartida (24-abr-2026, 650.00)", () => {
+  const navStg = [
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004295 - TRASPASO DE FONDO", referencia:"PAY0004295", fila:2 },
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"ABORTED PETTY SHOP, S.A. - Pago: PAY0004295 - TRASPASO DE FONDO", referencia:"PAY0004295", fila:3 },
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:4 }
+  ];
+  // El banco lo acredito UNA sola vez.
+  const estStg = [{ fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 }];
+  const c = conciliarBancoEstado(navStg, estStg, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el débito anulado no compite: solo queda el bueno, y cuadra");
+  eq(c.faltanEnDiario.length, 0, "el crédito del banco queda usado");
+});
+/* El guard: una linea que dice ABORTED sin comprobante no puede arrastrar a nadie (no hay a quien), y un
+   comprobante SIN ninguna linea anulada se sigue cotejando entero. */
+test("un comprobante sin línea anulada no se toca", () => {
+  const nav = [
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:2 },
+    { fecha:"2026-04-24", debito:120.00, credito:0, descripcion:"DEPOSITO DEL 24/04/2026", referencia:"ME-00000001900", fila:3 }
+  ];
+  const est = [
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 },
+    { fecha:"2026-04-24", debito:0, credito:120.00, descripcion:"Deposito", fila:3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "los dos asientos cuadran");
+  eq(c.faltanEnDiario.length, 0);
+});
+test("una línea ABORTED sin comprobante no arrastra a las demás", () => {
+  const nav = [
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"ABORTED algo sin referencia", referencia:"", fila:2 },
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:3 }
+  ];
+  const est = [{ fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el asiento bueno sigue cuadrando");
+});
+
+/* El borde de mes del Paso 2 exigia el ULTIMO DIA CALENDARIO exacto, mientras el Paso 1 usa una ventana de 3
+   dias bancarios y el Paso 3 un lag por metodo. Cuando el mes termina en fin de semana el ultimo dia con
+   actividad no calificaba: la CLAVE del sabado 30-may-2026 (1,352.68) salia como diferencia porque mayo
+   cerraba el domingo 31, y su remision entra en junio. */
+test("lagFinMes da el margen por método", () => {
+  eq(lagFinMes("DEPOSITO BRINKS DEL 30/05/2026"), 5, "el efectivo del camión tarda más");
+  eq(lagFinMes("DEPOSITO POR TARJETA CLAVE STG DEL 30/5/2026"), 3);
+  eq(lagFinMes("DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO"), 3);
+  eq(lagFinMes("DEPOSITO DE BANISTMO CK DEL 30/05/2026"), 0, "un cheque no tiene margen de cierre");
+});
+test("la tarjeta de los últimos días del mes queda en tránsito, no en diferencia (30-may-2026)", () => {
+  STATE.decisiones = {};
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO POR TARJETA CLAVE STG DEL 20/5/2026", 211.94),
+    lineaCG("2026-05-30", "DEPOSITO POR TARJETA CLAVE STG DEL 30/5/2026", 1352.68)
+  ];
+  // El banco acredita la del 20 y la del 30 recién en junio. Mayo cierra el domingo 31.
+  const estS = [{ fecha:"2026-05-21", descripcion:"Remision Clave 016005605", credito:211.94, debito:0, fila:2 }];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 0, "la del 30 es de los últimos días: tránsito, no diferencia");
+  const tr = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 1352.68) < 0.01; });
+  eq(tr.length, 1, "viaja al resumen del próximo mes");
+});
+/* El guard: el margen es por método y el cheque no tiene ninguno — un cheque del último día sigue saliendo
+   por su propia vía (la pasada de cheques), no por el borde de mes. Y lo de MEDIADOS de mes tampoco entra. */
+test("un depósito de mediados de mes no se cuela por el borde de mes", () => {
+  STATE.decisiones = {};
+  const cg = [lineaCG("2026-05-15", "DEPOSITO POR TARJETA CLAVE STG DEL 15/5/2026", 500.00)];
+  const estS = [{ fecha:"2026-05-29", descripcion:"Remision Clave 016005605", credito:999.99, debito:0, fila:2 }];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 1, "el 15 no es fin de mes: sigue siendo diferencia");
+  cerca(h.filter(function(x){ return !esNoRojo(x); })[0].monto, 500.00);
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];
@@ -3396,6 +3706,605 @@ test("el cuadre de apertura dice cuándo la diferencia es lo que ya se había ac
   // Con la apertura correcta, cuadra.
   const c2 = cuadreSaldoInicialPaso0(transito, { inicial: 2650.04, fechaInicial: "2026-02-01" }, []);
   eq(c2.ok, true);
+});
+
+test("el efectivo asentado en una linea se parte: ventanilla suelta + camion en un deposito mixto", () => {
+  // 12-mar-2026: el asiento junta el camion y la ventanilla del dia en un solo credito de 25.28 (25.00 del
+  // Brinks + 0.28 de ventanilla); antes venian en dos lineas. El banco los acredito separados el 16: los
+  // 0.28 como linea suelta y los 25.00 dentro del ACH de 5,025.00, cuyo resto son los 5,000.00 del
+  // prestamo interno que solo esta en el diario del banco. Buscando el total tal cual, ninguna de las dos
+  // partes aparecia y los 25.28 salian como diferencia teniendolas las dos en el estado.
+  const cg = [{ fecha: "2026-03-12", debito: 0, credito: 25.28, descripcion: "DEPOSITO BRINKS DEL 12/03/2026", referencia: "ME-00000001886", fila: 7 }];
+  const est = function(){ return [
+    { fecha: "2026-03-16", descripcion: "Descripción", debito: 0, credito: 0.28, fila: 3 },
+    { fecha: "2026-03-16", descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 130326 David", debito: 0, credito: 5025.00, fila: 4 }
+  ]; };
+  const diarioStg = [{ fecha: "2026-03-16", debito: 5000.00, credito: 0, descripcion: "dueños/préstamo interno - caja", referencia: "PDN-000000050", fila: 11 }];
+  const dec = function(){ STATE.decisiones = { efectivo: { firmaCaja: firmaDiario(cg), banco: "STG", filas: { 7: true } } }; };
+  dec();
+  const h = paso2(cg, [], est(), null, null, null, 7, 0.01, null, null, { STG: diarioStg });
+  eq(contarRojas(h), 0, "el efectivo compensó partido en dos");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /partido/.test(x.motivo || ""); });
+  eq(inf.length, 1, "y se informa cómo compensó");
+  if (inf[0].texto.indexOf("0.28") < 0 || inf[0].texto.indexOf("25.00") < 0) {
+    throw new Error("tiene que nombrar las dos partes: " + inf[0].texto);
+  }
+  // Sin el navegador del banco no hay con que explicar los 5,000.00, y ahi si es una diferencia.
+  dec();
+  eq(contarRojas(paso2(cg, [], est(), null, null, null, 7, 0.01, null, null)), 1,
+     "sin el diario del banco el resto del depósito no se explica");
+});
+
+test("el camion de dos dias en un solo ACH, y cada ventanilla en su dia", () => {
+  // 16 y 17-mar-2026: 41.56 y 44.29, cada uno en una sola linea. El banco acredito las ventanillas el 18
+  // (1.56 y 4.29) y los dos Brinks de 40.00 juntos, como un ACH de 80.00 el 19. Ademas de cuadrar, cada
+  // ventanilla tiene que quedar en SU dia: con la asignacion cruzada el total da igual, pero el hallazgo
+  // diria 37.27 y 42.73 del camion, importes que nunca existieron.
+  const cg = [
+    { fecha: "2026-03-16", debito: 0, credito: 41.56, descripcion: "DEPOSITO BRINKS DEL 16/03/2026", referencia: "ME-00000001890", fila: 8 },
+    { fecha: "2026-03-17", debito: 0, credito: 44.29, descripcion: "DEPOSITO BRINKS DEL 17/03/2026", referencia: "ME-00000001891", fila: 9 }
+  ];
+  const est = [
+    { fecha: "2026-03-18", descripcion: "Descripción", debito: 0, credito: 1.56, fila: 5 },
+    { fecha: "2026-03-18", descripcion: "Descripción", debito: 0, credito: 4.29, fila: 6 },
+    { fecha: "2026-03-19", descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 180326 David", debito: 0, credito: 80.00, fila: 7 }
+  ];
+  STATE.decisiones = { efectivo: { firmaCaja: firmaDiario(cg), banco: "STG", filas: { 8: true, 9: true } } };
+  const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null, { STG: [] });
+  eq(contarRojas(h), 0, "los dos días compensaron en el mismo ACH");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /partido/.test(x.motivo || ""); });
+  eq(inf.length, 2);
+  const d16 = inf.filter(function(x){ return x.fecha === "2026-03-16"; })[0];
+  const d17 = inf.filter(function(x){ return x.fecha === "2026-03-17"; })[0];
+  if (d16.texto.indexOf("1.56") < 0 || d16.texto.indexOf("40.00") < 0) {
+    throw new Error("el 16 lleva su ventanilla de 1.56 y 40.00 del camión: " + d16.texto);
+  }
+  if (d17.texto.indexOf("4.29") < 0 || d17.texto.indexOf("40.00") < 0) {
+    throw new Error("el 17 lleva su ventanilla de 4.29 y 40.00 del camión: " + d17.texto);
+  }
+});
+
+test("una remision paga el mismo metodo de dos dias seguidos", () => {
+  // 15 y 16-mar-2026: los asientos de 189.06 y 394.95 dicen VISA pero traen VISA + CLAVE. Las VISA
+  // compensan sueltas (90.25 el 16, 251.78 el 17) y las CLAVE van JUNTAS en una sola remision:
+  // 98.81 + 143.17 = 241.98 el 17. Buscando cada parte por su cuenta no aparecia ninguna CLAVE, el
+  // desglose se revertia entero y los dos asientos salian como diferencia con su plata en el banco.
+  const cg = [
+    { fecha: "2026-03-15", debito: 0, credito: 189.06, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 15/03/2026", referencia: "ME-00000001889", fila: 2 },
+    { fecha: "2026-03-16", debito: 0, credito: 394.95, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 16/03/2026", referencia: "ME-00000001890", fila: 3 }
+  ];
+  const reporte = [
+    { fecha: "2026-03-15", banco: "Banistmo", metodo: "VISA", monto: 90.25, cajera: "A" },
+    { fecha: "2026-03-15", banco: "Banistmo", metodo: "CLAVE", monto: 98.81, cajera: "A" },
+    { fecha: "2026-03-16", banco: "Banistmo", metodo: "VISA", monto: 251.78, cajera: "A" },
+    { fecha: "2026-03-16", banco: "Banistmo", metodo: "CLAVE", monto: 143.17, cajera: "A" }
+  ];
+  const est = [
+    { fecha: "2026-03-16", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 90.25, fila: 2 },
+    { fecha: "2026-03-17", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 251.78, fila: 3 },
+    { fecha: "2026-03-17", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 241.98, fila: 4 }
+  ];
+  STATE.decisiones = {};
+  const h = paso2(cg, est, [], null, null, null, 7, 0.01, reporte, null);
+  eq(contarRojas(h), 0, "los dos asientos compensaron");
+  eq(h.filter(esEnTransito).length, 0, "y no queda nada en tránsito");
+  // La remision agrupada se consume UNA sola vez: no puede pagar los dos dias por separado.
+  eq(est.filter(function(x){ return x.credito === 241.98; }).length, 1);
+});
+
+test("un asiento acumula el metodo de todo el mes aunque su texto no declare el rango", () => {
+  // 31-mar-2026: "DEPOSITOS POR YAPPY 404.49" junta los siete depositos que el banco fue acreditando del
+  // 19 al 29. Como el texto no dice "DEL 1 AL 31", conciliarAcumuladoPeriodo no lo ve, y siete lineas
+  // exceden el tope de cinco del emparejamiento normal: los seis creditos que no cuadraban salian como
+  // "no aparece registrado en el diario" teniendo su asiento.
+  const nav = [{ fecha: "2026-03-31", debito: 404.49, credito: 0, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-00000001906", fila: 1 }];
+  const est = [
+    { fecha: "2026-03-19", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 89.83, fila: 2 },
+    { fecha: "2026-03-20", descripcion: "DEPOSITO YAPPY - POS PE (2 TRANSACCIONES)", debito: 0, credito: 24.59, fila: 3 },
+    { fecha: "2026-03-21", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 21.39, fila: 4 },
+    { fecha: "2026-03-26", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 34.82, fila: 5 },
+    { fecha: "2026-03-27", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 10.69, fila: 6 },
+    { fecha: "2026-03-28", descripcion: "DEPOSITO", debito: 0, credito: 157.94, fila: 7 },
+    { fecha: "2026-03-29", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 65.23, fila: 8 }
+  ];
+  const c = conciliarBancoEstado(nav, est.map(function(x){ return Object.assign({}, x); }), 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "los siete créditos cuadran contra el asiento acumulado");
+  eq(c.faltanEnBanco.length, 0, "y el asiento no queda en tránsito");
+  eq(c.bloques.length, 1, "cuadró como bloque");
+  eq(c.bloques[0].creditos.length, 7);
+  cerca(c.bloques[0].total, 404.49);
+});
+
+test("el banco reagrupa: el mismo total repartido de otra forma cuadra como bloque", () => {
+  // 30-mar-2026: las tarjetas del 27 y 28 (VISA 546.65 + 739.62 = 1,286.27) entraron como DOS remisiones
+  // de 824.01 + 462.26, el mismo total repartido distinto. Ninguna linea coincide con ninguna, asi que las
+  // remisiones salian como diferencia Y los asientos inflaban el transito. Lo mismo con la CLAVE.
+  const nav = [
+    { fecha: "2026-03-27", debito: 546.65, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 27/03/2026", referencia: "ME-1903", fila: 1 },
+    { fecha: "2026-03-28", debito: 739.62, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 28/03/2026", referencia: "ME-1904", fila: 2 },
+    { fecha: "2026-03-27", debito: 100.47, credito: 0, descripcion: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 27/03/2026", referencia: "ME-1903", fila: 3 },
+    { fecha: "2026-03-28", debito: 1008.37, credito: 0, descripcion: "DEPOSITO POR TARJETA CLAVE BANISTMO DEL 28/03/2026", referencia: "ME-1904", fila: 4 }
+  ];
+  const est = [
+    { fecha: "2026-03-30", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 824.01, fila: 2 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 462.26, fila: 3 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 318.92, fila: 4 },
+    { fecha: "2026-03-30", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 789.92, fila: 5 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "las cuatro remisiones cuadran");
+  eq(c.faltanEnBanco.length, 0, "y los cuatro asientos no quedan en tránsito");
+  eq(c.bloques.length, 2, "un bloque por método: V/MC y CLAVE");
+  // Y no se mezclan los metodos: cada bloque suma lo suyo.
+  const totales = c.bloques.map(function(b){ return Math.round(b.total*100)/100; }).sort();
+  cerca(totales[0], 1108.84, "el bloque de CLAVE");
+  cerca(totales[1], 1286.27, "el bloque de V/MC");
+});
+
+test("un deposito que no esta en ningun archivo sigue saliendo como diferencia", () => {
+  // Los 270.30 y 328.16 que entraron a Banistmo el 11-mar-2026 no estan en el informe de cajeras, ni en
+  // Caja General, ni en el diario del banco, ni en el desglose de cheques. El diario de ese dia solo tiene
+  // pagos, asi que no hay con que armar su total y tienen que seguir apareciendo: es plata que entro al
+  // banco y nadie registro.
+  const nav = [
+    { fecha: "2026-03-11", debito: 0, credito: 2000.00, descripcion: "SON IMPORT, S.A. - Pago", referencia: "PAY0004267", fila: 1 },
+    { fecha: "2026-03-11", debito: 0, credito: 2443.25, descripcion: "PRIMERA QUINCENA DE MARZO", referencia: "ME-1897", fila: 2 }
+  ];
+  const est = [
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 270.30, fila: 2 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 328.16, fila: 3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 2, "los dos depósitos siguen sin registrar");
+  eq(c.bloques.length, 0, "y no se cierra ningún bloque");
+});
+
+test("con dos formas de llegar al mismo total, el bloque no se da por cuadrado", () => {
+  // El resguardo del cotejo por bloques: elegir una de dos combinaciones posibles seria adivinar, y
+  // adivinar aca mueve plata de lugar. Los creditos suman 300.00 y el diario puede armarlo de dos maneras
+  // (150+150 o 100+200), asi que se deja como diferencia.
+  const nav = [
+    { fecha: "2026-03-10", debito: 150.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-10", debito: 150.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/03/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-03-11", debito: 100.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/03/2026", referencia: "ME-3", fila: 3 },
+    { fecha: "2026-03-11", debito: 200.00, credito: 0, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/03/2026", referencia: "ME-4", fila: 4 }
+  ];
+  const est = [
+    { fecha: "2026-03-12", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", debito: 0, credito: 130.00, fila: 2 },
+    { fecha: "2026-03-12", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", debito: 0, credito: 170.00, fila: 3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.bloques.length, 0, "la combinación es ambigua: no se cierra el bloque");
+  eq(c.faltanEnDiario.length, 2, "las dos remisiones quedan como diferencia");
+});
+
+test("una partida de fin de mes compensa POR PARTES, cada medio de pago por su cuenta", () => {
+  // 27-feb-2026: el deposito de 3,571.60 es CHEQUE 1,463.08 + VISA 1,124.69 + CLAVE 983.83, y el banco
+  // acredito cada medio por separado: las dos tarjetas el 2-mar y los cheques repartidos en tres depositos
+  // (864.62 el 2, mas 270.30 y 328.16 el 11). Buscando el total no aparecia nunca: la partida viajaba al
+  // resumen del mes siguiente habiendo compensado completa, y los dos depositos del 11 salian como plata
+  // que nadie registro.
+  const partes = [{ metodo: "VISA", monto: 1124.69 }, { metodo: "CLAVE", monto: 983.83 }, { metodo: "CHEQUE", monto: 1463.08 }];
+  const tr = [{ fecha: "2026-02-27", banco: "Banistmo", monto: 3571.60, concepto: "Depósito de fin de mes reportado por la cajera", sentido: "credito", partes: partes }];
+  const est = function(){ return [
+    { fecha: "2026-03-02", descripcion: "CR REMISION - V/MC PAGO DE FACTURACION//01866314", debito: 0, credito: 1124.69, fila: 2 },
+    { fecha: "2026-03-02", descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314", debito: 0, credito: 983.83, fila: 3 },
+    { fecha: "2026-03-02", descripcion: "DEPOSITO", debito: 0, credito: 864.62, fila: 4 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 270.30, fila: 5 },
+    { fecha: "2026-03-11", descripcion: "DEPOSITO", debito: 0, credito: 328.16, fila: 6 }
+  ]; };
+  const e1 = est();
+  const r = consumirTransitoPrevio(tr, { Banistmo: e1, STG: [] }, 0.01);
+  eq(r.compensadas.length, 1, "la partida compensó completa, por partes");
+  eq(r.pendientes.length, 0);
+  eq(r.compensadas[0].porPartes, true);
+  // Las cinco lineas quedaron consumidas: ninguna puede volver a usarse en los Pasos 2 y 3.
+  eq(e1.filter(function(x){ return x._transitoUsado; }).length, 5, "las cinco líneas del banco quedan apartadas");
+
+  // Si falta UNA parte, la partida sigue pendiente entera: media compensación no es una compensación.
+  const e2 = est().filter(function(x){ return Math.abs(x.credito - 328.16) > 0.01; });
+  const r2 = consumirTransitoPrevio(tr.map(function(t){ return Object.assign({}, t); }), { Banistmo: e2, STG: [] }, 0.01);
+  eq(r2.pendientes.length, 1, "sin una de las partes la partida no se da por compensada");
+  eq(e2.filter(function(x){ return x._transitoUsado; }).length, 0, "y no consume ninguna línea a medias");
+});
+
+test("un asiento que acumula el mes sin decirlo en su texto tampoco queda en transito", () => {
+  // 31-mar-2026: "DEPOSITOS POR YAPPY 404.49" junta los siete depositos que el banco fue acreditando del
+  // 19 al 29. El Paso 3 ya lo cuadraba como bloque, pero el Paso 2 lo evalua por su cuenta: no lograba
+  // emparejarlo —siete lineas exceden el match directo y el texto no declara el rango— y como es del
+  // ultimo dia del mes lo mandaba a transito. El resumen del mes siguiente se llevaba 404.49 que ya
+  // habian compensado.
+  const cg = [{ fecha: "2026-03-31", debito: 0, credito: 404.49, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-00000001906", fila: 9 }];
+  const est = [
+    { fecha: "2026-03-19", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 89.83, fila: 2 },
+    { fecha: "2026-03-20", descripcion: "DEPOSITO YAPPY - POS PE (2 TRANSACCIONES)", debito: 0, credito: 24.59, fila: 3 },
+    { fecha: "2026-03-21", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 21.39, fila: 4 },
+    { fecha: "2026-03-26", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 34.82, fila: 5 },
+    { fecha: "2026-03-27", descripcion: "DEPOSITO YAPPY - POS PE (1 TRANSACCIONES)", debito: 0, credito: 10.69, fila: 6 },
+    { fecha: "2026-03-28", descripcion: "DEPOSITO", debito: 0, credito: 157.94, fila: 7 },
+    { fecha: "2026-03-29", descripcion: "DEPOSITO YAPPY - POS PE (3 TRANSACCIONES)", debito: 0, credito: 65.23, fila: 8 }
+  ];
+  STATE.decisiones = {};
+  const h = paso2(cg, [], [], est, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 0, "el asiento acumulado compensó");
+  eq(h.filter(esEnTransito).length, 0, "y NO queda en tránsito: ya está en el banco");
+
+  // Con los creditos de UN SOLO dia no se acepta hacia atras: ahi lo normal es que el banco acredite
+  // despues del deposito, y darlo por compensado seria aceptar plata acreditada antes de entregarse.
+  const est1 = [
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 200.00, fila: 2 },
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 104.49, fila: 3 },
+    { fecha: "2026-03-30", descripcion: "DEPOSITO", debito: 0, credito: 100.00, fila: 4 }
+  ];
+  STATE.decisiones = {};
+  const h2 = paso2(cg, [], [], est1, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h2) + h2.filter(esEnTransito).length, 1, "con un solo día no se da por compensado");
+});
+
+test("el acumulado del mes cuadra aunque el banco lo haya acreditado en nueve dias", () => {
+  // 30-abr-2026: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL" por 403.33 contra NUEVE depositos del estado.
+  // El texto declara el rango pero sin año, asi que rangoDeposito no lo lee y no entra por el acumulado
+  // del periodo; quedaba el cotejo por bloques, que probaba hasta 8 lineas. Con nueve se caia justo cuando
+  // mas hacia falta, y las ocho que no cuadraban salian como "no aparece registrado en el diario".
+  const nav = [{ fecha: "2026-04-30", debito: 403.33, credito: 0, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-00000001932", fila: 3 }];
+  const montos = [[ "2026-04-02", 23.85 ], [ "2026-04-03", 39.27 ], [ "2026-04-08", 70.57 ], [ "2026-04-15", 52.40 ],
+                  [ "2026-04-16", 14.00 ], [ "2026-04-18", 21.39 ], [ "2026-04-19", 65.22 ], [ "2026-04-26", 111.65 ],
+                  [ "2026-04-28", 4.98 ]];
+  const est = montos.map(function(m, i){
+    return { fecha: m[0], descripcion: "DEPOSITO YAPPY - POS PE", debito: 0, credito: m[1], fila: i + 2 };
+  });
+  cerca(Math.round(montos.reduce(function(a, m){ return a + m[1]; }, 0)*100)/100, 403.33, "los nueve suman el asiento");
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "los nueve créditos cuadran contra el acumulado");
+  eq(c.faltanEnBanco.length, 0);
+  eq(c.bloques.length, 1);
+  eq(c.bloques[0].creditos.length, 9);
+});
+
+// Hallazgo (abril 2026): "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026" por 1,443.41 y "DEPOSITOS POR YAPPY DEL 1
+// AL 30 DE ABRIL" por 403.33 no se reconocian como acumulados — el primero por el "1AL" pegado y sin "DEL",
+// el segundo porque el texto no trae el año — y cada dia de esos dos metodos salia como diferencia roja.
+test("el rango se reconoce con el dia pegado al AL y sin el DEL", () => {
+  const r = rangoDeposito("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026");
+  if (!r) throw new Error("no reconoció el rango");
+  eq(r.ym, "2026-04"); eq(r.diaIni, 1); eq(r.diaFin, 30);
+});
+
+test("sin año en el texto, el rango toma el año del asiento", () => {
+  const r = rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", "2026-04-30");
+  if (!r) throw new Error("no reconoció el rango");
+  eq(r.ym, "2026-04"); eq(r.diaIni, 1); eq(r.diaFin, 30);
+  // Un acumulado se asienta al CERRAR el rango, nunca antes: si el mes del texto es posterior al del
+  // asiento, el rango es del año anterior (el de diciembre se asienta en enero).
+  const dic = rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 31 DE DICIEMBRE", "2026-01-05");
+  eq(dic.ym, "2025-12", "diciembre asentado en enero es del año anterior");
+  // Sin fecha de asiento no se inventa el año.
+  eq(rangoDeposito("DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL"), null, "sin año y sin asiento, no hay rango");
+});
+
+// Hallazgo (abril 2026): el asiento de fin de mes de la VISA de St. Georges no dice a que banco entro
+// ("DEPOSITO DE VISA 1AL 30 DE ABRIL 2026"), asi que clasificarBancoPorTexto daba null y la linea se
+// descartaba antes de llegar al cotejo. Los cuatro dias de VISA STG salian como diferencias rojas
+// (77.01, 611.70, 260.97, 493.73) con el asiento hecho por el total exacto.
+test("un acumulado que no dice banco se rutea por monto contra los dias sin asiento propio", () => {
+  const reporte = [
+    { fecha: "2026-04-09", banco: "STG", metodo: "VISA", monto: 77.01, cajera: "A" },
+    { fecha: "2026-04-17", banco: "STG", metodo: "VISA", monto: 611.70, cajera: "A" },
+    { fecha: "2026-04-28", banco: "STG", metodo: "VISA", monto: 260.97, cajera: "A" },
+    { fecha: "2026-04-30", banco: "STG", metodo: "VISA", monto: 493.73, cajera: "A" },
+    // La VISA de Banistmo tiene su asiento diario: el acumulado no puede comersela.
+    { fecha: "2026-04-10", banco: "Banistmo", metodo: "VISA", monto: 800.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-10", debito: 0, credito: 800.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 1443.41, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(contarRojas(h), 0, "el acumulado cubre los cuatro dias de STG");
+});
+
+test("el acumulado sin banco no toca un dia que ya tiene su asiento", () => {
+  // El acumulado suma justo lo de un dia que YA esta asentado. Tomarlo dejaria el dia sin credito y el
+  // acumulado dado por bueno: los dos lados mal. El dia asentado no es candidato, asi que no cuadra.
+  const reporte = [{ fecha: "2026-04-10", banco: "Banistmo", metodo: "VISA", monto: 500.00, cajera: "A" }];
+  const cg = [
+    { fecha: "2026-04-10", debito: 0, credito: 500.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 10/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 500.00, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const sinRutear = h.filter(function(x){ return String(x.texto||"").indexOf("no dice a qué banco entró") >= 0; });
+  eq(sinRutear.length, 1, "el acumulado queda sin rutear y se avisa");
+});
+
+test("con dos formas de llegar al monto, el acumulado sin banco no se adivina", () => {
+  // 100 + 200 y 150 + 150 dan los mismos 300: elegir una dejaria dos dias sin credito por decision de la
+  // app. Se deja como hallazgo, igual que en el resto de las reglas de combinacion.
+  const reporte = [
+    { fecha: "2026-04-05", banco: "STG", metodo: "VISA", monto: 100.00, cajera: "A" },
+    { fecha: "2026-04-06", banco: "STG", metodo: "VISA", monto: 200.00, cajera: "A" },
+    { fecha: "2026-04-07", banco: "STG", metodo: "VISA", monto: 150.00, cajera: "A" },
+    { fecha: "2026-04-08", banco: "STG", metodo: "VISA", monto: 150.00, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 300.00, descripcion: "DEPOSITO DE VISA 1AL 30 DE ABRIL 2026", referencia: "ME-2", fila: 9 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const sinRutear = h.filter(function(x){ return String(x.texto||"").indexOf("no dice a qué banco entró") >= 0; });
+  eq(sinRutear.length, 1, "con dos combinaciones posibles no se rutea");
+});
+
+// Hallazgo: el Yappy solo entra a Banco General, pero swapDeBanco daba por "registrado en otro banco"
+// cada dia de Yappy cuyo Banco General quedaba vacio y Banistmo tenia excedente. Esos dias no contaban
+// como cubiertos y el acumulado del mes salia con una diferencia inventada.
+test("el Yappy de un dia no se toma por registrado en otro banco", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" },
+    // Banistmo con excedente el 14: el reporte no lo trae y el diario si.
+    { fecha: "2026-04-14", banco: "Banistmo", metodo: "VISA", monto: 100.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 0, credito: 900.00, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 14/04/2026", referencia: "ME-1", fila: 5 },
+    { fecha: "2026-04-30", debito: 0, credito: 66.40, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-2", fila: 9 }
+  ];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 0, "los dos dias de Yappy cuadran con el acumulado");
+});
+
+// Hallazgo (abril 2026): el reporte de cajeras trae 10 dias de Yappy por 612.95 y el asiento acumulado
+// registro 403.33. La diferencia (209.62) es real y tiene que salir: el acumulado no puede taparla.
+test("el acumulado que no alcanza la suma del reporte sale como diferencia", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 50.00, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-2", fila: 9 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 1, "la diferencia del acumulado sale");
+  cerca(acum[0].monto, 16.40, "el reporte suma 66.40 y el asiento 50.00");
+});
+
+// Hallazgo (abril 2026): el Yappy se asienta en UN solo crédito de fin de mes, así que la venta del día no
+// tiene su crédito ese día. `ventasSinDeposito` lo denunciaba como "venta que entró y no salió por ningún
+// depósito" — ocho veces en abril (111.56 el 25) — y en marzo esas partidas viajaron al resumen del mes
+// siguiente con el banco del efectivo (STG) en vez de Banco General, donde no compensan nunca.
+function ventasPendientes(h){
+  return h.filter(function(x){ return String(x.concepto||"").indexOf("pendiente de identificar") >= 0; });
+}
+test("el método que un acumulado de fin de mes cubre no es una venta sin depositar", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 52.40, credito: 0, descripcion: "REPORTE DE VENTA DEL 14/04/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-04-15", debito: 14.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 15/04/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-04-30", debito: 0, credito: 66.40, descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-04-01", null)).length, 0,
+     "el acumulado cubre esos dos días");
+});
+
+test("sin el asiento acumulado, la venta sin depositar SÍ sale", () => {
+  // La regla no puede taparlo por ser Yappy: lo tapa el asiento. Si no existe, es plata sin depositar.
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-04-14", debito: 52.40, credito: 0, descripcion: "REPORTE DE VENTA DEL 14/04/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-04-15", debito: 14.00, credito: 0, descripcion: "REPORTE DE VENTA DEL 15/04/2026", referencia: "ME-2", fila: 2 }
+  ];
+  const v = ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-04-01", null));
+  eq(v.length, 2, "las dos siguen saliendo");
+  // Y el banco sale del MÉTODO que falta, no de donde compensó el efectivo: el Yappy va a Banco General.
+  eq(v[0].banco, "Banco General", "el banco sale del método del informe");
+  eq(v[1].banco, "Banco General");
+});
+
+// Hallazgo (abril 2026): un cobro con tarjeta partido entre los dos POS. El informe lo reportó el 28 y la
+// contabilidad lo asentó el 29, así que salían dos diferencias de 38.17 que se cancelan. Pero la del 28 cae
+// en los últimos días del mes y el Paso 1 la clasifica EN TRÁNSITO, así que colapsarCompensados —que solo
+// miraba las de clase "diff"— no las juntaba: una salía roja y la otra viajaba al resumen del mes siguiente.
+test("la mitad que quedó como fin de mes se cancela con su diferencia y no viaja al resumen", () => {
+  const reporte = [
+    { fecha: "2026-04-28", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" },
+    { fecha: "2026-04-29", banco: "Banistmo", metodo: "VISA", monto: 100.00, cajera: "A" }
+  ];
+  // El asiento del 29 trae las dos: los 100 del día y los 38.17 del 28.
+  const cg = [{ fecha: "2026-04-29", debito: 0, credito: 138.17,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 29/04/2026", referencia: "ME-1", fila: 5 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(contarRojas(h), 0, "no queda ninguna diferencia");
+  eq(h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 38.17) < 0.01; }).length, 0,
+     "y la de fin de mes ya no viaja al resumen");
+  const av = h.filter(function(x){ return String(x.concepto||"") === "Diferencias que se compensan"; });
+  eq(av.length, 1, "queda un solo aviso");
+});
+
+test("dos partidas de fin de mes que se cancelan entre sí NO se colapsan", () => {
+  // Sin ninguna diferencia real en el grupo no hay error de día que corregir, y colapsarlas las sacaría del
+  // resumen del mes siguiente sin motivo.
+  const reporte = [
+    { fecha: "2026-04-28", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" },
+    { fecha: "2026-04-29", banco: "Banistmo", metodo: "VISA", monto: 38.17, cajera: "A" }
+  ];
+  const h = paso1(reporte, [], null, 0.01, [], "2026-04-01", null);
+  eq(h.filter(esEnTransito).length, 2, "las dos siguen en tránsito");
+  eq(h.filter(function(x){ return String(x.concepto||"") === "Diferencias que se compensan"; }).length, 0);
+});
+
+// Hallazgo (abril 2026): el asiento describe el PROBLEMA y no el método ("DEPOSITO BANISTMO SE LE DESCONTO
+// AL CLIENTE 38.17 EL DIA 28/4 EN ST GEORGES, BANISTMO NO REFLEJA BAUCHER..."), así que
+// compatibleConRemision le prohibía tomar su propia remisión CLAVE — la misma fecha y el mismo importe.
+test("un asiento que no nombra el método toma su remisión del mismo día", () => {
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BANISTMO SE LE DESCONTO AL CLIENTE 38.17 EL DIA 28/4 EN ST GEORGES" }];
+  const est = [{ fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2,
+                 descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01866314" }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el asiento compensa");
+  eq(c.faltanEnDiario.length, 0, "y la línea del estado queda registrada");
+});
+
+test("con dos líneas posibles del mismo importe, el asiento sin método no se adivina", () => {
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BANISTMO SE LE DESCONTO AL CLIENTE 38.17 EL DIA 28/4" }];
+  const est = [
+    { fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//01" },
+    { fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 3, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION//02" }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "no se elige ninguna");
+  eq(c.faltanEnDiario.length, 2);
+});
+
+test("un asiento que SÍ nombra su método sigue sin poder tomar una remisión de otro", () => {
+  // El resguardo de siempre: el efectivo no se come la remisión de una venta con tarjeta.
+  const nav = [{ fecha: "2026-04-29", debito: 38.17, credito: 0, referencia: "ME-1", fila: 1,
+                 descripcion: "DEPOSITO BRINKS DEL 29/04/2026" }];
+  const est = [{ fecha: "2026-04-29", debito: 0, credito: 38.17, fila: 2,
+                 descripcion: "CR REMISION - V/MC PAGO DE FACTURACION" }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "el efectivo no toma la remisión de tarjeta");
+  eq(c.faltanEnDiario.length, 1);
+});
+
+// Hallazgo (marzo 2026): el asiento del Yappy del mes se digitó "DEPOSITOS POR YAPPY 404.49" — sin declarar
+// "DEL 1 AL 31" —, así que el mecanismo de acumulados no lo veía y sus seis días salían como ventas sin
+// depositar. Su plata YA había compensado: el estado de Banco General de marzo trae los seis depósitos.
+test("un acumulado que no declara el rango igual cubre los días de su método", () => {
+  const reporte = [
+    { fecha: "2026-03-18", banco: "Banco General", metodo: "YAPPY", monto: 89.83, cajera: "A" },
+    { fecha: "2026-03-19", banco: "Banco General", metodo: "YAPPY", monto: 24.59, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-03-18", debito: 89.83, credito: 0, descripcion: "REPORTE DE VENTA DEL 18/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-19", debito: 24.59, credito: 0, descripcion: "REPORTE DE VENTA DEL 19/03/2026", referencia: "ME-2", fila: 2 },
+    // Sin rango en el texto, y por MÁS de la suma: el de marzo traía además un depósito que no era Yappy.
+    { fecha: "2026-03-31", debito: 0, credito: 404.49, descripcion: "DEPOSITOS POR YAPPY 404.49", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-03-01", null)).length, 0,
+     "el asiento del cierre los cubre");
+});
+
+test("un acumulado sin rango que NO alcanza no cubre nada", () => {
+  const reporte = [
+    { fecha: "2026-03-18", banco: "Banco General", metodo: "YAPPY", monto: 89.83, cajera: "A" },
+    { fecha: "2026-03-19", banco: "Banco General", metodo: "YAPPY", monto: 24.59, cajera: "A" }
+  ];
+  const cg = [
+    { fecha: "2026-03-18", debito: 89.83, credito: 0, descripcion: "REPORTE DE VENTA DEL 18/03/2026", referencia: "ME-1", fila: 1 },
+    { fecha: "2026-03-19", debito: 24.59, credito: 0, descripcion: "REPORTE DE VENTA DEL 19/03/2026", referencia: "ME-2", fila: 2 },
+    { fecha: "2026-03-31", debito: 0, credito: 50.00, descripcion: "DEPOSITOS POR YAPPY 50.00", referencia: "ME-3", fila: 3 }
+  ];
+  eq(ventasPendientes(paso1(reporte, cg, null, 0.01, [], "2026-03-01", null)).length, 2,
+     "con 50.00 no se cubren 114.42: las dos siguen saliendo");
+});
+
+// Hallazgo (abril 2026): el informe trae 612.95 de Yappy y el asiento acumulado 403.33, así que el acumulado
+// salía con una diferencia de 209.62. Pero el asiento cuadra al centavo con los NUEVE depósitos que el banco
+// acreditó: los 209.62 son el Yappy del 30-abr, que compensa en mayo. No es una diferencia, es tránsito.
+test("la cola del rango que el banco aún no acreditó queda en tránsito, no como diferencia", () => {
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 52.40, cajera: "A" },
+    { fecha: "2026-04-15", banco: "Banco General", metodo: "YAPPY", monto: 14.00, cajera: "A" },
+    { fecha: "2026-04-30", banco: "Banco General", metodo: "YAPPY", monto: 209.62, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 66.40,
+                descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-1", fila: 3 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  const acum = h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; });
+  eq(acum.length, 0, "el acumulado no sale como diferencia");
+  const t = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 209.62) < 0.01; });
+  eq(t.length, 1, "la cola queda en tránsito y viaja al resumen");
+});
+
+test("lo que sobra después de la cola de fin de mes sigue siendo diferencia", () => {
+  // La cola explica 209.62 y la diferencia es 259.62: los 50 de más son una diferencia real.
+  const reporte = [
+    { fecha: "2026-04-14", banco: "Banco General", metodo: "YAPPY", monto: 50.00, cajera: "A" },
+    { fecha: "2026-04-30", banco: "Banco General", metodo: "YAPPY", monto: 209.62, cajera: "A" }
+  ];
+  const cg = [{ fecha: "2026-04-30", debito: 0, credito: 0.01,
+                descripcion: "DEPOSITOS POR YAPPY DEL 1 AL 30 DE ABRIL", referencia: "ME-1", fila: 3 }];
+  const h = paso1(reporte, cg, null, 0.01, [], "2026-04-01", null);
+  eq(h.filter(function(x){ return String(x.texto||"").indexOf("Depósito acumulado YAPPY") >= 0; }).length, 1,
+     "la diferencia que la cola no explica sale igual");
+});
+
+// Hallazgo (abril 2026): al asiento del 15-abr se le cayó el "CK" y quedó "DEPOSITO DE BANISTMO DEL DEL
+// 15/04/2026" — los otros doce depósitos de cheque del mes dicen "CK DEL". La app no sabía que era un
+// depósito de cheques, así que el consolidado salía como diferencia roja Y ADEMÁS sus dos cheques (208.14 +
+// 200.42) viajaban al resumen del mes siguiente: la misma plata contada dos veces. Los cheques tardan — esos
+// dos entraron al banco el 20 de mayo.
+test("el asiento que no dice CK se reconoce por el CHEQUE del informe de ese día", () => {
+  const cg = [{ fecha: "2026-04-15", debito: 0, credito: 408.56, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" }];
+  const reporte = [{ fecha: "2026-04-15", banco: "Banistmo", metodo: "CHEQUE", monto: 408.56, cajera: "A" }];
+  const det = [{ fecha: "2026-04-15", banco: "Banistmo", monto: 208.14, fila: 29 },
+               { fecha: "2026-04-15", banco: "Banistmo", monto: 200.42, fila: 30 }];
+  const h = paso2(cg, [], [], null, null, det, 7, 0.01, reporte, null, {});
+  eq(contarRojas(h), 0, "el consolidado no sale como diferencia");
+  eq(h.filter(esEnTransito).length, 2, "y sus dos cheques quedan en tránsito, que es lo que son");
+});
+
+test("si el importe no cuadra con el cheque del informe, sigue siendo diferencia", () => {
+  // El resguardo: no se da por cheque cualquier asiento sin etiqueta. El informe tiene que respaldar el
+  // importe EXACTO, o un crédito de tarjeta pasaría por depósito de cheques.
+  const cg = [{ fecha: "2026-04-15", debito: 0, credito: 408.56, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO DE BANISTMO DEL DEL 15/04/2026" }];
+  const reporte = [{ fecha: "2026-04-15", banco: "Banistmo", metodo: "CHEQUE", monto: 300.00, cajera: "A" }];
+  const det = [{ fecha: "2026-04-15", banco: "Banistmo", monto: 300.00, fila: 29 }];
+  const h = paso2(cg, [], [], null, null, det, 7, 0.01, reporte, null, {});
+  eq(contarRojas(h), 1, "408.56 contra 300.00 del informe: no es el depósito de esos cheques");
+});
+
+// Hallazgo (abril 2026): al informe de cajeras le falta la fila del 11-abr, así que el punto 3 no podía
+// desglosar el asiento de 1,550.76 ("DEPOSITO POR TARJETA VISA BANISTMO") — que son VISA 982.09 + CLAVE
+// 568.67, las dos acreditadas el 13-abr. poolDelMetodo reserva las remisiones V/MC para los depósitos que
+// dicen VISA, así que la de CLAVE nunca podía entrar y el asiento salía como diferencia.
+const REMIS_11 = [
+  { fecha: "2026-04-13", debito: 0, credito: 324.39, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 2 },
+  { fecha: "2026-04-13", debito: 0, credito: 57.47,  descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 3 },
+  { fecha: "2026-04-13", debito: 0, credito: 982.09, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 4 },
+  { fecha: "2026-04-13", debito: 0, credito: 568.67, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 5 }
+];
+test("un asiento de tarjeta cuadra mezclando remisiones V/MC y CLAVE cuando no hay informe", () => {
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 1550.76, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const h = paso2(cg, REMIS_11, [], null, null, null, 7, 0.01, null, null, {});
+  eq(contarRojas(h), 0, "el asiento cuadra contra las dos remisiones");
+  // Y toma las que le tocan: quedan libres las otras dos.
+  const nav = [{ fecha: "2026-04-11", debito: 1550.76, credito: 0, referencia: "ME-1", fila: 5,
+                 descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const c = conciliarBancoEstado(nav, REMIS_11, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 2, "deja libres las otras dos remisiones");
+  cerca(c.faltanEnDiario.reduce(function(a, x){ return a + x.monto; }, 0), 381.86, "las libres son 324.39 + 57.47");
+});
+
+test("con dos formas de sumar el asiento, no se mezcla nada", () => {
+  // 500 + 300 y 600 + 200 dan los mismos 800: elegir una le robaría las remisiones al depósito que sí las
+  // necesita. Se deja como diferencia, igual que en el resto de las reglas de combinación.
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 800.00, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }];
+  const est = [
+    { fecha: "2026-04-13", debito: 0, credito: 500.00, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 2 },
+    { fecha: "2026-04-13", debito: 0, credito: 300.00, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 3 },
+    { fecha: "2026-04-13", debito: 0, credito: 600.00, descripcion: "CR REMISION - V/MC PAGO DE FACTURACION", fila: 4 },
+    { fecha: "2026-04-13", debito: 0, credito: 200.00, descripcion: "CR REMISION - CLAVE PAGO DE FACTURACION", fila: 5 }
+  ];
+  eq(contarRojas(paso2(cg, est, [], null, null, null, 7, 0.01, null, null, {})), 1, "con dos combinaciones no se adivina");
+});
+
+test("el efectivo no cuadra mezclando remisiones de tarjeta", () => {
+  // El resguardo de siempre: solo un depósito de TARJETA puede compensar en remisiones de tarjeta.
+  const cg = [{ fecha: "2026-04-11", debito: 0, credito: 1550.76, referencia: "ME-1", fila: 5,
+                descripcion: "DEPOSITO BRINKS DEL 11/04/2026" }];
+  const nav = [{ fecha: "2026-04-11", debito: 1550.76, credito: 0, referencia: "ME-1", fila: 5,
+                 descripcion: "DEPOSITO BRINKS DEL 11/04/2026" }];
+  const c = conciliarBancoEstado(nav, REMIS_11, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "el efectivo no toma remisiones de tarjeta");
 });
 
 /* --- resumen --- */
