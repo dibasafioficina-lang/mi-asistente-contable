@@ -3266,6 +3266,40 @@ test("una línea ABORTED sin comprobante no arrastra a las demás", () => {
   eq(c.faltanEnBanco.length, 0, "el asiento bueno sigue cuadrando");
 });
 
+/* El borde de mes del Paso 2 exigia el ULTIMO DIA CALENDARIO exacto, mientras el Paso 1 usa una ventana de 3
+   dias bancarios y el Paso 3 un lag por metodo. Cuando el mes termina en fin de semana el ultimo dia con
+   actividad no calificaba: la CLAVE del sabado 30-may-2026 (1,352.68) salia como diferencia porque mayo
+   cerraba el domingo 31, y su remision entra en junio. */
+test("lagFinMes da el margen por método", () => {
+  eq(lagFinMes("DEPOSITO BRINKS DEL 30/05/2026"), 5, "el efectivo del camión tarda más");
+  eq(lagFinMes("DEPOSITO POR TARJETA CLAVE STG DEL 30/5/2026"), 3);
+  eq(lagFinMes("DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO"), 3);
+  eq(lagFinMes("DEPOSITO DE BANISTMO CK DEL 30/05/2026"), 0, "un cheque no tiene margen de cierre");
+});
+test("la tarjeta de los últimos días del mes queda en tránsito, no en diferencia (30-may-2026)", () => {
+  STATE.decisiones = {};
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO POR TARJETA CLAVE STG DEL 20/5/2026", 211.94),
+    lineaCG("2026-05-30", "DEPOSITO POR TARJETA CLAVE STG DEL 30/5/2026", 1352.68)
+  ];
+  // El banco acredita la del 20 y la del 30 recién en junio. Mayo cierra el domingo 31.
+  const estS = [{ fecha:"2026-05-21", descripcion:"Remision Clave 016005605", credito:211.94, debito:0, fila:2 }];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 0, "la del 30 es de los últimos días: tránsito, no diferencia");
+  const tr = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 1352.68) < 0.01; });
+  eq(tr.length, 1, "viaja al resumen del próximo mes");
+});
+/* El guard: el margen es por método y el cheque no tiene ninguno — un cheque del último día sigue saliendo
+   por su propia vía (la pasada de cheques), no por el borde de mes. Y lo de MEDIADOS de mes tampoco entra. */
+test("un depósito de mediados de mes no se cuela por el borde de mes", () => {
+  STATE.decisiones = {};
+  const cg = [lineaCG("2026-05-15", "DEPOSITO POR TARJETA CLAVE STG DEL 15/5/2026", 500.00)];
+  const estS = [{ fecha:"2026-05-29", descripcion:"Remision Clave 016005605", credito:999.99, debito:0, fila:2 }];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  eq(contarRojas(h), 1, "el 15 no es fin de mes: sigue siendo diferencia");
+  cerca(h.filter(function(x){ return !esNoRojo(x); })[0].monto, 500.00);
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];

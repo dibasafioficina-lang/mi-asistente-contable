@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.12";
+var APP_VERSION="2026.10.13";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2662,6 +2662,18 @@ function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia, direc
   }
   return null;
 }
+/* ---- Cuanto antes del cierre un deposito ya no alcanza a compensar ----
+   El Paso 3 lo decide por metodo desde hace meses (esBrinks 5 dias, tarjeta 3, el resto 0) y el Paso 1 con
+   una ventana de 3 dias bancarios. El Paso 2 era el unico que exigia el ULTIMO DIA CALENDARIO exacto, asi
+   que cuando el mes termina en fin de semana el ultimo dia CON ACTIVIDAD no calificaba: la CLAVE del sabado
+   30-may-2026 por B/ 1,352.68 salia como diferencia porque el mes cerraba el domingo 31, y su remision
+   entra en junio. Se unifica el criterio con el del Paso 3, medido en dias BANCARIOS —que es lo que tarda
+   el banco— en vez de dias de calendario. */
+function lagFinMes(desc){
+  if(esBrinks(desc)) return 5;
+  var n = normTxt(desc);
+  return /TARJETA|VISA|CLAVE|YAPPY/.test(n) ? 3 : 0;
+}
 function esChequeDesc(desc){
   var n = normTxt(desc);
   return /(^|\s)CK(\s|$)/.test(n) || n.indexOf("CHEQUE")!==-1;
@@ -3619,7 +3631,10 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
       var concepto = String(dep.descripcion||"").trim();
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
-      if(ultimoDia && dep.fecha===ultimoDia){
+      // Con desglose del informe manda el punto 3c, que distingue "no compenso NADA" (transito) de "compenso
+      // a medias" (diferencia a revisar). El borde de mes no puede tragarse esa distincion: ampliar su
+      // ventana sin este guard daba por transito una compensacion parcial del 27-feb-2026.
+      if(!desglose && ultimoDia && dep.fecha <= ultimoDia && distanciaBancaria(dep.fecha, ultimoDia) <= lagFinMes(dep.descripcion)){
         hallazgos.push({
           fecha:dep.fecha, banco:banco, monto:objetivo, clase:"en_transito",
           // Si el asiento consolida varios metodos, se anota su desglose: el Paso 3 ve esos metodos por
