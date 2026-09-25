@@ -2990,6 +2990,69 @@ test("el efectivo de la cajera se coteja contra Caja General en el Paso 1", () =
   if (rojas[0].texto.indexOf("Efectivo 2026-03-10") < 0) throw new Error("debe decir que es el efectivo: " + rojas[0].texto);
 });
 
+/* Al cierre, Caja General puede tener el credito de un efectivo que el informe de la cajera no trae. El
+   credito YA se hizo, asi que la plata salio de la cuenta: lo que queda en transito es del lado del banco y
+   lo reporta el Paso 2 (hereda la misma linea). Emitirlo tambien como diferencia en el Paso 1 lo contaba
+   dos veces. Caso real: 28-may-2026, "DEPOSITO DEL 28/5/2026" por 73.00 en ventanilla, informe en 0.00. */
+test("el efectivo asentado al cierre que el informe no trae es aviso, no diferencia (28-may-2026)", () => {
+  STATE.decisiones = {};
+  const rep = [{ fecha: "2026-05-28", banco: "STG", metodo: "VISA", monto: 100.00, cajera: "A" }];
+  rep.efectivo = [{ fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 }];
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-28", "DEPOSITO POR TARJETA VISA STG DEL 28/05/2026", 100.00),
+    lineaCG("2026-05-28", "DEPOSITO DEL 28/5/2026", 73.00),
+    lineaCG("2026-05-29", "DEPOSITO POR TARJETA VISA STG DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  eq(contarRojas(h), 0, "el efectivo de ventanilla del cierre no es una diferencia");
+  const av = h.filter(function(x){ return esAviso(x) && /informe de la cajera no trae/.test(x.concepto || ""); });
+  eq(av.length, 1, "sale como aviso de archivo de origen");
+  cerca(av[0].monto, 73.00, "el monto del aviso es lo que falta en el informe");
+  eq(av[0].fecha, "2026-05-28");
+  if (av[0].texto.indexOf("falta es la línea en el informe de la cajera") < 0)
+    throw new Error("el aviso debe decir que falta la linea en el informe: " + av[0].texto);
+  // Y no viaja como transito de Caja General: eso inflaria el saldo de apertura del mes siguiente.
+  eq(h.filter(function(x){ return esEnTransito(x) && Math.abs((x.monto||0) - 73.00) < 0.005; }).length, 0,
+     "el credito ya se hizo: no es transito DENTRO de Caja General");
+});
+
+/* El guard: el aviso es solo para el cierre. En medio del mes no hay rezago del banco que lo explique, asi
+   que un efectivo asentado que la cajera no reporto sigue siendo una diferencia roja. */
+test("un efectivo asentado sin reportar en MEDIO del mes sigue siendo diferencia", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 }];
+  const cg = [
+    lineaCG("2026-05-10", "DEPOSITO DEL 10/5/2026", 73.00),
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-29", "DEPOSITO BRINKS DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "el 10 de mayo no es cierre: la diferencia queda");
+  eq(rojas[0].fecha, "2026-05-10");
+  cerca(rojas[0].monto, -73.00, "sigue con el signo de siempre");
+});
+
+/* Y el caso inverso no cambia: cuando la cajera SI reporto y Caja General no acredito, la plata sigue
+   DENTRO de la cuenta y viaja al resumen como transito. */
+test("el efectivo de cierre reportado y sin asentar sigue siendo tránsito", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [
+    { fecha: "2026-05-20", tipo: "BRINK", monto: 400.00 },
+    { fecha: "2026-05-29", tipo: "VENTANILLA", monto: 73.00 }
+  ];
+  const cg = [
+    lineaCG("2026-05-20", "DEPOSITO BRINKS DEL 20/05/2026", 400.00),
+    lineaCG("2026-05-29", "DEPOSITO POR TARJETA VISA STG DEL 29/05/2026", 0.01)
+  ];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", null);
+  eq(contarRojas(h), 0);
+  const fin = h.filter(function(x){ return esEnTransito(x) && /Efectivo de fin de mes/.test(x.concepto || ""); });
+  eq(fin.length, 1, "sin credito a Caja General, sigue adentro y viaja al resumen");
+  cerca(fin[0].monto, 73.00);
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];

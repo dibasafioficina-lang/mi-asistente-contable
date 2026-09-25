@@ -2084,6 +2084,30 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
         });
         return;
       }
+      /* ---- Efectivo asentado al cierre que el informe de la cajera no trae ----
+         Al reves del caso de arriba: el credito a Caja General YA se hizo, asi que la plata salio de la
+         cuenta y lo que queda en transito es del lado del banco — el Paso 2 hereda esta misma linea por
+         `decisiones().efectivo.filas` y la busca en el estado de cuenta, que es donde corresponde
+         reportarla. Emitirla acá como diferencia la contaba dos veces (roja en el Paso 1 y transito en el
+         Paso 2), y como transito de Caja General habria inflado el saldo de apertura del mes siguiente.
+         Lo que si falta de verdad es la linea en el informe de la cajera: eso es lo que dice el aviso.
+         Caso real: 28-may-2026, "DEPOSITO DEL 28/5/2026" por B/ 73.00 en ventanilla, con el informe en
+         B/ 0.00 ese dia. Solo al cierre: un efectivo sin reportar en medio del mes sigue siendo rojo,
+         porque ahi no hay rezago del banco que lo explique. */
+      if(diffEf < -tolerancia && ls.length && esFinDeMesP1(f)){
+        hallazgos.push({
+          fecha:f, banco:"", monto:Math.round(Math.abs(diffEf)*100)/100, clase:"aviso",
+          concepto:"Efectivo asentado que el informe de la cajera no trae", comprobante:"",
+          motivo:"falta la línea en el reporte consolidado de caja",
+          texto: "Efectivo " + f + ": Caja General acreditó B/ " + fmt(b) + enCaja + " y el informe de la cajera " +
+                 (a > 0 ? "solo trae B/ " + fmt(a) + (det ? " (" + det + ")" : "") : "no lo trae") +
+                 " (falta B/ " + fmt(Math.abs(diffEf)) + "). Es de los últimos días del mes: el asiento ya sacó la plata de " +
+                 "Caja General y el Paso 2 la busca en el banco, así que acá no hay descuadre — lo que falta es la línea " +
+                 "en el informe de la cajera." + comprobanteTxt(f),
+          fuente: "Reporte consolidado de caja (efectivo) / Diario Caja General"
+        });
+        return;
+      }
       hallazgos.push({
         fecha:f, banco:"", monto:diffEf, clase:"diff", concepto:"Efectivo", comprobante:"",
         texto: "Efectivo " + f + ": la cajera reportó B/ " + fmt(a) + (det ? " (" + det + ")" : "") + " y Caja General acreditó B/ " + fmt(b) +
