@@ -3053,6 +3053,125 @@ test("el efectivo de cierre reportado y sin asentar sigue siendo tránsito", () 
   cerca(fin[0].monto, 73.00);
 });
 
+/* Un asiento acumulado de fin de mes puede traer adentro el descargo de una partida que venia en transito:
+   el credito a Caja General va cuando el banco COMPENSA, asi que lo del mes pasado se descarga este mes y a
+   veces se digita dentro del mismo asiento del metodo. Entonces el acumulado registra MAS de lo que el
+   informe trae en el rango. Caso real: 31-may-2026, "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO" por 973.96 =
+   764.34 del Yappy de mayo + 209.62 del Yappy del 30-abr, que el banco acredito el 1-may. */
+function decisionTransitoCompensada(items){
+  STATE.decisiones = STATE.decisiones || {};
+  STATE.decisiones.transito = { compensadas: items.map(function(t){
+    return { banco:t.banco, fecha:t.fecha, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, sentido:"credito" }; }) };
+}
+test("el acumulado que trae adentro el descargo del tránsito no es diferencia (31-may-2026, Yappy 209.62)", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  [["2026-05-12",0.64],["2026-05-14",38.90],["2026-05-16",124.88],["2026-05-22",76.98],["2026-05-30",41.70]]
+    .forEach(function(p){ rep.push({ fecha:p[0], banco:"Banco General", metodo:"YAPPY", monto:p[1], cajera:"A" }); });
+  const suma = 0.64 + 38.90 + 124.88 + 76.98 + 41.70;            // 283.10 del mes
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  decisionTransitoCompensada(transito);                           // el Paso 0 la vio compensar
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", Math.round((suma + 209.62)*100)/100)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  eq(contarRojas(h), 0, "el asiento incluye el descargo: no es una diferencia");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /Descargo de tránsito incluido/.test(x.concepto || ""); });
+  eq(inf.length, 1, "se informa el descargo que trae adentro");
+  cerca(inf[0].monto, 209.62);
+  eq(inf[0].partidas.length, 1);
+  cerca(inf[0].partidas[0].monto, 209.62);
+  // Y queda la decisión para que el Paso 3 no le pida al banco el total del asiento.
+  const dec = STATE.decisiones.acumDescargo;
+  eq(!!dec && dec.lista.length, 1, "el Paso 3 hereda el ajuste");
+  cerca(dec.lista[0].descargo, 209.62);
+  cerca(dec.lista[0].monto, Math.round((suma + 209.62)*100)/100);
+});
+
+/* El guard: sin la evidencia del Paso 0 de que la partida COMPENSÓ, no se reconoce nada. Si no, cualquier
+   importe que coincida por casualidad con una partida vieja se daría por descargado. */
+test("sin la evidencia de que compensó, el acumulado sigue siendo diferencia", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  rep.push({ fecha:"2026-05-12", banco:"Banco General", metodo:"YAPPY", monto:100.00, cajera:"A" });
+  rep.push({ fecha:"2026-05-30", banco:"Banco General", metodo:"YAPPY", monto:50.00, cajera:"A" });
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  // NO se declara compensada: el Paso 0 no la vio cerrar en el banco.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 359.62)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "sin evidencia de compensación, la diferencia queda");
+  cerca(rojas[0].monto, -209.62);
+});
+
+/* Y el guard de siempre: con dos partidas compensadas del mismo importe que podrían explicarlo, no se
+   adivina cuál es. */
+test("con dos partidas posibles, el descargo del acumulado no se adivina", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  rep.push({ fecha:"2026-05-12", banco:"Banco General", metodo:"YAPPY", monto:100.00, cajera:"A" });
+  rep.push({ fecha:"2026-05-30", banco:"Banco General", metodo:"YAPPY", monto:50.00, cajera:"A" });
+  const transito = [
+    { fecha:"2026-04-29", banco:"Banco General", monto:60.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" },
+    { fecha:"2026-04-30", banco:"Banco General", monto:60.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" },
+    { fecha:"2026-04-28", banco:"Banco General", monto:120.00, concepto:"Depósito de fin de mes", sentido:"credito", creditoCG:"pendiente" }
+  ];
+  decisionTransitoCompensada(transito);
+  // 120.00 se alcanza de dos formas: la partida de 120.00, o 60.00 + 60.00.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 270.00)];
+  const h = paso1(rep, cg, null, 0.01, [], "2026-05-01", transito);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.length, 1, "dos combinaciones posibles: no se toca");
+  cerca(rojas[0].monto, -120.00);
+});
+
+/* La otra mitad: del lado del banco ese acumulado es UN debito por el total, pero su linea del estado ya no
+   esta libre — el Paso 0 la consumio al ver compensar la partida. Buscando el total no aparece nunca y el
+   Paso 3 devolvia una diferencia por CADA credito del estado: en mayo de 2026 el Yappy salia en 15. */
+test("el Paso 3 coteja el acumulado por el importe neto del descargo que trae adentro", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [];
+  [["2026-05-12",100.00],["2026-05-20",80.00],["2026-05-30",50.00]]
+    .forEach(function(p){ rep.push({ fecha:p[0], banco:"Banco General", metodo:"YAPPY", monto:p[1], cajera:"A" }); });
+  const transito = [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62,
+                      concepto:"Depósito de fin de mes reportado por la cajera", sentido:"credito", creditoCG:"pendiente" }];
+  decisionTransitoCompensada(transito);
+  // El asiento del mes: 230.00 del Yappy de mayo + 209.62 del descargo de abril = 439.62.
+  const cg = [lineaCG("2026-05-31", "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO", 439.62)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", transito)), 0, "el Paso 1 lo reconoce");
+  // El navegador de Banco General trae el mismo asiento del lado del debito.
+  const navBG = [{ fecha:"2026-05-31", debito:439.62, credito:0, descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO",
+                   referencia:"ME-00000001964", fila:2 }];
+  // El estado acredita el Yappy dia por dia; el 209.62 del 1-may es el que compenso la partida de abril y lo
+  // aparta el Paso 0 (aca se marca a mano: el test llama al paso suelto).
+  const estBG = [
+    { fecha:"2026-05-01", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:209.62, fila:2, _transitoUsado:true },
+    { fecha:"2026-05-13", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:100.00, fila:3 },
+    { fecha:"2026-05-21", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:80.00, fila:4 },
+    { fecha:"2026-05-31", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:50.00, fila:5 }
+  ];
+  const h = paso3([], [], [], [], navBG, estBG, 7, 0.01, null, null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x) && x.banco === "Banco General"; });
+  eq(rojas.length, 0, "el asiento cuadra por 230.00 contra los tres créditos del mes");
+});
+
+/* Guard del Paso 3: sin la decisión del Paso 1 no se ajusta nada — el asiento se sigue cotejando por su
+   total, que es el comportamiento de siempre. */
+test("sin la decisión del Paso 1, el Paso 3 coteja el acumulado por su total", () => {
+  STATE.decisiones = {};
+  const navBG = [{ fecha:"2026-05-31", debito:439.62, credito:0, descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO",
+                   referencia:"ME-00000001964", fila:2 }];
+  const estBG = [
+    { fecha:"2026-05-13", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:100.00, fila:3 },
+    { fecha:"2026-05-21", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:80.00, fila:4 },
+    { fecha:"2026-05-31", descripcion:"DEPOSITO YAPPY - POS", debito:0, credito:50.00, fila:5 }
+  ];
+  const h = paso3([], [], [], [], navBG, estBG, 7, 0.01, null, null);
+  // 230.00 no es 439.62: el asiento queda en tránsito y los créditos sin asiento.
+  if (!h.some(function(x){ return x.banco === "Banco General" && Math.abs((x.monto||0) - 439.62) < 0.01; }))
+    throw new Error("el asiento debe seguir cotejándose por su total");
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];

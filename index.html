@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.09";
+var APP_VERSION="2026.10.10";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1761,10 +1761,27 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
      excedente sobre el reporte que alcance para cubrirlo. Sin la segunda, un depósito legítimo del mes que
      por casualidad coincida en monto con una partida en tránsito se borraría del cotejo sin decir nada. */
   var descargos = [], avisosDescargo = [];
+  // Acumulados de fin de mes que traen adentro el descargo del transito anterior: el Paso 3 lo hereda para
+  // no pedirle al banco un importe que incluye plata que el Paso 0 ya dio por compensada.
+  var descargosEnAcumulado = [];
   if(transitoPrevio && transitoPrevio.length){
     var poolPrev = transitoPrevio.filter(pasaPorCajaGeneral).map(function(t){
-      return { fecha:t.fecha, monto:t.monto, banco:t.banco, concepto:t.concepto, partes:t.partes, usado:false };
+      return { fecha:t.fecha, monto:t.monto, banco:t.banco, concepto:t.concepto, partes:t.partes, usado:false, compensada:false };
     });
+    /* Cuales de esas partidas el Paso 0 vio COMPENSAR en el banco este mes. Es la evidencia que habilita
+       reconocer un descargo embutido en un asiento acumulado: sin ella, cualquier importe que coincida por
+       casualidad se daria por descargado. Se cruza por banco + fecha + importe, igual que poolParaDescargos. */
+    (function(){
+      var dec = STATE.decisiones && STATE.decisiones.transito;
+      (dec && dec.compensadas ? dec.compensadas : []).forEach(function(ch){
+        if(ch.sentido === "debito") return;
+        for(var i=0;i<poolPrev.length;i++){
+          var o = poolPrev[i];
+          if(!o.compensada && o.banco === ch.banco && Math.abs(o.monto - ch.monto) < 0.005 &&
+             o.fecha === (ch.fechaOrig || ch.fecha)){ o.compensada = true; return; }
+        }
+      });
+    })();
     function recalcCajaP1(){
       cajaPorBancoDia = sumBy(cajaFiltrada, function(x){return clasificarBancoPorTexto(x.descripcion)+"|"+x.fecha;},
         function(x){ return x.credito; });
@@ -2164,6 +2181,41 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
         return;
       }
     }
+    /* ---- El acumulado trae adentro el DESCARGO del transito del mes anterior ----
+       El credito a Caja General se registra cuando el banco COMPENSA, asi que una partida que quedo en
+       circulacion el mes pasado se descarga este mes. Si ese descargo se digita DENTRO del asiento acumulado
+       del metodo —en vez de en su propio asiento del dia que compenso— el acumulado registra MAS de lo que el
+       informe de cajeras trae en el rango, y la diferencia salia como roja.
+       Caso real: 31-may-2026, "DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO" por B/ 973.96 = 764.34 del Yappy de
+       mayo + 209.62 del Yappy del 30-abr, que quedo en circulacion y el banco acredito el 1-may. Las dos
+       cosas son legitimas; lo que faltaba era que la app entendiera el asiento.
+       Solo con la evidencia del Paso 0: misma cuenta bancaria, el Paso 0 tiene que haberla visto COMPENSAR
+       este mes, y la combinacion tiene que ser UNICA. Sin eso queda como diferencia, igual que siempre. */
+    if(diff < -tolerancia && poolPrev){
+      var faltaD = Math.round(-diff*100)/100;
+      var candD = poolPrev.filter(function(p){ return !p.usado && p.compensada && p.banco === b.banco; });
+      var solsD = candD.length ? solucionesSuma(candD.map(function(p){ return p.monto; }), faltaD, tolerancia, 6, 1) : null;
+      if(solsD && solsD.length === 1){
+        var partD = solsD[0].map(function(i){ return candD[i]; });
+        partD.forEach(function(p){ p.usado = true; });
+        descargosEnAcumulado.push({ banco:b.banco, fecha:b.fecha, monto:b.monto, descargo:faltaD });
+        hallazgos.push({
+          fecha:b.fecha, banco:b.banco, monto:faltaD, clase:"informativo",
+          concepto:"Descargo de tránsito incluido en el acumulado", comprobante: refME(b.ref),
+          partidas: partD.map(function(p){ return { banco:p.banco, fecha:p.fecha, monto:p.monto, concepto:p.concepto }; }),
+          motivo:"el asiento acumulado trae el descargo del mes anterior",
+          texto: b.banco + ": el asiento acumulado de " + b.metodo + " registró B/ " + fmt(b.monto) +
+                 " y el informe de cajeras trae B/ " + fmt(b.cubierto) + " en el período. La diferencia (B/ " +
+                 fmt(faltaD) + ") es el descargo de " + partD.length + " partida(s) que venían en tránsito del mes " +
+                 "anterior y el banco compensó este mes: " +
+                 partD.map(function(p){ return p.fecha + " B/ " + fmt(p.monto); }).join(", ") +
+                 ". El asiento junta las dos cosas y las dos son correctas, así que no hay nada que corregir — " +
+                 "queda más claro si el descargo se fecha el día que el banco compensó, pero no es un error.",
+          fuente: "Reporte consolidado de caja / Resumen en tránsito del mes anterior / Diario Caja General"
+        });
+        return;
+      }
+    }
     if(Math.abs(diff) > tolerancia){
       hallazgos.push({
         fecha:b.fecha, banco:b.banco, monto:diff, clase:"diff",
@@ -2296,6 +2348,9 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
   // cubrio que dias). El cierre lo hereda para no recalcular las ventas sin deposito sin esa informacion —
   // sin esto las seis partidas de Yappy de marzo volvian a aparecer en el resumen por la puerta de atras.
   decisiones().diferidos = { firmaCaja: firmaDiario(diarioCaja), porDia: difDiaP1 };
+  // El Paso 3 tiene que buscar en el banco el importe del acumulado MENOS el descargo que trae adentro: esa
+  // parte la consumio el Paso 0 contra el credito del dia que compenso, asi que ya no esta libre en el estado.
+  decisiones().acumDescargo = { firmaCaja: firmaDiario(diarioCaja), lista: descargosEnAcumulado };
   guardarDecisionDescargos(diarioCaja, transitoPrevio, descargos);   // los Pasos 2 y 3 heredan esta decision
   return colapsarCompensados(hallazgos, tolerancia);
 }
@@ -2680,7 +2735,9 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     // estado que compensó una partida en tránsito del mes anterior: su asiento es del mes pasado, no de
     // este) y _neutro (traspaso interno de neto cero, no llega al estado de cuenta).
     return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
-      .map(function(x){ return {fecha:x.fecha, monto:x[campo], descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
+      // _montoConc: el Paso 3 lo marca en un asiento acumulado que trae adentro el descargo del transito
+      // anterior (ver marcarAcumuladosConDescargo). undefined deja que montoConc() use el monto, como siempre.
+      .map(function(x){ return {fecha:x.fecha, monto:x[campo], montoConc:x._montoConc, descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
   }
   var poolDiario = limpio(diarioDeb, "debito");
   var poolEstado = limpio(estadoCred, "credito");
@@ -2977,6 +3034,28 @@ function marcarLineasHeredadas(filas, lineas, campo, marca){
   return halladas;
 }
 function refME(ref){ var r = String(ref==null ? "" : ref).trim(); return /^ME-/i.test(r) ? r : ""; }
+/* ---- El acumulado del navegador del banco trae adentro un descargo ya compensado ----
+   El Paso 1 detecta que un asiento acumulado registra el metodo del mes MAS el descargo de una partida que
+   venia en transito (ver "El acumulado trae adentro el DESCARGO"). Del lado del banco ese asiento es un solo
+   debito por el total, pero su linea del estado ya no esta libre: el Paso 0 la consumio cuando vio compensar
+   la partida. Buscando el total, el Paso 3 no lo encuentra nunca y devuelve una diferencia por CADA credito
+   del estado — en mayo de 2026 el Yappy salia en 15. Se le marca el importe conciliable (total menos
+   descargo) y el cotejo busca eso, que es lo que el banco todavia tiene por acreditar.
+   Solo con la decision del Paso 1 y sobre el diario del mismo banco: sin eso no se toca nada. */
+function marcarAcumuladosConDescargo(banco, diario, tolerancia){
+  var dec = STATE.decisiones && STATE.decisiones.acumDescargo;
+  if(!dec || !dec.lista || !dec.lista.length || !diario || !diario.length) return;
+  dec.lista.forEach(function(a){
+    if(a.banco !== banco || !(a.descargo > 0)) return;
+    for(var i=0;i<diario.length;i++){
+      var x = diario[i];
+      if(x._montoConc != null || !(x.debito > 0)) continue;
+      if(x.fecha !== a.fecha || Math.abs(x.debito - a.monto) > 0.005) continue;
+      x._montoConc = Math.round((a.monto - a.descargo)*100)/100;
+      return;
+    }
+  });
+}
 // Cheques: los clarea el Paso 2 contra el desglose del informe. El Paso 3 recibe que lineas del estado se
 // usaron y cuanto suma el desglose, y solo verifica que el navegador del banco registre ese mismo total.
 /* ---- Asiento repetido en el navegador del banco ----
@@ -4007,6 +4086,9 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     } else {
       conciliarChequesPaso3(cfg.diario, cfg.estado, prevChq, ultimoDia, tolerancia, cfg.nombre, hallazgos, poolDescargoP3, !!heredadosP3);
     }
+    // Un acumulado que trae adentro el descargo del transito anterior se coteja por el importe que el banco
+    // todavia tiene por acreditar, no por el total del asiento (el resto lo consumio el Paso 0).
+    marcarAcumuladosConDescargo(cfg.nombre, cfg.diario, tolerancia);
     // Concilia diario vs estado permitiendo combinaciones (un depósito combinado del diario que el
     // estado refleja partido en varias líneas, ej. 539.18 = 211.82+132.05+195.31, se da por cuadrado).
     var conc = conciliarBancoEstado(cfg.diario, cfg.estado, ventanaDias, tolerancia, cfg.retVisa);
