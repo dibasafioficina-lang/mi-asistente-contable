@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.10";
+var APP_VERSION="2026.10.11";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2377,6 +2377,31 @@ function primerDiaMes(fechas){
 // Detecta Brinks en cualquiera de sus variantes: "Brinks Panama" (junto) o "Brink S Panama" (con espacio,
 // como aparece en el estado de cuenta de STG). Por eso se busca "BRINK" y no "BRINKS".
 function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
+/* ---- El ACH de Brinks dice QUE DIA se retiro el efectivo ----
+   "Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi" = el retiro del 13/05/26, que el banco acredita
+   uno o dos dias despues. Sin leer esa fecha, para el cotejo todos los ACH son intercambiables mientras el
+   importe cuadre, y uno se va al dia equivocado dejando huerfano al que le tocaba: en mayo de 2026 el
+   asiento del 4-may (452.22) cuadro con 65.00 + 385.00 + 2.22 llevandose el ACH del retiro del 13-may, y el
+   efectivo del 12-may (66.66 = 65.00 + 1.66) salio como "no aparece en el estado de cuenta".
+   Confirmado por Diba (25-sep-2026): esa fecha es la del retiro en el local. */
+function fechaRetiroBrinks(desc){
+  if(!esBrinks(desc)) return null;
+  var m = String(desc||"").match(/(?:^|\D)(\d{2})(\d{2})(\d{2})(?:\D|$)/);
+  if(!m) return null;
+  var d = parseInt(m[1],10), mo = parseInt(m[2],10), y = 2000 + parseInt(m[3],10);
+  if(d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+  return y + "-" + String(mo).padStart(2,"0") + "-" + String(d).padStart(2,"0");
+}
+/* Brinks no puede retirar el dia F el efectivo que entro a caja DESPUES: un asiento muy anterior al retiro
+   no es suyo. Solo se corta ese caso —el imposible—; si el retiro es anterior o del mismo dia que el
+   asiento no se restringe nada, porque el asiento se digita a veces dias despues del retiro. */
+var ACH_ANTICIPO_MAX = 3;   // dias habiles de anticipo tolerados entre el asiento y el retiro
+function retiroCompatible(descEstado, fechaAsiento){
+  var f = fechaRetiroBrinks(descEstado);
+  if(!f || !fechaAsiento) return true;          // el texto no dice la fecha: como siempre
+  if(f <= fechaAsiento) return true;            // el retiro es anterior o del mismo dia: normal
+  return distanciaBancaria(fechaAsiento, f) <= ACH_ANTICIPO_MAX;
+}
 // Depósito de EFECTIVO del diario: el camión de valores (Brinks) o el que se lleva a ventanilla
 // ("DEPOSITO DEL 09/6/2026"). Se distingue de los depósitos por tarjeta (VISA/CLAVE/Yappy), de los ACH y
 // de los cheques, porque solo el efectivo se comporta como se describe en consolidarEfectivoDelDia.
@@ -3729,9 +3754,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         var candEf = poolEstEf.filter(function(e){ return !esRemisionVisa(e.descripcion) && !esRemisionClave(e.descripcion); });
         poolDiaEf.forEach(function(d){
           if(d.usado) return;
-          var c = esBrinks(d.descripcion) ? buscarBrinks(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
-          if(!c) c = combinacionMasCercana(candEf, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
-          if(c){ c.forEach(function(i){ candEf[i].usado = true; }); d.usado = true; }
+          // Los ACH cuyo retiro es muy posterior al asiento no son de este efectivo (ver fechaRetiroBrinks).
+          // Comparte los objetos del pool, asi que marcar `usado` en el subconjunto marca el pool real.
+          var poolD = candEf.filter(function(e){ return retiroCompatible(e.descripcion, d.fecha); });
+          var c = esBrinks(d.descripcion) ? buscarBrinks(poolD, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia) : null;
+          if(!c) c = combinacionMasCercana(poolD, d.fecha, d.monto, Math.max(ventanaDias, 10), tolerancia);
+          if(c){ c.forEach(function(i){ poolD[i].usado = true; }); d.usado = true; }
         });
         /* Deposito MIXTO: Brinks retira el efectivo de Caja General junto con otra plata que no pasa por
            Caja General (la caja menuda que los duenos prestan, registrada solo en el diario del banco) y el

@@ -3172,6 +3172,59 @@ test("sin la decisión del Paso 1, el Paso 3 coteja el acumulado por su total", 
     throw new Error("el asiento debe seguir cotejándose por su total");
 });
 
+/* El ACH de Brinks dice en su texto QUE DIA se retiro el efectivo ("D08563bsafe 130526" = 13/05/26) y el
+   banco lo acredita uno o dos dias despues. Sin leer esa fecha todos los ACH son intercambiables mientras el
+   importe cuadre, y uno se va al dia equivocado: en mayo de 2026 el asiento del 4-may (452.22) cuadro con
+   65.00 + 385.00 + 2.22 llevandose el ACH del retiro del 13-may, y el efectivo del 12-may (66.66 = 65.00 del
+   ACH + 1.66 de ventanilla) salia como "no aparece en el estado de cuenta". Brinks no puede haber retirado el
+   13 el efectivo que entro a caja el 4. */
+test("fechaRetiroBrinks lee la fecha del retiro y no confunde el código de la remesa", () => {
+  eq(fechaRetiroBrinks("Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi"), "2026-05-13");
+  eq(fechaRetiroBrinks("Ach De Brink S Panama S.A. - D08563bsafe 270526 "), "2026-05-27");
+  eq(fechaRetiroBrinks("Ach De Brinks Panama, S.A. - D08563bsafe 300426 Davi"), "2026-04-30");
+  eq(fechaRetiroBrinks("ACH DE BRINKS PANAMA"), null, "sin fecha en el texto no se inventa");
+  eq(fechaRetiroBrinks("Remisión V/Mc 016005605 Liq. No. 3884415"), null, "no es un Brinks");
+  eq(fechaRetiroBrinks("Ach De Brinks - 995626 x"), null, "mes 56 no existe: no se toma");
+});
+test("un ACH de Brinks no lo toma un asiento muy anterior a su retiro (12-may-2026, 66.66)", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [
+    { fecha:"2026-05-04", tipo:"BRINK", monto:452.22 },
+    { fecha:"2026-05-12", tipo:"BRINK", monto:66.66 }
+  ];
+  const cg = [
+    lineaCG("2026-05-04", "DEPOSITO BRINKS DEL 04/05/2026", 452.22),
+    lineaCG("2026-05-12", "DEPOSITO BRINKS DEL 12/05/2026", 66.66)
+  ];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", null)), 0, "el Paso 1 los ve asentados");
+  // Los mismos importes de mayo de 2026: la ÚNICA forma de llegar a 452.22 pasa por el ACH de 65.00, que es
+  // del retiro del 13. Sin el guard, el asiento del 4 se lo lleva y el del 12 queda sin compensar.
+  const estS = [
+    { fecha:"2026-05-08", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 070526 Davi", credito:385.00, debito:0, fila:2 },
+    { fecha:"2026-05-06", descripcion:"Descripción", credito:2.22, debito:0, fila:3 },
+    { fecha:"2026-05-14", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi", credito:65.00, debito:0, fila:4 },
+    { fecha:"2026-05-15", descripcion:"Descripción", credito:1.66, debito:0, fila:5 }
+  ];
+  const h = paso2(cg, [], estS, null, null, null, 7, 0.01, null, null);
+  const rojas = h.filter(function(x){ return !esNoRojo(x); });
+  eq(rojas.filter(function(x){ return Math.abs(x.monto - 66.66) < 0.01; }).length, 0,
+     "el efectivo del 12 cuadra con el ACH de su retiro (65.00) + su ventanilla (1.66)");
+  // El del 4 queda sin compensar, que es lo correcto: su ACH no está en este estado de cuenta.
+  eq(rojas.length, 1, "solo queda el del 4, cuyo ACH no aparece");
+  cerca(rojas[0].monto, 452.22);
+});
+/* El guard del guard: cuando el retiro es ANTERIOR o del mismo día que el asiento no se restringe nada — el
+   asiento se digita a veces días después del retiro, y cortar ahí dejaría sin compensar cosas que cuadran. */
+test("un ACH cuyo retiro es anterior al asiento sigue pudiendo compensarlo", () => {
+  STATE.decisiones = {};
+  const rep = []; rep.efectivo = [{ fecha:"2026-05-04", tipo:"BRINK", monto:108.00 }];
+  const cg = [lineaCG("2026-05-04", "DEPOSITO BRINKS DEL 04/05/2026", 108.00)];
+  eq(contarRojas(paso1(rep, cg, null, 0.01, [], "2026-05-01", null)), 0);
+  // El retiro fue el 30-abr y el asiento se digitó el 4-may: es el mismo dinero.
+  const estS = [{ fecha:"2026-05-04", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 300426 Davi", credito:108.00, debito:0, fila:2 }];
+  eq(contarRojas(paso2(cg, [], estS, null, null, null, 7, 0.01, null, null)), 0, "el retiro previo al asiento cuadra igual");
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];
