@@ -3225,6 +3225,47 @@ test("un ACH cuyo retiro es anterior al asiento sigue pudiendo compensarlo", () 
   eq(contarRojas(paso2(cg, [], estS, null, null, null, 7, 0.01, null, null)), 0, "el retiro previo al asiento cuadra igual");
 });
 
+/* El sistema anula un movimiento marcando UNA linea "ABORTED", pero la transaccion son las dos: la original y
+   la que la reversa, bajo el mismo comprobante. Filtrando solo la que lleva la palabra, la otra competia con
+   el asiento bueno por la misma linea del banco. Dos casos reales, los dos traspasos entre cuentas propias
+   anulados y vueltos a registrar el mismo dia: 1,003.34 el 27-mar-2026 y 650.00 el 24-abr-2026. */
+test("una transacción anulada se excluye junto con su contrapartida (24-abr-2026, 650.00)", () => {
+  const navStg = [
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004295 - TRASPASO DE FONDO", referencia:"PAY0004295", fila:2 },
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"ABORTED PETTY SHOP, S.A. - Pago: PAY0004295 - TRASPASO DE FONDO", referencia:"PAY0004295", fila:3 },
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:4 }
+  ];
+  // El banco lo acredito UNA sola vez.
+  const estStg = [{ fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 }];
+  const c = conciliarBancoEstado(navStg, estStg, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el débito anulado no compite: solo queda el bueno, y cuadra");
+  eq(c.faltanEnDiario.length, 0, "el crédito del banco queda usado");
+});
+/* El guard: una linea que dice ABORTED sin comprobante no puede arrastrar a nadie (no hay a quien), y un
+   comprobante SIN ninguna linea anulada se sigue cotejando entero. */
+test("un comprobante sin línea anulada no se toca", () => {
+  const nav = [
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:2 },
+    { fecha:"2026-04-24", debito:120.00, credito:0, descripcion:"DEPOSITO DEL 24/04/2026", referencia:"ME-00000001900", fila:3 }
+  ];
+  const est = [
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 },
+    { fecha:"2026-04-24", debito:0, credito:120.00, descripcion:"Deposito", fila:3 }
+  ];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "los dos asientos cuadran");
+  eq(c.faltanEnDiario.length, 0);
+});
+test("una línea ABORTED sin comprobante no arrastra a las demás", () => {
+  const nav = [
+    { fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"ABORTED algo sin referencia", referencia:"", fila:2 },
+    { fecha:"2026-04-24", debito:650.00, credito:0, descripcion:"PETTY SHOP, S.A. - Pago: PAY0004300 - TRASPASO DE FONDO", referencia:"PAY0004300", fila:3 }
+  ];
+  const est = [{ fecha:"2026-04-24", debito:0, credito:650.00, descripcion:"Ach De Petty Shop S.A. - Bng A Stg", fila:2 }];
+  const c = conciliarBancoEstado(nav, est, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el asiento bueno sigue cuadrando");
+});
+
 test("el Paso 2 busca en el banco el efectivo que decidio el Paso 1", () => {
   STATE.decisiones = {};
   const rep = []; rep.efectivo = [{ fecha: "2026-03-10", tipo: "BRINK", monto: 535.00 }, { fecha: "2026-03-10", tipo: "VENTANILLA", monto: 3.61 }];

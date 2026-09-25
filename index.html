@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.11";
+var APP_VERSION="2026.10.12";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2753,13 +2753,37 @@ function marcarNeutros(diario){
     }
   });
 }
+/* ---- Una transaccion ANULADA se va con su contrapartida ----
+   El sistema anula un movimiento marcando UNA linea "ABORTED", pero la transaccion son las dos: la original y
+   la que la reversa, bajo el mismo comprobante. Filtrando solo la que lleva la palabra, la otra se queda en el
+   cotejo y compite con el asiento bueno por la misma linea del banco: una cuadra y la otra viaja al resumen
+   mes tras mes sin poder compensar nunca.
+   Dos casos reales, los dos traspasos entre cuentas propias que se anularon y se volvieron a registrar:
+     27-mar-2026  PAY0004263 (anulado) + PAY0004264 por B/ 1,003.34 — el banco lo acredito una vez, el 27.
+     24-abr-2026  PAY0004295 (anulado) + PAY0004300 por B/   650.00 — idem, el 24.
+   Es la misma regla que el Modulo 2 ya aplica en parseRetenciones y que CLAUDE.md documenta: la anulada se
+   excluye JUNTO CON su contrapartida. El Modulo 1 filtraba solo la linea marcada. */
+function refsAnuladasDiario(arr){
+  var refs = {};
+  (arr||[]).forEach(function(x){
+    if(normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED") === -1) return;
+    var r = String(x.referencia==null ? "" : x.referencia).trim();
+    if(r) refs[r] = true;
+  });
+  return refs;
+}
 function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, retVisaPorDia){
   marcarNeutros(diarioDeb);
+  // Las dos listas se miran por separado: un comprobante anulado en el diario no anula nada en el estado.
+  var anuladasDeb = refsAnuladasDiario(diarioDeb), anuladasCred = refsAnuladasDiario(estadoCred);
   function limpio(arr, campo){
     // Se excluyen: _chqUsado (ya emparejado por la pasada de cheques/Paso 0), _transitoUsado (línea del
     // estado que compensó una partida en tránsito del mes anterior: su asiento es del mes pasado, no de
     // este) y _neutro (traspaso interno de neto cero, no llega al estado de cuenta).
-    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; })
+    var anuladas = (campo === "debito") ? anuladasDeb : anuladasCred;
+    return arr.filter(function(x){ return x[campo]>0 && !x._chqUsado && !x._transitoUsado && !x._neutro &&
+        normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1 &&
+        !anuladas[String(x.referencia==null ? "" : x.referencia).trim()]; })
       // _montoConc: el Paso 3 lo marca en un asiento acumulado que trae adentro el descargo del transito
       // anterior (ver marcarAcumuladosConDescargo). undefined deja que montoConc() use el monto, como siempre.
       .map(function(x){ return {fecha:x.fecha, monto:x[campo], montoConc:x._montoConc, descripcion:x.descripcion, referencia:x.referencia, fila:x.fila, usado:false}; });
