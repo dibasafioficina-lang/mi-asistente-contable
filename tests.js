@@ -4307,6 +4307,53 @@ test("el efectivo no cuadra mezclando remisiones de tarjeta", () => {
   eq(c.faltanEnBanco.length, 1, "el efectivo no toma remisiones de tarjeta");
 });
 
+/* ---- El efectivo de fin de mes compensa contra el ACH de Brinks, no contra un "DEPOSITO" ----
+   Hallazgo (oct 2026, al rastrear el descuadre del cierre de mayo): el efectivo del 27 y 28 de feb de 2026
+   (282.32 y 2,384.88) se acredito en St. Georges el 2 de marzo, pero el banco no lo llama "DEPOSITO": lo
+   acredita como "Ach De Brinks Panama, S.A. - D08563bsafe 280226 David" mas una linea de redondeo que St.
+   Georges deja con el texto "Descripcion" (el encabezado, literal en el Excel). esDepositoEstado rechazaba
+   las dos, asi que el efectivo de fin de mes NO TENIA CONTRA QUE COMPENSAR NUNCA y viajaba al resumen mes
+   tras mes: en octubre seguia ahi, descuadrando el cierre de cada mes en 2,667.20 y arrastrando el
+   descuadre de apertura de marzo en adelante. */
+const EST_BRINKS_FINMES = () => [
+  { fecha: "2026-03-02", debito: 0, credito: 2380.00, descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 010326 David", fila: 2 },
+  { fecha: "2026-03-02", debito: 0, credito: 4.88,    descripcion: "Descripción", fila: 3 },
+  { fecha: "2026-03-02", debito: 0, credito: 280.00,  descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 280226 David", fila: 4 },
+  { fecha: "2026-03-02", debito: 0, credito: 2.32,    descripcion: "Descripción", fila: 5 }
+];
+test("el efectivo de fin de mes compensa contra el ACH de Brinks y su redondeo", () => {
+  const previo = [
+    { fecha: "2026-02-27", banco: "STG", monto: 282.32,  concepto: "Efectivo de fin de mes reportado por la cajera" },
+    { fecha: "2026-02-28", banco: "STG", monto: 2384.88, concepto: "Efectivo de fin de mes reportado por la cajera" }
+  ];
+  const h = paso0(previo, [], EST_BRINKS_FINMES(), null, 7, 0.01);
+  const pend = h.filter(x => /aún NO compensó/.test(String(x.texto || "")));
+  eq(pend.length, 0, "las dos compensaron: 2,380.00 + 4.88 y 280.00 + 2.32");
+  eq(contarRojas(h), 0, "compensar no es una diferencia");
+});
+
+test("el efectivo de fin de mes no se arma con redondeos de otros dias", () => {
+  // La guardia de siempre: la combinacion es del MISMO dia. Sin eso, 282.32 se armaria juntando centavos
+  // sueltos de cualquier fecha y se daria por compensado algo que sigue pendiente.
+  const est = [
+    { fecha: "2026-03-02", debito: 0, credito: 280.00, descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 280226 David", fila: 2 },
+    { fecha: "2026-03-11", debito: 0, credito: 1.63,   descripcion: "Descripción", fila: 3 },
+    { fecha: "2026-03-13", debito: 0, credito: 0.69,   descripcion: "Descripción", fila: 4 }
+  ];
+  const previo = [{ fecha: "2026-02-27", banco: "STG", monto: 282.32, concepto: "Efectivo de fin de mes reportado por la cajera" }];
+  const h = paso0(previo, [], est, null, 7, 0.01);
+  eq(h.filter(x => /aún NO compensó/.test(String(x.texto || ""))).length, 1, "280.00 + 1.63 + 0.69 son de tres dias: sigue pendiente");
+});
+
+test("un cheque en tránsito no compensa contra un ACH de Brinks", () => {
+  // El pool del efectivo va aparte justamente para esto: ensanchando el de los cheques, un cheque por
+  // depositar "compensaria" contra el ACH del efectivo y se daria por cobrado sin estarlo.
+  const est = [{ fecha: "2026-03-02", debito: 0, credito: 500.00, descripcion: "Ach De Brinks Panama, S.A. - D08563bsafe 280226 David", fila: 2 }];
+  const previo = [{ fecha: "2026-02-27", banco: "STG", monto: 500.00, concepto: "Cheque (detalle individual)" }];
+  const h = paso0(previo, [], est, null, 7, 0.01);
+  eq(h.filter(x => /aún NO compensó/.test(String(x.texto || ""))).length, 1, "el cheque sigue pendiente: el ACH de Brinks es del efectivo");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION="2026.10.13";
+var APP_VERSION = "2026.10.14";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2377,6 +2377,15 @@ function primerDiaMes(fechas){
 // Detecta Brinks en cualquiera de sus variantes: "Brinks Panama" (junto) o "Brink S Panama" (con espacio,
 // como aparece en el estado de cuenta de STG). Por eso se busca "BRINK" y no "BRINKS".
 function esBrinks(desc){ return normTxt(desc).indexOf("BRINK") !== -1; }
+/* ---- Lineas del estado sin descripcion ----
+   St. Georges no deja el campo vacio: escribe el encabezado "Descripcion" como texto de la fila. Son
+   siempre importes chicos que acompañan a un ACH de Brinks del mismo dia —el redondeo del deposito de
+   efectivo: el 2-mar-2026 el ACH de 2,380.00 vino con un credito de 4.88, y el de 280.00 con uno de 2.32.
+   Sin reconocerlas no hay forma de armar el total del efectivo de fin de mes, que es Brinks + redondeo. */
+function sinDescripcion(desc){
+  var n = normTxt(desc);
+  return n === "" || n === "DESCRIPCION";
+}
 /* ---- El ACH de Brinks dice QUE DIA se retiro el efectivo ----
    "Ach De Brinks Panama, S.A. - D08563bsafe 130526 Davi" = el retiro del 13/05/26, que el banco acredita
    uno o dos dias despues. Sin leer esa fecha, para el cotejo todos los ACH son intercambiables mientras el
@@ -8258,6 +8267,15 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
     var poolDep   = credObjs.filter(function(o){ return esDepositoEstado(o.desc); });                 // depósitos
     var poolClave = credObjs.filter(function(o){ return esRemisionClave(o.desc); });                  // remisión CLAVE
     var poolVisa  = credObjs.filter(function(o){ return esRemisionVisa(o.desc); });                   // remisión V/MC
+    /* El efectivo no llega al banco como "DEPOSITO": llega como ACH de Brinks —cuyo texto es
+       "Ach De Brinks Panama, S.A. - D08563bsafe 280226 David"— mas la linea del redondeo, que St. Georges
+       deja sin descripcion. esDepositoEstado rechazaba las dos, asi que el efectivo de fin de mes no tenia
+       contra que compensar NUNCA y viajaba al resumen mes tras mes: el del 27 y 28 de feb de 2026
+       (282.32 + 2,384.88) se acredito el 2 de marzo como 280.00 + 2.32 y 2,380.00 + 4.88, y en octubre
+       seguia en el resumen descuadrando el cierre de cada mes en 2,667.20.
+       Va en un pool aparte y no ensanchando poolDep, que es el de los cheques por depositar: un cheque
+       "compensando" contra un ACH de Brinks seria un falso positivo. */
+    var poolEfec  = credObjs.filter(function(o){ return esDepositoEstado(o.desc) || esBrinks(o.desc) || sinDescripcion(o.desc); });
     // Clasifica cada partida y le asigna su pool de compensación (según concepto y sentido).
     function poolDe(item){
       if(item.sentido==="debito") return poolDeb;                          // cheque emitido (pago) → débito del estado
@@ -8265,6 +8283,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       if(c.indexOf("CLAVE")!==-1) return poolClave;                        // clave en tránsito → remisión clave
       if(c.indexOf("VISA")!==-1 || c.indexOf("V/MC")!==-1) return poolVisa;// visa en tránsito → remisión V/Mc
       if(c.indexOf("DEPOSITO")!==-1) return poolCred;                      // depósito en tránsito → cualquier crédito
+      if(/EFECTIVO|BRINK|VENTANILLA/.test(c)) return poolEfec;             // efectivo → Brinks, depósito o redondeo
       return poolDep;                                                      // cheque por depositar → depósito
     }
     // Una partida "del mes anterior" no puede tener fecha DENTRO (ni después) del período del estado: si la
@@ -8309,6 +8328,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       if(m.indexOf("CLAVE")!==-1) return poolClave;
       if(m.indexOf("VISA")!==-1 || m.indexOf("V/MC")!==-1) return poolVisa;
       if(m.indexOf("CHEQUE")!==-1 || m==="CK") return poolDep;
+      if(/EFECTIVO|BRINK|VENTANILLA/.test(m)) return poolEfec;
       return poolCred;
     }
     chs.forEach(function(ch){
