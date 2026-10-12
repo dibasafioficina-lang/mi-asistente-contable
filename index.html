@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.14";
+var APP_VERSION = "2026.10.15";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7560,19 +7560,49 @@ function asientosSugeridosHtml(){
       monto: d.compenso,
       concepto: "Descargo de partidas que venían en tránsito del mes anterior y ya compensaron en el banco",
       // Las mismas partidas del renglon 1 del desglose: sin la tabla, el asiento pedia un monto que no
-      // se podia contrastar con nada.
+      // se podia contrastar con nada. Y las DEDUCIDAS van marcadas: ver la nota de abajo.
       tabla: (function(){
         var ps = partidasApertura();
         if(!ps.length) return "";
-        var f = '<table class="dif-tabla"><thead><tr><th>Compensó</th><th>Banco</th><th>Concepto</th><th class="num">Monto</th></tr></thead><tbody>';
+        var f = '<table class="dif-tabla"><thead><tr><th>Compensó</th><th>Banco</th><th>Concepto</th>' +
+                '<th>Reingreso</th><th class="num">Monto</th></tr></thead><tbody>';
         ps.forEach(function(x){
-          f += '<tr><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+esc(String(x.concepto||"").slice(0,44))+
+          f += '<tr'+(x.reingresada?' class="tr-mal"':'')+'><td>'+esc(x.fecha||"")+'</td><td>'+esc(x.banco||"")+'</td><td>'+
+               esc(String(x.concepto||"").slice(0,44))+'</td><td>'+
+               (x.reingresada ? '<span class="tr-viejo">por confirmar</span>' : 'no hacía falta') +
                '</td><td class="num">'+fmt(x.monto)+'</td></tr>';
         });
-        return f + '<tr class="tot"><td colspan="3">Total</td><td class="num">'+
+        return f + '<tr class="tot"><td colspan="4">Total</td><td class="num">'+
                fmt(Math.round(ps.reduce(function(a,x){ return a+x.monto; },0)*100)/100)+'</td></tr></tbody></table>';
       })(),
-      nota: "Fechá cada descargo el día que el banco compensó, no a fin de mes: así el saldo diario de la cuenta es siempre el tránsito."
+      /* ---- Por que las partidas "por confirmar" no se registran a ciegas ----
+         Una partida que el resumen marca «credito ya hecho» solo lleva descargo si el cierre del mes pasado
+         le hizo el asiento de REINGRESO (debito a Caja General / credito al banco). Ese asiento es del mes
+         ANTERIOR y el navegador del mes no lo trae, asi que corregirAcreditadasReingresadas lo DEDUCE de que
+         la apertura coincida con el total del resumen. La coincidencia no distingue «reingreso» de «hay otra
+         cosa dentro por el mismo importe», y si no hubo reingreso el credito del deposito sigue vigente:
+         debitar el banco otra vez lo DUPLICA.
+         Caso real (enero/febrero 2026): la apertura de febrero cuadro al centavo con el total del resumen, asi
+         que el app dio por reingresadas 13 partidas por 2,679.15 y propuso su descargo. El navegador de enero
+         mostro reingreso de solo dos: 590.02 (ME-1853) y 1,354.25 (ME-1854). Los 6 cheques de Banistmo por
+         1,324.90 no tenian ninguno — registrarlos habria duplicado el banco.
+         El cuadre de apertura se sigue dando por bueno (el saldo cuadra, eso es un hecho); lo que ya no se
+         afirma es que esas partidas lleven descargo. */
+      nota: "Fechá cada descargo el día que el banco compensó, no a fin de mes: así el saldo diario de la cuenta es siempre el tránsito." +
+            (function(){
+              var ps = partidasApertura();
+              var ded = ps.filter(function(x){ return x.reingresada; });
+              if(!ded.length) return "";
+              var tDed = Math.round(ded.reduce(function(a,x){ return a+x.monto; },0)*100)/100;
+              var todas = ded.length === ps.length;
+              return " ⚠ " + (todas ? "TODAS las partidas de este asiento" : ded.length + " de las " + ps.length + " partidas (B/ " + fmt(tDed) + ")") +
+                " están marcadas «por confirmar»: el resumen del mes pasado dice que su crédito a Caja General YA se hizo, y " +
+                "esta herramienta dedujo que volvieron a la cuenta porque el saldo de apertura coincide con el total del resumen — " +
+                "pero el asiento de reingreso es del mes anterior y el navegador de este mes no lo trae, así que no se pudo verificar. " +
+                "ANTES DE REGISTRAR: abrí el navegador de Caja General del mes anterior y buscá el asiento de reingreso " +
+                "(un DÉBITO a Caja General por esos depósitos, al cierre del mes). Si existe, el descargo va. Si no existe, " +
+                "el crédito del depósito sigue vigente y volver a debitar el banco lo DUPLICA — esas partidas no se registran.";
+            })()
     });
   }
 
@@ -8298,7 +8328,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
         fechasRaras.push({banco:banco, item:t, iniEstado:iniEstado});
       }
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
-              sentido:t.sentido, creditoCG:t.creditoCG, partes:t.partes, banco:banco, usado:false, pool:poolDe(t)};
+              sentido:t.sentido, creditoCG:t.creditoCG, reingresada:t.reingresada, partes:t.partes, banco:banco, usado:false, pool:poolDe(t)};
     });
     // Paso A: cada partida contra su pool, hacia adelante. Primero 1:1; si no aparece, una combinación de
     // líneas DEL MISMO DÍA, porque cuando el banco parte un depósito lo acredita el mismo día (el depósito
@@ -8714,7 +8744,8 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
     var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
     var fCierre = ch.compensoEn ? ch.compensoEn.fecha : null;
     hallazgos.push({ fecha:(fCierre||ch.fechaOrig), banco:ch.banco, monto:ch.monto, clase:"en_transito",
-      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, motivo:"compensó — venía del mes anterior",
+      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, reingresada:ch.reingresada,
+      motivo:"compensó — venía del mes anterior",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") venía en tránsito del mes anterior y COMPENSÓ en el banco"+
             (fCierre?" el "+fCierre:"")+" — su asiento es del mes pasado, no es una diferencia."+
             (ch.creditoCG==="hecho"?" No lleva asiento de descargo: su crédito a Caja General ya se hizo al depositar.":"")+
@@ -8725,7 +8756,8 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
   res.pendientes.forEach(function(ch){
     var etiqueta = (ch.concepto||"").trim() || "Partida en tránsito";
     hallazgos.push({ fecha:ch.fechaOrig, banco:ch.banco, monto:ch.monto, clase:"en_transito",
-      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, partes:ch.partes, motivo:"aún pendiente de compensar",
+      concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, reingresada:ch.reingresada,
+      partes:ch.partes, motivo:"aún pendiente de compensar",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") de un período anterior aún NO compensó este mes."+(ch.comprobante?" · Comprobante "+ch.comprobante:""),
       fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });
   });

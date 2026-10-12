@@ -4354,6 +4354,47 @@ test("un cheque en tránsito no compensa contra un ACH de Brinks", () => {
   eq(h.filter(x => /aún NO compensó/.test(String(x.texto || ""))).length, 1, "el cheque sigue pendiente: el ACH de Brinks es del efectivo");
 });
 
+/* ---- Un reingreso DEDUCIDO no se presenta como asiento listo para registrar ----
+   Hallazgo (oct 2026, lo levanto Diba antes de digitar): una partida que el resumen marca «credito ya
+   hecho» solo lleva descargo si el cierre del mes pasado le hizo el asiento de REINGRESO. Ese asiento es
+   del mes ANTERIOR y el navegador del mes no lo trae, asi que corregirAcreditadasReingresadas lo DEDUCE de
+   que la apertura coincida con el total del resumen. La coincidencia no distingue «reingreso» de «hay otra
+   cosa dentro por el mismo importe»: en febrero de 2026 la apertura cuadro al centavo, el app dio por
+   reingresadas 13 partidas por 2,679.15 y propuso su descargo, y el navegador de enero mostro reingreso de
+   solo dos (590.02 y 1,354.25). Los 6 cheques de Banistmo por 1,324.90 no tenian ninguno: registrarlos
+   habria DUPLICADO el debito al banco.
+   El cuadre de apertura se sigue dando por bueno —el saldo cuadra, eso es un hecho—; lo que ya no se afirma
+   es que esas partidas lleven descargo. Van marcadas y el asiento lo advierte. */
+test("la partida cuyo reingreso se dedujo viaja marcada hasta el asiento", () => {
+  // Resumen con una partida "ya hecho" y una "pendiente"; la apertura coincide con el total de las DOS,
+  // que es lo que hace a corregirAcreditadasReingresadas deducir el reingreso de la primera.
+  const tr = [
+    { fecha: "2026-01-20", banco: "Banistmo", monto: 300.00, concepto: "Cheque (detalle individual)", creditoCG: "hecho" },
+    { fecha: "2025-12-10", banco: "Banistmo", monto: 100.00, concepto: "cheque en transito",          creditoCG: "pendiente" }
+  ];
+  corregirAcreditadasReingresadas(tr, { inicial: 400.00, fechaInicial: "2026-02-01", final: 400.00, fechaFinal: "2026-02-28" }, []);
+  eq(tr[0].creditoCG, "pendiente", "la deduccion la reclasifica, como antes");
+  eq(tr[0].reingresada, true, "y queda marcada como deducida");
+  eq(!!tr[1].reingresada, false, "la que ya venia pendiente no se marca: su reingreso no se dedujo");
+  // Y la marca llega al hallazgo del Paso 0, que es de donde la lee el asiento sugerido.
+  const est = [{ fecha: "2026-02-05", debito: 0, credito: 300.00, descripcion: "DEPOSITO", fila: 2 }];
+  const h = paso0(tr, est, [], null, 7, 0.01);
+  const comp = h.filter(x => /compensó/.test(String(x.motivo || "")) && Math.abs(x.monto - 300) < 0.005);
+  eq(comp.length, 1, "la de 300.00 compenso");
+  eq(comp[0].reingresada, true, "y el hallazgo lleva la marca");
+});
+
+test("sin deduccion de reingreso, ninguna partida sale marcada", () => {
+  // La apertura es solo la partida "pendiente": no hay nada que deducir y el resumen se respeta tal cual.
+  const tr = [
+    { fecha: "2026-01-20", banco: "Banistmo", monto: 300.00, concepto: "Cheque (detalle individual)", creditoCG: "hecho" },
+    { fecha: "2025-12-10", banco: "Banistmo", monto: 100.00, concepto: "cheque en transito",          creditoCG: "pendiente" }
+  ];
+  corregirAcreditadasReingresadas(tr, { inicial: 100.00, fechaInicial: "2026-02-01", final: 100.00, fechaFinal: "2026-02-28" }, []);
+  eq(tr[0].creditoCG, "hecho", "sin coincidencia de apertura no se reclasifica");
+  eq(!!tr[0].reingresada, false, "y no se marca nada");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
