@@ -4395,6 +4395,41 @@ test("sin deduccion de reingreso, ninguna partida sale marcada", () => {
   eq(!!tr[0].reingresada, false, "y no se marca nada");
 });
 
+/* ---- El aviso de apertura dice de que mes viene y a donde mirar ----
+   Hallazgo (oct 2026): el arrastre de febrero reaparecio identico en marzo, abril y mayo, cada vez como si
+   fuera un hallazgo nuevo del mes, y el consejo mandaba a buscar "una fila de tarjeta sin monto" en un
+   resumen que estaba perfecto. Dos arreglos: nombrar el mes del que viene el descuadre (es de la apertura,
+   asi que se genero en el cierre anterior o antes) y poner el descargo sin registrar como primera causa
+   cuando la cuenta abre con MAS de lo que el resumen justifica. */
+test("con la cuenta abriendo de más, el aviso manda al descargo y nombra el mes", () => {
+  const tr = [{ fecha: "2026-04-28", banco: "Banistmo", monto: 38.17, concepto: "Depósito de fin de mes reportado por la cajera", creditoCG: "pendiente" }];
+  const c = cuadreSaldoInicialPaso0(tr, { inicial: 3517.01, fechaInicial: "2026-05-01", final: 3036.13, fechaFinal: "2026-05-31" }, []);
+  eq(c.ok, false, "no cuadra");
+  const h = cuadreSaldoIniHtml(c);
+  eq(/El descargo del tránsito del mes pasado no se registró/.test(h), true, "el descargo va primero");
+  eq(/se generó en el cierre de <b>abril 2026<\/b> o antes, no en mayo 2026/.test(h), true, "nombra el mes de origen");
+  eq(/un solo asiento sin registrar que se arrastra/.test(h), true, "y avisa que no es un hallazgo nuevo del mes");
+});
+
+test("con el resumen trayendo de más, el consejo sigue siendo el de la partida repetida", () => {
+  // El otro signo no cambia: ahi si lo que sobra esta en el resumen, no en un asiento sin registrar.
+  const tr = [
+    { fecha: "2026-04-28", banco: "Banistmo", monto: 3000.00, concepto: "Depósito de fin de mes reportado por la cajera", creditoCG: "pendiente" },
+    { fecha: "2026-04-29", banco: "STG",      monto: 2000.00, concepto: "Depósito de fin de mes reportado por la cajera", creditoCG: "pendiente" }
+  ];
+  const c = cuadreSaldoInicialPaso0(tr, { inicial: 1000.00, fechaInicial: "2026-05-01", final: 900.00, fechaFinal: "2026-05-31" }, []);
+  const h = cuadreSaldoIniHtml(c);
+  eq(/El resumen trae B\/ 4,000.00 de más/.test(h), true, "mantiene el texto del otro signo");
+  eq(/El descargo del tránsito del mes pasado no se registró/.test(h), false, "y no mete el consejo del descargo");
+  eq(/se generó en el cierre de <b>abril 2026<\/b>/.test(h), true, "pero igual nombra el mes: el descuadre es de la apertura");
+});
+
+test("el mes de origen cruza el año sin romperse", () => {
+  const tr = [{ fecha: "2025-12-28", banco: "Banistmo", monto: 10.00, concepto: "Cheque (detalle individual)", creditoCG: "pendiente" }];
+  const c = cuadreSaldoInicialPaso0(tr, { inicial: 500.00, fechaInicial: "2026-01-01", final: 500.00, fechaFinal: "2026-01-31" }, []);
+  eq(/cierre de <b>diciembre 2025<\/b> o antes, no en enero 2026/.test(cuadreSaldoIniHtml(c)), true, "enero mira a diciembre del año anterior");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

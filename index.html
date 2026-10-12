@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.15";
+var APP_VERSION = "2026.10.16";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8584,6 +8584,24 @@ function cuadreSaldoIniHtml(c){
       yaAcred + excluidas + '</div>';
   }
   var faltan = c.dif < 0; // el resumen suma MENOS que el saldo: le faltan partidas
+  /* ---- De que mes es este descuadre ----
+     Es de la APERTURA, asi que se genero en el cierre del mes anterior o antes: ningun archivo del mes que
+     se esta corriendo lo causa ni lo corrige. Sin decirlo, el aviso se repite identico mes tras mes y manda
+     a revisar los archivos del mes actual, que estan bien: el arrastre de febrero de 2026 reaparecio asi en
+     marzo, abril y mayo, cada vez como si fuera un hallazgo nuevo del mes. */
+  var mesAp = c.fecha ? String(c.fecha).slice(0,7) : "";
+  var mesPrev = "";
+  if(mesAp){
+    var aa = parseInt(mesAp.slice(0,4),10), mm = parseInt(mesAp.slice(5,7),10) - 1;
+    if(mm < 1){ mm = 12; aa--; }
+    mesPrev = aa + "-" + String(mm).padStart(2,"0");
+  }
+  var deQueMes = mesPrev
+    ? '<p class="per-nota">Este descuadre es de la <b>apertura</b>: se generó en el cierre de <b>' + esc(mesLargo(mesPrev)) +
+      '</b> o antes, no en ' + esc(mesLargo(mesAp)) + '. Los archivos de ' + esc(mesLargo(mesAp)) +
+      ' no lo causan, y corregirlos no lo cambia. Si el mismo importe te viene apareciendo todos los meses, ' +
+      'es un solo asiento sin registrar que se arrastra — no un hallazgo nuevo de cada mes.</p>'
+    : "";
   return '<div class="per-panel per-grave">' +
     '<div class="per-title">⛔ El Paso 0 no cuadra con el saldo inicial de Caja General</div>' +
     '<p class="per-txt">El saldo de Caja General al arrancar el mes es el tránsito del mes anterior <b>que todavía sigue ' +
@@ -8602,9 +8620,18 @@ function cuadreSaldoIniHtml(c){
     // Con el saldo en negativo el error está del lado del navegador, no del resumen: no tiene sentido
     // mandar a buscar partidas que sobran cuando lo que hay es un saldo mal ubicado.
     (c.apertura < 0 || c.esResumenCompleto ? '' : '<p class="per-nota">' + (faltan
-      ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Revisá si quedó alguna partida sin anotar — lo más común es una fila de tarjeta (clave/visa) sin monto o un depósito de los últimos días del mes anterior.'
+      /* Con la cuenta abriendo con MAS de lo que el resumen justifica hay dos causas, y la primera es la
+         frecuente: el descargo del transito del mes pasado no se registro, asi que esa plata se quedo dentro
+         de Caja General. Mandar a buscar "una fila de tarjeta sin monto" como unica pista apuntaba al lugar
+         equivocado: en mayo de 2026 el resumen estaba perfecto y lo que faltaba era un asiento de febrero. */
+      ? '<b>Al resumen le faltan B/ '+fmt(Math.abs(c.dif))+'.</b> Dos causas posibles, en orden de frecuencia:' +
+        '<br>· <b>El descargo del tránsito del mes pasado no se registró.</b> Esas partidas compensaron en el banco ' +
+        'y su crédito a Caja General nunca se hizo, así que la plata sigue dentro de la cuenta. Es la causa cuando el ' +
+        'descuadre se repite mes a mes: está en el panel de asientos del cierre del mes anterior, no en el resumen.' +
+        '<br>· <b>Al resumen le quedó una partida sin anotar</b> — una fila de tarjeta (clave/visa) sin monto, o un ' +
+        'depósito de los últimos días del mes anterior.'
       : '<b>El resumen trae B/ '+fmt(Math.abs(c.dif))+' de más.</b> Revisá si hay una partida repetida, una que ya había compensado antes, o alguna que no debería estar (un pago, no un depósito).') +
-    '</p>') +
+    '</p>') + deQueMes +
     (c.apertura < 0
       ? '<p class="per-nota">⚠ <b>El saldo inicial viene en negativo, o sea en la columna CRÉDITO.</b> Eso acá no tiene sentido: todo lo que viene en tránsito es dinero ya registrado como depositado, así que el saldo de apertura tiene que quedar al <b>débito</b>. El descuadre no está en el resumen del Paso 0 — está en el navegador, y se corrige con el asiento de ajuste de abajo.</p>'
       : '') +
