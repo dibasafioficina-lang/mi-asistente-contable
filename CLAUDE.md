@@ -64,3 +64,58 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 **Parámetros configurables**: ventana de días (default 3), tolerancia en B/ (default 0.01).
 
 **Pendiente de validar con datos de producción** (ver PRD del módulo): Paso 1 no probado aún con montos reales (el reporte de prueba compartido traía ceros); y si algún día el diario de Caja General no trae línea de débito separada por banco/método, el hallazgo del Paso 2 no se detectaría — asunción a confirmar.
+
+## Cómo se comporta cada banco (validado con datos de producción)
+
+Conocimiento del dominio que Diba fue confirmando sobre datos reales. Vive acá para no volver a investigarlo: cada punto costó una sesión de rastreo y está implementado con su prueba en `tests.js`.
+
+### El ciclo del camión (Brinks → St. Georges)
+
+El ACH de Brinks trae **la fecha del retiro en el local**, no la del depósito ni la de la acreditación:
+
+```
+Ach De Brinks Panama, S.A. - D08563bsafe 150526 David   →  retiró el 15/05/26
+```
+
+El ciclo es **asiento del día X → retiro X+1 → acreditación X+3 o X+4**, consistente en todo el mes. El desfase no es un error. Sin leer esa fecha, todos los ACH son intercambiables mientras el importe cuadre, y uno se va al día equivocado dejando huérfano al que le tocaba (mayo 2026: el asiento del 4-may se llevó el ACH del retiro del 13-may).
+
+- `fechaRetiroBrinks(desc)` lee la fecha del texto · `retiroCompatible()` tolera hasta `ACH_ANTICIPO_MAX = 3` días hábiles de anticipo.
+
+### El efectivo no llega al banco como "DEPOSITO"
+
+Llega de tres formas, y ninguna dice "DEPOSITO":
+
+1. **ACH de Brinks** — el efectivo que recoge el camión.
+2. **Línea sin descripción** — St. Georges escribe el encabezado `"Descripción"` como texto de la fila cuando la transacción no trae ninguna. Son siempre importes chicos que acompañan al ACH del mismo día: el **redondeo del depósito** (el 2-mar-2026, el ACH de 2,380.00 vino con un crédito de 4.88). `sinDescripcion()` las reconoce.
+3. **Depósito de ventanilla** — ese sí dice "DEPOSITO".
+
+El efectivo de fin de mes es **Brinks + redondeo**, así que hay que reconocer las tres o no tiene contra qué compensar: el del 27 y 28 de feb de 2026 (282.32 + 2,384.88) viajó siete meses en el resumen por este motivo.
+
+### El ACH puede venir consolidado
+
+Brinks recoge el efectivo de Caja General **junto con plata que no pasa por Caja General** —la caja menuda que los dueños prestan, registrada solo en el diario del banco (`PDN-…`)— y el banco acredita todo en una línea:
+
+```
+18-may  6,215.00  Ach De Brinks ... 150526   =   215.00  (ME-00000001945, efectivo del 14-may)
+                                              + 6,000.00  (PDN-000000057, préstamo interno)
+```
+
+Y el asiento del día puede estar **partido** entre camión y ventanilla, que el banco acredita por separado: los 218.94 del 14-may son 215.00 dentro del ACH + 3.94 de ventanilla como línea suelta.
+
+Se acepta solo si el resto del ACH está **explicado** por débitos del diario del banco sin comprobante `ME-` (los que no vienen de Caja General). Un resto sin explicar no alcanza: cualquier depósito grande se tragaría cualquier efectivo chico.
+
+### El tránsito tiene tres movimientos, no dos
+
+Una partida en tránsito lleva **tres** asientos, y el tercero solo corresponde si el segundo se hizo:
+
+| Cuándo | Asiento |
+|---|---|
+| Al depositar | Débito Banco / Crédito Caja General |
+| Al cerrar el mes (**reingreso**) | Débito Caja General / Crédito Banco |
+| Cuando el banco compensa (**descargo**) | Débito Banco / Crédito Caja General |
+
+El reingreso es del mes anterior y el navegador del mes no lo trae, así que `corregirAcreditadasReingresadas` lo **deduce** de que la apertura coincida con el total del resumen. La coincidencia no distingue "reingresó" de "hay otra cosa dentro por el mismo importe": en febrero de 2026 dio por reingresadas 13 partidas y solo dos lo estaban. **Las deducidas van marcadas «por confirmar» y el asiento advierte que hay que verificar el navegador del mes anterior antes de registrar** — sin reingreso, el descargo duplica el débito al banco.
+
+### Dónde nace un descuadre de apertura
+
+Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.
