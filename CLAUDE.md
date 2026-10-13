@@ -91,6 +91,22 @@ Llega de tres formas, y ninguna dice "DEPOSITO":
 
 El efectivo de fin de mes es **Brinks + redondeo**, así que hay que reconocer las tres o no tiene contra qué compensar: el del 27 y 28 de feb de 2026 (282.32 + 2,384.88) viajó siete meses en el resumen por este motivo.
 
+### El redondeo no es posterior al ACH
+
+El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres días después, así que el redondeo cae el día del ACH **o antes** — nunca después. Los siete depósitos de efectivo de marzo de 2026 lo confirman:
+
+| Asiento | ACH (retiro) | Redondeo | |
+|---|---|---|---|
+| 18-mar 309.82 | 305.00 el 20 (19/03) | 4.82 el **20** | mismo día |
+| 19-mar 112.26 | 110.00 el 23 (20/03) | 2.26 el **20** | antes |
+| 24-mar 377.26 | 375.00 el 26 (25/03) | 2.26 el **25** | antes |
+| 26-mar 331.27 | 330.00 el 30 (27/03) | 1.27 el **30** | mismo día |
+
+`combinacionMasCercana` completaba el importe con redondeos de **cualquier** fecha de la ventana, y se llevaba los del asiento siguiente: el 20-mar (166.92) se cuadró con el ACH de 165.00 del 23 más 1.27 y 0.65 del **30**, que son del 26-mar y del 27-mar. Suma exacta y contablemente falsa — y dejó huérfanos al 331.27 y al 145.65, que viajaron en el resumen a abril, mayo y junio.
+
+- `redondeoNoPosteriorAlACH()` lo impide. **No exige mismo día**: eso habría roto el 19-mar y el 24-mar.
+- Es el falso positivo del 5.85 de enero otra vez (armar un importe chico juntando centavos de cualquier fecha). El guard de mismo día quedó en `comboMismoDia` y nunca llegó a esta función — al tocar una, revisar la otra.
+
 ### El ACH puede venir consolidado
 
 Brinks recoge el efectivo de Caja General **junto con plata que no pasa por Caja General** —la caja menuda que los dueños prestan, registrada solo en el diario del banco (`PDN-…`)— y el banco acredita todo en una línea:

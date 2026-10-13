@@ -4714,6 +4714,54 @@ test("no se propone corte de efectivo para una partida de tarjeta", () => {
   eq(!!r.pendientes[0].corteSugerido, false, "la CLAVE no se compensa con un ACH de Brinks");
 });
 
+/* ── El redondeo no puede ser posterior al ACH que acompana ────────────────────────────
+   combinacionMasCercana armaba el importe de un asiento de efectivo con un ACH mas lineas de redondeo de
+   CUALQUIER fecha de la ventana. En marzo de 2026 el asiento del 20-mar (166.92) se cuadro con el ACH de
+   165.00 del 23 mas los redondeos de 1.27 y 0.65 del 30: suma exacta, pero esos dos pertenecen al 26-mar
+   (331.27 = 330.00 + 1.27) y al 27-mar (145.65 = 145.00 + 0.65). Al llevarselos dejaba huerfano al 331.27,
+   que sin suma exacta caia en la rama de "efectivo de fin de mes" y viajaba en el resumen a abril, mayo y
+   junio — y el 145.65 con el.
+   Es el falso positivo del 5.85 de enero otra vez: armar un importe chico juntando centavos de cualquier
+   fecha. El guard de mismo dia quedo en comboMismoDia y nunca llego a esta funcion. */
+function achBrinks(fecha, monto, retiro){
+  return { fecha:fecha, monto:monto, usado:false,
+           descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe " + retiro + " David" };
+}
+function redondeo(fecha, monto){ return { fecha:fecha, monto:monto, descripcion:"Descripción", usado:false }; }
+test("el redondeo posterior al ACH no completa el efectivo (20-mar-2026, 166.92)", () => {
+  const pool = [achBrinks("2026-03-23", 165.00, "220326"), achBrinks("2026-03-30", 330.00, "270326"),
+                redondeo("2026-03-30", 1.27), redondeo("2026-03-30", 0.65)];
+  // 165.00 + 1.27 + 0.65 = 166.92 exacto, pero los redondeos son siete dias POSTERIORES al ACH.
+  eq(combinacionMasCercana(pool, "2026-03-20", 166.92, 10, 0.01), null,
+     "no se completa con redondeos que llegaron después del ACH");
+  // Y por eso el que SÍ le corresponde queda disponible: ACH del 30 + su redondeo del mismo día.
+  const c = combinacionMasCercana(pool, "2026-03-26", 331.27, 10, 0.01);
+  eq(!!c, true, "el 331.27 cuadra con su propio ACH y su redondeo");
+  eq(c.length, 2);
+  cerca(pool[c[0]].monto + pool[c[1]].monto, 331.27);
+});
+
+/* El guard NO exige mismo dia, a proposito: el redondeo se deposita el dia del RETIRO y el ACH llega dos o
+   tres dias despues, asi que a veces entra ANTES. En marzo de 2026 pasa dos veces: el 112.26 del 19-mar
+   (ACH de 110.00 el 23, redondeo de 2.26 el 20) y el 377.26 del 24-mar (ACH de 375.00 el 26, redondeo de
+   2.26 el 25). Exigir mismo dia habria roto los dos. */
+test("el redondeo que llega ANTES del ACH sigue completando el efectivo (19-mar-2026, 112.26)", () => {
+  const pool = [achBrinks("2026-03-23", 110.00, "200326"), redondeo("2026-03-20", 2.26)];
+  const c = combinacionMasCercana(pool, "2026-03-19", 112.26, 10, 0.01);
+  eq(!!c, true, "el redondeo del día del retiro sí cuenta");
+  eq(c.length, 2);
+});
+
+/* Sin ACH en la combinacion el guard no aplica: dos depositos de ventanilla de fechas distintas se siguen
+   sumando como antes. El guard ordena el redondeo CONTRA SU ACH, no las demas lineas entre si. */
+test("sin ACH en la combinación el orden del redondeo no se exige", () => {
+  const pool = [{ fecha:"2026-03-23", monto:100.00, descripcion:"DEPOSITO", usado:false },
+                { fecha:"2026-03-30", monto:50.00,  descripcion:"DEPOSITO", usado:false }];
+  const c = combinacionMasCercana(pool, "2026-03-20", 150.00, 10, 0.01);
+  eq(!!c, true, "dos depósitos normales se combinan igual");
+  eq(c.length, 2);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

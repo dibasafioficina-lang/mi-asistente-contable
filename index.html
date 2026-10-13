@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.22";
+var APP_VERSION = "2026.10.23";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2419,19 +2419,38 @@ function retiroCompatible(descEstado, fechaAsiento){
    que suma es la mas LEJANA. En junio de 2026 el efectivo del 13 (869.90) se llevo los 4.90 del 19 —que
    eran del 17— teniendo los suyos el 15, y el 17 quedo sin compensar. Se elige la combinacion (hasta 3
    lineas) cuya linea mas lejana esta mas cerca; a igualdad, la de menor distancia total. */
+/* El redondeo del deposito no puede ser POSTERIOR al ACH que acompana.
+   Probado contra los siete depositos de efectivo de marzo de 2026: el redondeo cae el dia del ACH o el del
+   retiro, que es antes —nunca despues— (el del 19-mar entro el 20 y su ACH el 23; el del 24-mar entro el 25
+   y su ACH el 26). Sin el guard, el asiento del 20-mar (166.92) se cuadraba con el ACH de 165.00 del 23 mas
+   los redondeos de 1.27 y 0.65 del 30: suma exacta, pero esos dos pertenecen al 26-mar (331.27 = 330.00 +
+   1.27) y al 27-mar (145.65 = 145.00 + 0.65). Al llevarselos dejaba huerfano al 331.27, que sin suma exacta
+   caia en la rama de "efectivo de fin de mes" y viajaba en el resumen a abril, mayo y junio.
+   Es el mismo falso positivo del 5.85 de enero —armar un importe chico juntando centavos de cualquier
+   fecha—, cuyo guard de mismo dia quedo solo en comboMismoDia y nunca llego aca. */
+function redondeoNoPosteriorAlACH(sel){
+  var achMax = "", hayRedondeo = false;
+  sel.forEach(function(x){
+    if(esBrinks(x.desc)){ if(x.f > achMax) achMax = x.f; }
+    else if(sinDescripcion(x.desc)) hayRedondeo = true;
+  });
+  if(!hayRedondeo || !achMax) return true;          // sin ACH o sin redondeo no hay nada que ordenar
+  return sel.every(function(x){ return esBrinks(x.desc) || !sinDescripcion(x.desc) || x.f <= achMax; });
+}
 function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
   var idx = [];
   for(var i=0;i<pool.length;i++){
     var e = pool[i];
     if(e.usado || e.fecha < fecha) continue;
     var d = distanciaBancaria(fecha, e.fecha);
-    if(d <= ventanaDias) idx.push({ i:i, d:d, m:montoConc(e) });
+    if(d <= ventanaDias) idx.push({ i:i, d:d, m:montoConc(e), f:e.fecha, desc:e.descripcion });
   }
   var mejor = null;
   function probar(sel){
     var suma = 0, max = 0, tot = 0;
     sel.forEach(function(x){ suma += x.m; if(x.d > max) max = x.d; tot += x.d; });
     if(Math.abs(suma - objetivo) > tolerancia) return;
+    if(!redondeoNoPosteriorAlACH(sel)) return;
     if(!mejor || max < mejor.max || (max === mejor.max && tot < mejor.tot)) mejor = { sel:sel.map(function(x){ return x.i; }), max:max, tot:tot };
   }
   for(var a=0;a<idx.length;a++){
