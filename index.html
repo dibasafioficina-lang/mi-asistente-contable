@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.17";
+var APP_VERSION = "2026.10.18";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2793,7 +2793,7 @@ function marcarReingresadosDelMes(diario){
     var ref = String(x.referencia==null ? "" : x.referencia).trim(); if(!ref) return;
     var g = porRef[ref] = porRef[ref] || { cred:[], deb:[] };
     if(x.credito > 0) g.cred.push(x);
-    else if(x.debito > 0) g.deb.push({ monto:x.debito, usado:false });
+    else if(x.debito > 0) g.deb.push({ monto:x.debito, desc:x.descripcion, usado:false });
   });
   Object.keys(porRef).forEach(function(ref){
     var g = porRef[ref];
@@ -2807,6 +2807,13 @@ function marcarReingresadosDelMes(diario){
       if(!sols || sols.length !== 1) return;   // sin combinacion unica no se adivina
       sols[0].forEach(function(i){ libres[i].usado = true; });
       c._reingresadoEnElMes = true;
+      /* Las partes que lo reingresan van anotadas, igual que en el resto de los consolidados: el Paso 3 ve
+         cada metodo por separado en el diario del banco y sin esto suma la parte ADEMAS del total. Pasó con
+         este mismo caso: el consolidado de 280.21 y, aparte, sus 188.95 de CLAVE — 188.95 de mas en el
+         resumen de julio. */
+      c._partesReingreso = sols[0].map(function(i){
+        return { metodo: metodoDeposito(libres[i].desc) || "", monto: libres[i].monto };
+      });
     });
   });
 }
@@ -3434,6 +3441,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       .forEach(function(x){
         hallazgos.push({
           fecha:x.fecha, banco:banco, monto:x.credito, clase:"en_transito",
+          partes: x._partesReingreso || null,
           concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
           motivo:"reingresado en el mismo comprobante",
           texto: banco + " " + x.fecha + ": B/ " + fmt(x.credito) + " (\"" + String(x.descripcion||"").trim() +

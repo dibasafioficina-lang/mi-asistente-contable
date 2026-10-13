@@ -4457,6 +4457,13 @@ test("el crédito que el mismo comprobante reingresa no sale como diferencia", (
   const t = h.filter(x => x.clase === "en_transito" && Math.abs(x.monto - 280.21) < 0.01);
   eq(t.length, 1, "sale una sola vez, en tránsito");
   if (t[0].texto.indexOf("MISMO comprobante") < 0) throw new Error("no explica por qué se excluyó");
+  /* Y lleva sus PARTES anotadas. Sin esto el Paso 3 ve la CLAVE por separado en el diario del banco y la
+     suma ADEMAS del total: el resumen de junio de 2026 para julio salia en 25,474.86 con los 188.95
+     contados dos veces, cuando son 25,285.91. */
+  eq(!!t[0].partes, true, "lleva el desglose de lo que lo reingresa");
+  eq(t[0].partes.length, 2, "las dos patas: VISA y CLAVE");
+  cerca(t[0].partes.reduce((a, p) => a + p.monto, 0), 280.21, "y suman el total");
+  if (!t[0].partes.some(p => /CLAVE/.test(p.metodo))) throw new Error("no identifica el método de cada parte");
 });
 
 test("sin reingreso en el mismo comprobante, el crédito sigue su camino", () => {
