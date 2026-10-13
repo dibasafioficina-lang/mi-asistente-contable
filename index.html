@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.19";
+var APP_VERSION = "2026.10.20";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -3707,6 +3707,65 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         desglose.map(function(p){ return p.metodo + " B/ " + fmt(p.monto); }).join(" + ") + "." : "";
       var refRaw = /^ME-/i.test(String(dep.referencia==null?"":dep.referencia).trim()) ? String(dep.referencia).trim() : "";
       var concepto = String(dep.descripcion||"").trim();
+      /* ---- El acumulado que declara su rango y el banco ya acredito COMPLETO ----
+         Un asiento acumulado dice en su texto de que rango es ("DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO").
+         Si la suma de TODOS los creditos de ese metodo y banco dentro de ese rango da el total del asiento,
+         el banco ya lo acredito entero: no hay nada en transito.
+         No es buscar una combinacion entre muchas —ahi manda la guardia de unicidad— sino verificar que el
+         rango que el propio asiento declara cuadre. Por eso no tiene tope de lineas: son todas las del
+         rango, ni una mas ni una menos.
+         Caso real: el Yappy de mayo de 2026. El asiento ME-00000001964 del 31-may por 973.96 es el
+         acumulado del mes, y Banco General lo habia acreditado en QUINCE depositos diarios que suman
+         exactamente 973.96. buscarSubsetSuma no llega a quince lineas, y como el asiento es del ultimo dia
+         del mes la rama de abajo lo mandaba a transito sin cotejarlo: viajo al resumen de junio y de ahi al
+         de julio, 973.96 que ya estaban en el banco.
+         Se miran las lineas del estado esten usadas o no: la del 1-may por 209.62 es el descargo del Yappy
+         del 30-abr que el Paso 0 ya consumio, y el acumulado de mayo la incluye con razon —las dos cosas
+         son ciertas, es el mismo credito del banco respaldando la partida vieja y su descargo—. */
+      var acreditadoEnRango = (function(){
+        var rg = rangoDeposito(dep.descripcion, dep.fecha), mt = metodoDeposito(dep.descripcion);
+        if(!rg || !mt) return false;
+        var lineasHasta = function(diaFin){
+          return (estados[banco]||[]).filter(function(x){
+            if(!(x.credito > 0) || normTxt(x.descripcion).indexOf("ABORTED") !== -1) return false;
+            if(String(x.fecha||"").slice(0,7) !== rg.ym) return false;
+            var dia = parseInt(String(x.fecha).slice(8,10), 10);
+            return dia >= rg.diaIni && dia <= diaFin && mismoMetodoParte(x.descripcion, mt);
+          });
+        };
+        /* El rango que declara el asiento es de VENTA; el banco acredita el ultimo dia al dia siguiente
+           (mayo 2026: "DEL 1 AL 30" y el Yappy del 30 cayo el 31, 41.70 de 973.96). Por eso se prueba
+           primero el rango literal y, si no cuadra, se estira el cierre hasta fin de mes. Estirar no
+           afloja el guard: sigue exigiendo que TODOS los creditos del metodo en el rango sumen exacto,
+           asi que si hubiera otro asiento del mismo metodo adentro, el total ya no daria. */
+        var enRango = null, suma = 0, diaUsado = 0, diasFin = [rg.diaFin];
+        if(rg.diaFin < 31) diasFin.push(31);
+        for(var di = 0; di < diasFin.length; di++){
+          var cand = lineasHasta(diasFin[di]);
+          if(cand.length < 2) continue;        // con una sola linea el matching normal ya la encuentra
+          var sc = Math.round(cand.reduce(function(a,x){ return a + x.credito; }, 0)*100)/100;
+          if(Math.abs(sc - objetivo) <= tolerancia){ enRango = cand; suma = sc; diaUsado = diasFin[di]; break; }
+        }
+        if(!enRango) return false;
+        // Consumir las que todavia estaban libres, para que no las tome otro asiento.
+        bancoCred[banco].forEach(function(cv){
+          if(cv.usado) return;
+          if(enRango.some(function(x){ return x.fila === cv.fila && Math.abs(x.credito - cv.monto) < 0.005; })) cv.usado = true;
+        });
+        hallazgos.push({
+          fecha:dep.fecha, banco:banco, monto:objetivo, clase:"informativo",
+          concepto:concepto, comprobante:refRaw, motivo:"el banco lo acreditó día por día en el rango",
+          texto: banco + " " + dep.fecha + ": el acumulado de B/ " + fmt(objetivo) + " (\"" + concepto +
+                 "\") declara el rango del " + rg.diaIni + " al " + rg.diaFin + ", y el banco lo acreditó en " +
+                 enRango.length + " depósitos del " + rg.diaIni + " al " + diaUsado +
+                 " que suman exactamente B/ " + fmt(suma) +
+                 (diaUsado > rg.diaFin ? " (el cierre del rango lo acreditó el banco al día siguiente)" : "") +
+                 ". Ya está completo en el estado de cuenta: no queda nada en tránsito." + ref,
+          fuente: "Diario Caja General / Estado de cuenta " + banco
+        });
+        return true;
+      })();
+      if(acreditadoEnRango) return;
       // 3a) borde de mes: lo del último día del mes queda en tránsito para el mes siguiente (no compensa aún).
       // Con desglose del informe manda el punto 3c, que distingue "no compenso NADA" (transito) de "compenso
       // a medias" (diferencia a revisar). El borde de mes no puede tragarse esa distincion: ampliar su

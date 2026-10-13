@@ -4509,6 +4509,83 @@ test("el reingreso no se arma con débitos de otro comprobante", () => {
      "en medio del mes el crédito se coteja igual: el débito del mismo importe es reclasificación, no reingreso");
 });
 
+/* ── El acumulado que el banco acreditó día por día ───────────────────────────────────
+   Un asiento de fin de mes que junta todo el método del mes ("DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO")
+   cae en el borde de mes del Paso 2 y se iba en tránsito sin cotejar — aunque el banco ya lo hubiera
+   acreditado completo, repartido en depósitos diarios. En mayo de 2026 eran 15 depósitos por 973.96 que
+   SÍ estaban en el estado, y la partida viajó a junio y a julio sin tener nada pendiente.
+   El matching normal no los encuentra: son muchas más líneas de las que busca una combinación (por eso
+   estos casos usan 15 y no 4 — con pocas líneas el camino normal las cuadra y la regla no hace falta).
+   La verificación no es buscar una combinación entre muchas, es sumar TODOS los créditos de ese método
+   en el rango que el propio asiento declara y ver si dan el total. Si dan exacto, no hay ambigüedad. */
+const YAPPY_MAYO = [["2026-05-01",209.62],["2026-05-13",0.64],["2026-05-15",38.90],["2026-05-16",11.75],
+  ["2026-05-17",124.88],["2026-05-19",14.92],["2026-05-20",10.69],["2026-05-21",11.76],["2026-05-23",76.98],
+  ["2026-05-24",124.93],["2026-05-26",4.62],["2026-05-27",153.05],["2026-05-28",146.32],["2026-05-29",3.20]];
+function credsYappy(extra){
+  return YAPPY_MAYO.concat(extra || []).map(function(p,i){
+    return { fecha:p[0], debito:0, credito:p[1], descripcion:"DEPOSITO YAPPY - POS", fila:i+1 };
+  });
+}
+/* El 209.62 del 1-may es el descargo del Yappy del 30-abr: el Paso 0 ya consumio esa linea del estado, asi
+   que al matching normal le falta y no cuadra. Es la condicion real de mayo de 2026 — sin ella el camino
+   normal combina las 15 lineas y la regla no hace falta. */
+function transitoAbril(){
+  return [{ fecha:"2026-04-30", banco:"Banco General", monto:209.62, sentido:"credito", creditoCG:"pendiente",
+            concepto:"Dep\u00f3sito de fin de mes reportado por la cajera" }];
+}
+function cgAcum(monto){
+  return [{ fecha:"2026-05-31", debito:0, credito:monto, referencia:"ME-00000001964", fila:1,
+            descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 30 DE MAYO" }];
+}
+test("el acumulado que el banco acreditó día por día no queda en tránsito (31-may-2026, Yappy)", () => {
+  STATE.decisiones = {};
+  const est = credsYappy();                                   // los 14 del 1 al 29: 932.26
+  const h = paso2(cgAcum(932.26), [], [], est, null, null, 3, 0.01, null, transitoAbril());
+  eq(contarRojas(h), 0, "el acumulado está completo en el estado: no es diferencia");
+  const t = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 932.26) < 0.01; });
+  eq(t.length, 0, "no se va en tránsito");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /día por día/.test(x.motivo || ""); });
+  eq(inf.length, 1, "se informa que el banco lo acreditó día por día");
+  cerca(inf[0].monto, 932.26);
+});
+
+/* El rango que declara el asiento es de VENTA, no de acreditación: el banco acredita el último día al día
+   siguiente. En mayo de 2026 el asiento decía "DEL 1 AL 30" y el Yappy del 30 cayó el 31 — 41.70 de los
+   973.96. Cortando en el día 30 literal la suma daba 932.26 y la regla no disparaba. */
+test("el cierre del rango se acepta acreditado al día siguiente (el Yappy del 30 cayó el 31)", () => {
+  STATE.decisiones = {};
+  const est = credsYappy([["2026-05-31",41.70]]);             // 932.26 + 41.70 = 973.96
+  const h = paso2(cgAcum(973.96), [], [], est, null, null, 3, 0.01, null, transitoAbril());
+  eq(contarRojas(h), 0, "sin rojas");
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /día por día/.test(x.motivo || ""); });
+  eq(inf.length, 1, "se reconoce con el cierre acreditado al día siguiente");
+  eq(/al día siguiente/.test(inf[0].texto || ""), true, "el texto avisa que el cierre lo acreditó el banco al día siguiente");
+});
+
+/* El guard de siempre: suma exacta. Si al estado le falta o le sobra plata del método en el rango, el
+   acumulado NO está completo y la partida se queda en tránsito. Sin esto, estirar el rango hasta fin de
+   mes daría por acreditado cualquier acumulado que se acerque. */
+test("si los créditos del rango no suman exacto, el acumulado sigue en tránsito", () => {
+  STATE.decisiones = {};
+  const est = credsYappy();                                   // 932.26 contra un asiento de 973.96
+  const h = paso2(cgAcum(973.96), [], [], est, null, null, 3, 0.01, null, transitoAbril());
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /día por día/.test(x.motivo || ""); });
+  eq(inf.length, 0, "no cuadra: no se da por acreditado");
+  const t = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 973.96) < 0.01; });
+  eq(t.length, 1, "queda en tránsito para el mes siguiente");
+});
+
+/* Y el otro guard: solo se verifica el método que el asiento declara. Los créditos de otro método del
+   mismo rango no entran a la suma — si no, el total de un banco explicaría cualquier acumulado. */
+test("los créditos de otro método no entran a la suma del rango", () => {
+  STATE.decisiones = {};
+  const est = credsYappy().concat([{ fecha:"2026-05-18", debito:0, credito:41.70, fila:99,
+                                     descripcion:"REMISION CLAVE 016005605" }]);
+  const h = paso2(cgAcum(973.96), [], [], est, null, null, 3, 0.01, null, transitoAbril());
+  const inf = h.filter(function(x){ return x.clase === "informativo" && /día por día/.test(x.motivo || ""); });
+  eq(inf.length, 0, "el crédito de CLAVE no completa el Yappy");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
