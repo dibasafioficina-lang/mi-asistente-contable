@@ -129,6 +129,8 @@ El pool de compensación del Paso 0 son **solo los créditos del estado del mes 
 
 - `consumirTransitoPrevio` tiene un **Paso C** que descarga las partes que sí compensaron y arrastra solo el resto — pero sigue el **desglose que declara el asiento**, parte por parte, con suma exacta y combinación única.
 - **Sin desglose no se parte nada.** El corte no se puede deducir del banco: mayo de 2026 tenía 24 líneas de redondeo libres en St. Georges y **dos** de 1.50, así que cualquier resto chico se "explicaría" de varias formas. El 76.50 necesita que el corte lo declare el asiento (columna `Desglose` del resumen).
+- Cuando queda **un solo** ACH de Brinks que podría ser la parte gruesa, el hallazgo **propone** el desglose a anotar y nombra la fecha de retiro. Solo informa: no consume la línea ni mueve plata.
+- La sugerencia **no exige** `retiroCompatible`, y es a propósito: el efectivo del 27-may se retiró el 1-jun, cinco días hábiles después, porque el camión no pasa todos los días al cerrar el mes. Ese margen no se puede aflojar para *compensar* —hace intercambiables los ACH, que es lo que `ACH_ANTICIPO_MAX` evita—, pero sugerir no compensa, así que el texto advierte cuando el retiro cae fuera del ciclo X+1 y lo confirma quien concilia.
 
 ### Dónde nace un descuadre de apertura
 

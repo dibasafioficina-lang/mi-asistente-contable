@@ -4671,6 +4671,49 @@ test("sin desglose la partida no se parte: el corte no se adivina", () => {
   cerca(r.pendientes[0].monto, 76.50, "viaja entera, como hasta ahora");
 });
 
+/* ── La sugerencia del corte, para la partida sin desglose ─────────────────────────────
+   El Paso C no parte lo que no trae desglose, asi que el 76.50 del 27-may-2026 seguia viajando entero sin
+   decir donde estaba su plata. Cuando en el pool queda UN solo ACH de Brinks que podria ser la parte
+   gruesa, el hallazgo lo nombra y propone el desglose a anotar — nada mas: no consume la linea ni mueve
+   plata, porque el corte lo confirma quien concilia. */
+test("el hallazgo propone el corte cuando hay un solo ACH candidato (76.50 = 75.00 + 1.50)", () => {
+  const tr = [{ fecha:"2026-05-27", banco:"STG", monto:76.50, sentido:"credito", partes:null,
+                concepto:"DEPOSITO BRINKS DEL 27/5/2026", comprobante:"ME-00000001958" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 010626 David", debito:0, credito:75.00, fila:2 },
+               { fecha:"2026-06-03", descripcion:"Ach De Brink S Panama S.A. - D08563bsafe 020626 David", debito:0, credito:30.00, fila:3 },
+               { fecha:"2026-06-04", descripcion:"Ach De Brink S Panama S.A. - D08563bsafe 030626 David", debito:0, credito:25.00, fila:4 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1);
+  const cs = r.pendientes[0].corteSugerido;
+  eq(!!cs, true, "se propone un corte");
+  cerca(cs.monto, 75.00);
+  cerca(cs.resto, 1.50, "el resto tiene el tamaño del redondeo del depósito");
+  eq(cs.retiro, "2026-06-01", "nombra la fecha de retiro, para poder confirmarlo");
+  eq(cs.cicloNormal, false, "el retiro cae fuera del ciclo de X+1 y el texto lo advierte");
+  // Los otros dos ACH no son candidatos: su resto (46.50 y 51.50) es MAYOR que el propio ACH.
+  eq(est.filter(function(x){ return x._transitoUsado; }).length, 0, "no consume ninguna línea: solo informa");
+});
+
+/* El guard: con dos candidatos posibles no se sugiere nada. Proponer uno seria elegir por el que concilia,
+   y con el ACH equivocado el corte manda la plata al dia equivocado. */
+test("con dos ACH candidatos no se propone corte", () => {
+  const tr = [{ fecha:"2026-05-27", banco:"STG", monto:76.50, sentido:"credito", partes:null,
+                concepto:"DEPOSITO BRINKS DEL 27/5/2026" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 010626 David", debito:0, credito:75.00, fila:2 },
+               { fecha:"2026-06-03", descripcion:"Ach De Brink S Panama S.A. - D08563bsafe 020626 David", debito:0, credito:76.00, fila:3 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(!!r.pendientes[0].corteSugerido, false, "dos candidatos: no se adivina cuál");
+});
+
+/* Y no se propone para una tarjeta: ahi un ACH de efectivo no explica nada. */
+test("no se propone corte de efectivo para una partida de tarjeta", () => {
+  const tr = [{ fecha:"2026-05-27", banco:"STG", monto:76.50, sentido:"credito", partes:null,
+                concepto:"DEPOSITO POR TARJETA CLAVE STG DEL 27/5/2026" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 010626 David", debito:0, credito:75.00, fila:2 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(!!r.pendientes[0].corteSugerido, false, "la CLAVE no se compensa con un ACH de Brinks");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
