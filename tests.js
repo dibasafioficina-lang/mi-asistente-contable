@@ -4440,18 +4440,16 @@ test("el mes de origen cruza el año sin romperse", () => {
    No toca el caso del 27-feb-2026 (el test de mas arriba): ahi el reingreso se hizo el 1-mar en otro
    comprobante, asi que el credito de febrero no tiene su contrapartida en el mismo y sigue su camino. */
 test("el crédito que el mismo comprobante reingresa no sale como diferencia", () => {
-  // Va en MEDIO del mes a propósito: el último día tiene su propia rama (3a) y taparía la que se prueba.
+  // El último día del mes, que es cuando la regla corre (ver marcarReingresadosDelMes).
   const cg = [
-    { fecha: "2026-06-15", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
-      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
-    { fecha: "2026-06-15", debito: 91.26,  credito: 0,      referencia: "ME-00000001986", fila: 11,
-      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
-    { fecha: "2026-06-15", debito: 188.95, credito: 0,      referencia: "ME-00000001986", fila: 12,
-      descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 15/06/2026" },
-    { fecha: "2026-06-30", debito: 0,      credito: 50.00,  referencia: "ME-00000001990", fila: 13,
-      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" }
+    { fecha: "2026-06-30", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" },
+    { fecha: "2026-06-30", debito: 91.26,  credito: 0,      referencia: "ME-00000001986", fila: 11,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" },
+    { fecha: "2026-06-30", debito: 188.95, credito: 0,      referencia: "ME-00000001986", fila: 12,
+      descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 30/06/2026" }
   ];
-  const est = [{ fecha: "2026-06-16", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc 016005605", fila: 2 }];
+  const est = [{ fecha: "2026-06-30", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc 016005605", fila: 2 }];
   const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null, {});
   eq(contarRojas(h), 0, "el comprobante ya reconoció el tránsito: no es una diferencia");
   const t = h.filter(x => x.clase === "en_transito" && Math.abs(x.monto - 280.21) < 0.01);
@@ -4480,6 +4478,7 @@ test("sin reingreso en el mismo comprobante, el crédito sigue su camino", () =>
 });
 
 test("el reingreso no se arma con débitos de otro comprobante", () => {
+  // En medio del mes: así el crédito no tiene tampoco la salida del borde de mes y la diferencia se ve.
   const cg = [
     { fecha: "2026-06-15", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
       descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
@@ -4492,6 +4491,22 @@ test("el reingreso no se arma con débitos de otro comprobante", () => {
   ];
   const est = [{ fecha: "2026-06-16", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc", fila: 2 }];
   eq(contarRojas(paso2(cg, [], est, null, null, null, 7, 0.01, null, null, {})), 1, "los débitos son de otro comprobante: no lo reingresan");
+
+  // Y la guardia nueva: en MEDIO del mes el crédito con su reingreso en el mismo comprobante tampoco se
+  // excluye. En junio de 2026 el asiento diario reclasifica el método con debito y credito del mismo
+  // importe, y tomarlo por reingreso saco del cotejo 45 de los 56 creditos del mes.
+  const cgMedio = [
+    { fecha: "2026-06-15", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 91.26,  credito: 0,      referencia: "ME-00000001986", fila: 11,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 188.95, credito: 0,      referencia: "ME-00000001986", fila: 12,
+      descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 15/06/2026" },
+    { fecha: "2026-06-30", debito: 0,      credito: 50.00,  referencia: "ME-00000001990", fila: 13,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" }
+  ];
+  eq(contarRojas(paso2(cgMedio, [], est, null, null, null, 7, 0.01, null, null, {})), 1,
+     "en medio del mes el crédito se coteja igual: el débito del mismo importe es reclasificación, no reingreso");
 });
 
 /* --- resumen --- */

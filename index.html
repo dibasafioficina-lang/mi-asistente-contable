@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.18";
+var APP_VERSION = "2026.10.19";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2785,11 +2785,18 @@ function marcarNeutros(diario){
    un estado donde no podian estar.
    marcarNeutros ya hace esto para el Paso 3, pero empareja 1:1 y aca el credito viene consolidado contra
    varios debitos. Se busca la combinacion, con la guardia de siempre: suma exacta y debitos del mismo
-   comprobante que ningun otro credito haya consumido. */
-function marcarReingresadosDelMes(diario){
+   comprobante que ningun otro credito haya consumido.
+   SOLO EL ULTIMO DIA DEL MES, y esto es esencial: en junio de 2026 el asiento diario tambien trae credito y
+   debito del mismo importe —el del 12-jun devuelve el credito de 1,059.80 de CLAVE STG como VISA 800.61 +
+   CLAVE 259.19, o sea una reclasificacion de metodo, no un reingreso de cierre—. Sin acotarla, la regla
+   saco del cotejo 45 de los 56 creditos del mes (18,634.11 de 24,297.03): el Paso 2 daba cero diferencias
+   porque no comparaba casi nada, y el resumen para julio se inflaba de 7,045.16 a 24,459.55. Corriendo solo
+   el ultimo dia, junio sigue en cero rojas: los creditos de los demas dias SI cuadran contra el banco. */
+function marcarReingresadosDelMes(diario, soloFecha){
   var porRef = {};
   (diario||[]).forEach(function(x){
     if(normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED") !== -1) return;
+    if(soloFecha && String(x.fecha||"") !== String(soloFecha)) return;
     var ref = String(x.referencia==null ? "" : x.referencia).trim(); if(!ref) return;
     var g = porRef[ref] = porRef[ref] || { cred:[], deb:[] };
     if(x.credito > 0) g.cred.push(x);
@@ -3429,9 +3436,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
 
   // El credito cuyo reingreso esta en el mismo comprobante ya lo reconocio contabilidad como transito:
   // no se compara contra el banco (ver marcarReingresadosDelMes).
-  marcarReingresadosDelMes(diarioCaja);
   // Último día del mes: lo que entra ese día queda en tránsito para el mes siguiente (no compensa aún).
   var ultimoDia = ultimoDiaMes(diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; }).map(function(x){ return x.fecha; }));
+  marcarReingresadosDelMes(diarioCaja, ultimoDia);
   var heredadosP2 = descargosHeredados(transitoPrevio, diarioCaja);
 
   Object.keys(estados).forEach(function(banco){
@@ -6858,11 +6865,22 @@ function recolectarEnTransito(){
     // del mismo importe y del mismo día son dos partidas reales, y se taparían entre sí.
     var previos = out.slice();
     var nuevos = [];
-    r[k].forEach(function(it){
-      if(!esEnTransito(it) || entrante(it)) return;   // lo entrante ya compensó: no se arrastra
-      if(yaCubiertoEnTransito(previos, it, k)) return;   // el mismo depósito que ya vio otro paso
-      it._paso = k;
-      nuevos.push(it);
+    /* Con UNA excepcion: el consolidado que el mismo comprobante reingreso. Sus partes estan enumeradas en
+       `partes`, asi que contarlas aparte es doble conteo seguro —no dos partidas que coinciden—. Y cae en el
+       MISMO paso que ellas, donde la deduplicacion normal no llega.
+       Caso real: el 30-jun-2026 el Paso 2 trajo el credito reingresado "DEPOSITO POR CK BANISTMO DEL
+       30/06/2026" por 206.61 y, por la ruta de los cheques del detalle del informe, el mismo cheque de
+       206.61 otra vez como "ultimo dia del mes". El resumen para julio salia 206.61 de mas.
+       Van primero para que el resto del paso pueda descontarse contra ellos. */
+    var esReingreso = function(it){ return /reingresado en el mismo comprobante/i.test(it.motivo||""); };
+    [true, false].forEach(function(primeraPasada){
+      r[k].forEach(function(it){
+        if(!esEnTransito(it) || entrante(it)) return;   // lo entrante ya compensó: no se arrastra
+        if(esReingreso(it) !== primeraPasada) return;
+        if(yaCubiertoEnTransito(previos.concat(primeraPasada ? [] : nuevos.filter(esReingreso)), it, k)) return;
+        it._paso = k;
+        nuevos.push(it);
+      });
     });
     out = out.concat(nuevos);
   });
