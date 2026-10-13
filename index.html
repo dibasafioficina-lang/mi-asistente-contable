@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.16";
+var APP_VERSION = "2026.10.17";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2774,6 +2774,42 @@ function marcarNeutros(diario){
     }
   });
 }
+/* ---- El credito que el MISMO comprobante reingresa ----
+   Al cerrar el mes, el asiento del ultimo dia a veces trae las dos patas juntas: saca el deposito de Caja
+   General (credito) y lo devuelve en el mismo comprobante (debito), porque el banco no lo va a acreditar
+   hasta el mes siguiente. Contabilidad ya lo reconocio como transito; ese credito NO tiene que aparecer en
+   el estado de cuenta y compararlo contra el banco lo saca como diferencia.
+   Caso real: ME-00000001986 del 30-jun-2026. Credito "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" por
+   280.21 (el total del dia, VISA 91.26 + CLAVE 188.95) y, en el mismo comprobante, los debitos de 91.26 y
+   188.95 por separado. El comprobante cierra en cero —608.99 a cada lado— y el Paso 2 pedia los 280.21 en
+   un estado donde no podian estar.
+   marcarNeutros ya hace esto para el Paso 3, pero empareja 1:1 y aca el credito viene consolidado contra
+   varios debitos. Se busca la combinacion, con la guardia de siempre: suma exacta y debitos del mismo
+   comprobante que ningun otro credito haya consumido. */
+function marcarReingresadosDelMes(diario){
+  var porRef = {};
+  (diario||[]).forEach(function(x){
+    if(normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED") !== -1) return;
+    var ref = String(x.referencia==null ? "" : x.referencia).trim(); if(!ref) return;
+    var g = porRef[ref] = porRef[ref] || { cred:[], deb:[] };
+    if(x.credito > 0) g.cred.push(x);
+    else if(x.debito > 0) g.deb.push({ monto:x.debito, usado:false });
+  });
+  Object.keys(porRef).forEach(function(ref){
+    var g = porRef[ref];
+    if(!g.cred.length || !g.deb.length) return;
+    // Del credito mas grande al mas chico: un consolidado tiene que poder tomar sus partes antes de que
+    // un credito chico se lleve una de ellas por coincidencia.
+    g.cred.slice().sort(function(a,b){ return b.credito - a.credito; }).forEach(function(c){
+      var libres = g.deb.filter(function(d){ return !d.usado; });
+      if(!libres.length) return;
+      var sols = solucionesSuma(libres.map(function(d){ return d.monto; }), c.credito, 0.01, 4, 2);
+      if(!sols || sols.length !== 1) return;   // sin combinacion unica no se adivina
+      sols[0].forEach(function(i){ libres[i].usado = true; });
+      c._reingresadoEnElMes = true;
+    });
+  });
+}
 /* ---- Una transaccion ANULADA se va con su contrapartida ----
    El sistema anula un movimiento marcando UNA linea "ABORTED", pero la transaccion son las dos: la original y
    la que la reversa, bajo el mismo comprobante. Filtrando solo la que lleva la palabra, la otra se queda en el
@@ -3384,12 +3420,29 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       .map(function(x){ return {fecha:x.fecha, monto:x.credito, desc:x.descripcion, fila:x.fila, usado:false}; });
   });
 
+  // El credito cuyo reingreso esta en el mismo comprobante ya lo reconocio contabilidad como transito:
+  // no se compara contra el banco (ver marcarReingresadosDelMes).
+  marcarReingresadosDelMes(diarioCaja);
   // Último día del mes: lo que entra ese día queda en tránsito para el mes siguiente (no compensa aún).
   var ultimoDia = ultimoDiaMes(diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion) && x.credito>0; }).map(function(x){ return x.fecha; }));
   var heredadosP2 = descargosHeredados(transitoPrevio, diarioCaja);
 
   Object.keys(estados).forEach(function(banco){
-    var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0; });
+    var cajaDep = diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0 && !x._reingresadoEnElMes; });
+    // Los reingresados en el mismo comprobante se reportan aparte, para que la exclusion quede a la vista.
+    diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0 && x._reingresadoEnElMes; })
+      .forEach(function(x){
+        hallazgos.push({
+          fecha:x.fecha, banco:banco, monto:x.credito, clase:"en_transito",
+          concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
+          motivo:"reingresado en el mismo comprobante",
+          texto: banco + " " + x.fecha + ": B/ " + fmt(x.credito) + " (\"" + String(x.descripcion||"").trim() +
+                 "\") salió de Caja General y volvió a entrar en el MISMO comprobante, así que contabilidad ya lo " +
+                 "reconoció como tránsito: el banco lo acredita el mes siguiente. No se compara contra el estado de " +
+                 "cuenta —ahí no puede estar— y viaja en el resumen hasta que compense." + refComprobante(x.referencia),
+          fuente: "Diario Caja General"
+        });
+      });
     /* ---- Una remision que paga el mismo metodo de dos dias ----
        El banco junta en UNA sola remision las partidas del mismo metodo de dos dias seguidos: en marzo de
        2026 la CLAVE del 1-mar (752.77) y la del 2-mar (590.65) entraron como una remision de 1,343.42 el

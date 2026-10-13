@@ -4430,6 +4430,63 @@ test("el mes de origen cruza el año sin romperse", () => {
   eq(/cierre de <b>diciembre 2025<\/b> o antes, no en enero 2026/.test(cuadreSaldoIniHtml(c)), true, "enero mira a diciembre del año anterior");
 });
 
+/* ---- El credito que el MISMO comprobante reingresa no se compara contra el banco ----
+   Hallazgo (oct 2026, junio de 2026): al cerrar el mes el asiento del ultimo dia trae las dos patas juntas.
+   ME-00000001986 del 30-jun saca de Caja General un credito de 280.21 ("DEPOSITO POR TARJETA VISA STG DEL
+   30/06/2026", el total del dia: VISA 91.26 + CLAVE 188.95) y en el MISMO comprobante devuelve los debitos
+   de 91.26 y 188.95 por separado. El comprobante cierra en cero —608.99 a cada lado— y contabilidad ya
+   reconocio el transito, pero el Paso 2 pedia los 280.21 en el estado de junio, donde no podian estar.
+   marcarNeutros ya hacia esto para el Paso 3, pero empareja 1:1 y aca el credito viene consolidado.
+   No toca el caso del 27-feb-2026 (el test de mas arriba): ahi el reingreso se hizo el 1-mar en otro
+   comprobante, asi que el credito de febrero no tiene su contrapartida en el mismo y sigue su camino. */
+test("el crédito que el mismo comprobante reingresa no sale como diferencia", () => {
+  // Va en MEDIO del mes a propósito: el último día tiene su propia rama (3a) y taparía la que se prueba.
+  const cg = [
+    { fecha: "2026-06-15", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 91.26,  credito: 0,      referencia: "ME-00000001986", fila: 11,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 188.95, credito: 0,      referencia: "ME-00000001986", fila: 12,
+      descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 15/06/2026" },
+    { fecha: "2026-06-30", debito: 0,      credito: 50.00,  referencia: "ME-00000001990", fila: 13,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" }
+  ];
+  const est = [{ fecha: "2026-06-16", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc 016005605", fila: 2 }];
+  const h = paso2(cg, [], est, null, null, null, 7, 0.01, null, null, {});
+  eq(contarRojas(h), 0, "el comprobante ya reconoció el tránsito: no es una diferencia");
+  const t = h.filter(x => x.clase === "en_transito" && Math.abs(x.monto - 280.21) < 0.01);
+  eq(t.length, 1, "sale una sola vez, en tránsito");
+  if (t[0].texto.indexOf("MISMO comprobante") < 0) throw new Error("no explica por qué se excluyó");
+});
+
+test("sin reingreso en el mismo comprobante, el crédito sigue su camino", () => {
+  // La guardia: el 27-feb-2026 tiene su reingreso recién el 1-mar, en otro comprobante. Un credito suelto
+  // no se puede dar por reingresado o cualquier deposito que el banco no acredito se borraria del cotejo.
+  const cg = [
+    { fecha: "2026-06-15", debito: 0, credito: 280.21, referencia: "ME-00000001986", fila: 10,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-30", debito: 0, credito: 50.00,  referencia: "ME-00000001990", fila: 13,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" }
+  ];
+  const est = [{ fecha: "2026-06-16", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc", fila: 2 }];
+  eq(contarRojas(paso2(cg, [], est, null, null, null, 7, 0.01, null, null, {})), 1, "sin la pata de vuelta, sigue siendo diferencia");
+});
+
+test("el reingreso no se arma con débitos de otro comprobante", () => {
+  const cg = [
+    { fecha: "2026-06-15", debito: 0,      credito: 280.21, referencia: "ME-00000001986", fila: 10,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 91.26,  credito: 0,      referencia: "ME-00000001987", fila: 11,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 15/06/2026" },
+    { fecha: "2026-06-15", debito: 188.95, credito: 0,      referencia: "ME-00000001987", fila: 12,
+      descripcion: "DEPOSITO POR TARJETA CLAVE STG DEL 15/06/2026" },
+    { fecha: "2026-06-30", debito: 0,      credito: 50.00,  referencia: "ME-00000001990", fila: 13,
+      descripcion: "DEPOSITO POR TARJETA VISA STG DEL 30/06/2026" }
+  ];
+  const est = [{ fecha: "2026-06-16", debito: 0, credito: 86.79, descripcion: "Remisión V/Mc", fila: 2 }];
+  eq(contarRojas(paso2(cg, [], est, null, null, null, 7, 0.01, null, null, {})), 1, "los débitos son de otro comprobante: no lo reingresan");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
