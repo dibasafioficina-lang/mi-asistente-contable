@@ -3901,11 +3901,25 @@ test("una partida de fin de mes compensa POR PARTES, cada medio de pago por su c
   // Las cinco lineas quedaron consumidas: ninguna puede volver a usarse en los Pasos 2 y 3.
   eq(e1.filter(function(x){ return x._transitoUsado; }).length, 5, "las cinco líneas del banco quedan apartadas");
 
-  // Si falta UNA parte, la partida sigue pendiente entera: media compensación no es una compensación.
+  /* Si falta UNA parte, la partida compensa A MEDIAS y viaja solo el resto (Paso C).
+     Antes seguia pendiente ENTERA — "media compensacion no es una compensacion"—, pero arrastrar el total
+     hace que lo ya acreditado se le vuelva a pedir al banco mes tras mes y descuadra el cierre por esa
+     plata: el efectivo del 27-may-2026 (76.50) lo mostro, con 1.50 acreditados el 30-may y 75.00 el 2-jun.
+     Las tarjetas SI entraron, asi que se descargan; lo que viaja son los cheques.
+     Dentro de una parte sigue siendo todo o nada: la de CHEQUE tiene 864.62 y 270.30 en el banco pero le
+     falta 328.16, asi que no se consume ninguna de las dos. */
   const e2 = est().filter(function(x){ return Math.abs(x.credito - 328.16) > 0.01; });
   const r2 = consumirTransitoPrevio(tr.map(function(t){ return Object.assign({}, t); }), { Banistmo: e2, STG: [] }, 0.01);
-  eq(r2.pendientes.length, 1, "sin una de las partes la partida no se da por compensada");
-  eq(e2.filter(function(x){ return x._transitoUsado; }).length, 0, "y no consume ninguna línea a medias");
+  eq(r2.pendientes.length, 1, "la partida sigue en el resumen, por el resto");
+  eq(r2.pendientes[0].parcial, true, "compensó a medias");
+  cerca(r2.pendientes[0].montoCompensado, 2108.52);        // VISA 1,124.69 + CLAVE 983.83
+  cerca(r2.pendientes[0].montoPend, 1463.08);              // los cheques, que no entraron
+  eq(r2.pendientes[0].partes.length, 1, "al mes siguiente viaja solo el desglose que falta");
+  eq(normTxt(r2.pendientes[0].partes[0].metodo), "CHEQUE");
+  eq(e2.filter(function(x){ return x._transitoUsado; }).length, 2, "se apartan las dos líneas que sí compensaron");
+  // Y las de la parte que no cuadra quedan libres: dentro de una parte es todo o nada.
+  eq(e2.filter(function(x){ return x._transitoUsado && x.credito < 900; }).length, 0,
+     "ni 864.62 ni 270.30 se consumen a medias");
 });
 
 test("un asiento que acumula el mes sin decirlo en su texto tampoco queda en transito", () => {
@@ -4584,6 +4598,77 @@ test("los créditos de otro método no entran a la suma del rango", () => {
   const h = paso2(cgAcum(973.96), [], [], est, null, null, 3, 0.01, null, transitoAbril());
   const inf = h.filter(function(x){ return x.clase === "informativo" && /día por día/.test(x.motivo || ""); });
   eq(inf.length, 0, "el crédito de CLAVE no completa el Yappy");
+});
+
+/* ── Arrastre parcial: compensa lo que entro, viaja el resto (Paso C) ──────────────────────
+   Una partida de transito puede quedar partida entre dos meses: el banco acredita un medio de pago en uno
+   y otro en el siguiente. Arrastrar el total hace que lo ya acreditado se le vuelva a pedir al banco mes
+   tras mes — y como el resumen alimenta la apertura del Paso 0, el cierre descuadra por esa plata.
+   El corte no se adivina: se sigue el DESGLOSE que declara el propio asiento, parte por parte, con suma
+   exacta y combinacion unica. Sin desglose no se parte nada. */
+test("la partida que compensó a medias arrastra solo el resto, y el hallazgo lo dice", () => {
+  const partes = [{ metodo:"VISA", monto:200.00 }, { metodo:"CHEQUE", monto:300.00 }];
+  const tr = [{ fecha:"2026-05-31", banco:"STG", monto:500.00, sentido:"credito", partes:partes,
+                concepto:"Depósito de fin de mes reportado por la cajera", comprobante:"ME-00000001958" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"REMISION V/MC 016005605", debito:0, credito:200.00, fila:2 }];
+  const h = paso0(tr, [], est, null, 7, 0.01);
+  const p = h.filter(function(x){ return /compensó a medias/.test(x.motivo || ""); });
+  eq(p.length, 1, "se reporta la compensación parcial");
+  cerca(p[0].monto, 300.00, "al resumen viaja el RESTO, no el total");
+  eq(/B\/ 200\.00/.test(p[0].texto), true, "el texto nombra lo que el banco sí acreditó");
+  eq(h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 500.00) < 0.01; }).length, 0,
+     "el total ya no viaja: eso es lo que duplicaba el reclamo al banco");
+});
+
+/* El guard de la parte: dentro de un medio de pago sigue siendo todo o nada. Si a la parte de CHEQUE le
+   falta plata, no se consume lo que hay — dejaria lineas del banco apartadas por una compensacion que no
+   ocurrio, y esas lineas son las que los Pasos 2 y 3 necesitan cotejar. */
+test("dentro de una parte es todo o nada: no se consume de a pedazos", () => {
+  const partes = [{ metodo:"VISA", monto:200.00 }, { metodo:"CHEQUE", monto:300.00 }];
+  const tr = [{ fecha:"2026-05-31", banco:"STG", monto:500.00, sentido:"credito", partes:partes,
+                concepto:"Depósito de fin de mes reportado por la cajera" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"REMISION V/MC 016005605", debito:0, credito:200.00, fila:2 },
+               { fecha:"2026-06-03", descripcion:"DEPOSITO", debito:0, credito:120.00, fila:3 }];  // falta para 300
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1);
+  cerca(r.pendientes[0].montoPend, 300.00, "la parte incompleta viaja entera");
+  eq(est.filter(function(x){ return x._transitoUsado; }).length, 1, "solo la línea de VISA queda apartada");
+  eq(est.filter(function(x){ return x._transitoUsado && Math.abs(x.credito - 120.00) < 0.01; }).length, 0,
+     "el depósito de 120.00 queda libre para los Pasos 2 y 3");
+});
+
+/* El guard de la unicidad, parte por parte: si el importe de una parte se alcanza de dos maneras, esa
+   parte no se descarga. Sin esto, el arrastre parcial elegiria una combinacion cualquiera y dejaria
+   huerfana la linea que de verdad le tocaba. */
+test("si la parte se alcanza de dos maneras, no se descarga", () => {
+  const partes = [{ metodo:"VISA", monto:200.00 }, { metodo:"CHEQUE", monto:300.00 }];
+  const tr = [{ fecha:"2026-05-31", banco:"STG", monto:500.00, sentido:"credito", partes:partes,
+                concepto:"Depósito de fin de mes reportado por la cajera" }];
+  // 200.00 de VISA se alcanza con la línea de 200.00 o con 120.00 + 80.00.
+  const est = [{ fecha:"2026-06-02", descripcion:"REMISION V/MC 016005605", debito:0, credito:200.00, fila:2 },
+               { fecha:"2026-06-03", descripcion:"REMISION V/MC 016005605", debito:0, credito:120.00, fila:3 },
+               { fecha:"2026-06-03", descripcion:"REMISION V/MC 016005605", debito:0, credito:80.00,  fila:4 },
+               { fecha:"2026-06-04", descripcion:"DEPOSITO", debito:0, credito:300.00, fila:5 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1);
+  cerca(r.pendientes[0].montoPend, 200.00, "la de CHEQUE sí se descarga; la de VISA es ambigua y viaja");
+  eq(r.pendientes[0].partes.length, 1);
+  eq(normTxt(r.pendientes[0].partes[0].metodo), "VISA");
+});
+
+/* Y el guard de fondo: una partida SIN desglose no se parte. En mayo de 2026 St. Georges tenia 24 lineas
+   de redondeo libres y DOS de 1.50 — cualquier resto chico se habria "explicado" de varias formas. El
+   76.50 del 27-may (1.50 el 30-may + 75.00 el 2-jun) necesita que el corte lo declare el asiento. */
+test("sin desglose la partida no se parte: el corte no se adivina", () => {
+  const tr = [{ fecha:"2026-05-27", banco:"STG", monto:76.50, sentido:"credito", partes:null,
+                concepto:"DEPOSITO BRINKS DEL 27/5/2026", comprobante:"ME-00000001958" }];
+  const est = [{ fecha:"2026-06-02", descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe 010626 David", debito:0, credito:75.00, fila:2 },
+               { fecha:"2026-06-03", descripcion:"Descripción", debito:0, credito:1.50, fila:3 },
+               { fecha:"2026-06-04", descripcion:"Descripción", debito:0, credito:1.50, fila:4 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1);
+  eq(!!r.pendientes[0].parcial, false, "sin desglose no hay corte que seguir");
+  cerca(r.pendientes[0].monto, 76.50, "viaja entera, como hasta ahora");
 });
 
 /* --- resumen --- */

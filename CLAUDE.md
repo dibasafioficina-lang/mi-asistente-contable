@@ -116,6 +116,20 @@ Una partida en tránsito lleva **tres** asientos, y el tercero solo corresponde 
 
 El reingreso es del mes anterior y el navegador del mes no lo trae, así que `corregirAcreditadasReingresadas` lo **deduce** de que la apertura coincida con el total del resumen. La coincidencia no distingue "reingresó" de "hay otra cosa dentro por el mismo importe": en febrero de 2026 dio por reingresadas 13 partidas y solo dos lo estaban. **Las deducidas van marcadas «por confirmar» y el asiento advierte que hay que verificar el navegador del mes anterior antes de registrar** — sin reingreso, el descargo duplica el débito al banco.
 
+### Una partida en tránsito puede quedar partida entre dos meses
+
+El banco acredita un medio de pago en un mes y el otro en el siguiente, así que ningún mes tiene las dos piezas:
+
+```
+27-may   DEPOSITO BRINKS DEL 27/5/2026   76.50   =   1.50  (estado de mayo, 30-may, línea sin descripción)
+                                                 +  75.00  (estado de junio, 2-jun, ACH retiro 010626)
+```
+
+El pool de compensación del Paso 0 son **solo los créditos del estado del mes que se corre**, y se exige suma exacta: en mayo faltaban los 75.00 y en junio falta el 1.50, así que la partida viaja entera mes tras mes y su plata se le vuelve a pedir al banco.
+
+- `consumirTransitoPrevio` tiene un **Paso C** que descarga las partes que sí compensaron y arrastra solo el resto — pero sigue el **desglose que declara el asiento**, parte por parte, con suma exacta y combinación única.
+- **Sin desglose no se parte nada.** El corte no se puede deducir del banco: mayo de 2026 tenía 24 líneas de redondeo libres en St. Georges y **dos** de 1.50, así que cualquier resto chico se "explicaría" de varias formas. El 76.50 necesita que el corte lo declare el asiento (columna `Desglose` del resumen).
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.
