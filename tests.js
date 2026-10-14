@@ -4906,6 +4906,49 @@ test("el recibo de cobro no se empareja por una suma de importes", () => {
   eq(c.faltanEnDiario.length, 1, "200.00 + 32.15 no arma el crédito: solo 1:1 exacto");
 });
 
+/* ── Con importes iguales se empareja el MAS CERCANO en fecha ────────────────────────
+   buscarCombinacion tomaba el PRIMER candidato del array que coincidia en importe. Con varios importes
+   iguales en la ventana eso empareja en cascada y deja uno huerfano: en julio de 2026 los cuatro prestamos
+   de Topy (1,000 el 3 y 2,000 el 15, 22 y 29) y sus cuatro creditos (1,000 el 3 y 2,000 el 16, 22 y 30)
+   cuadran uno a uno, pero el recibo del 15 se llevo el credito del 22, el del 22 el del 30, y el credito
+   del 16 salio como "no aparece registrado en el diario" con su recibo exacto a UN dia.
+   Es el mismo problema del ACH del retiro del 13-may: importes intercambiables y uno se va al dia
+   equivocado dejando huerfano al que le tocaba. combinacionMasCercana ya elegia por distancia minima; este
+   criterio nunca habia llegado a buscarCombinacion. */
+function pago(fecha, monto, ref){
+  return { fecha:fecha, monto:monto, referencia:ref, usado:false,
+           descripcion:"Confecciones Topy / prestamo interno - Pago:" + ref + " CASH" };
+}
+test("con tres importes iguales se elige el más cercano en fecha (Topy, julio 2026)", () => {
+  const pool = [pago("2026-07-22", 2000.00, "RCP00249"),   // el orden del array pone este primero
+                pago("2026-07-15", 2000.00, "RCP00245"),
+                pago("2026-07-29", 2000.00, "RCP00250")];
+  const c = buscarCombinacion(pool, "2026-07-16", 2000.00, 7, 0.01, null);
+  eq(c.length, 1);
+  eq(pool[c[0]].referencia, "RCP00245", "el del 15 está a un día del 16; el del 22 a cuatro");
+});
+
+/* Y los cuatro pares completos cuadran sin dejar ninguno huerfano. */
+test("los cuatro préstamos de Topy cuadran uno a uno", () => {
+  const dia = [["2026-07-03",1000,"RCP00251"],["2026-07-15",2000,"RCP00245"],
+               ["2026-07-22",2000,"RCP00249"],["2026-07-29",2000,"RCP00250"]]
+    .map(function(p, i){ return { fecha:p[0], debito:p[1], credito:0, referencia:p[2], fila:i+1,
+      descripcion:"Confecciones Topy / prestamo interno - Pago:" + p[2] + " CASH" }; });
+  const est = [["2026-07-03",1000],["2026-07-16",2000],["2026-07-22",2000],["2026-07-30",2000]]
+    .map(function(p, i){ return { fecha:p[0], debito:0, credito:p[1], fila:100+i,
+      descripcion:"Abono De Topy A Petty Pi" }; });
+  const c = conciliarBancoEstado(dia, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "ningún crédito queda sin asiento");
+  eq(c.faltanEnBanco.length, 0, "ningún asiento queda sin crédito");
+});
+
+/* El guard: la cercania decide entre candidatos del mismo importe, pero NO afloja la ventana ni el
+   sentido. Un candidato fuera de la ventana sigue fuera, por cerca que sea el resto. */
+test("la cercanía no afloja la ventana", () => {
+  const pool = [pago("2026-08-20", 2000.00, "RCP00260")];   // a mas de 7 dias habiles
+  eq(buscarCombinacion(pool, "2026-07-16", 2000.00, 7, 0.01, null), null);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

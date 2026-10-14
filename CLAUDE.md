@@ -174,6 +174,22 @@ Salía como *"no aparece registrado en el diario"* teniendo su asiento exacto a 
 - El discriminante es la **referencia**, no el texto: el navegador del banco usa `ME-` (MAN-ENTRY) para los asientos de caja, `PAY` (AP-PAY) para los pagos y **`RCP` (AR-PAY) para los recibos de cobro**. Solo esos reciben la excusa del sentido.
 - La pasada 2b exige **1:1 por el importe exacto** (nunca una combinación, que es lo que armaría un falso positivo) y **candidato único**: con dos recibos del mismo importe en la ventana no se adivina cuál.
 
+### Con importes iguales se empareja el más cercano en fecha
+
+`buscarCombinacion` tomaba el **primer** candidato del array que coincidía en importe. Con varios importes iguales en la ventana eso empareja **en cascada** y deja uno huérfano. Los cuatro préstamos de Topy de julio de 2026 cuadran uno a uno:
+
+| Estado de cuenta | Diario |
+|---|---|
+| 3-jul 1,000 | 3-jul `RCP00251` 1,000 |
+| 16-jul 2,000 | 15-jul `RCP00245` 2,000 |
+| 22-jul 2,000 | 22-jul `RCP00249` 2,000 |
+| 30-jul 2,000 | 29-jul `RCP00250` 2,000 |
+
+Pero el recibo del 15 se llevó el crédito del **22**, el del 22 el del **30**, y el crédito del 16 salió como *"no aparece registrado en el diario"* con su recibo exacto a **un día**.
+
+- Es el mismo problema del ACH del retiro del 13-may: importes intercambiables y uno se va al día equivocado. `combinacionMasCercana` ya elegía por distancia mínima; ese criterio **nunca había llegado** a `buscarCombinacion`.
+- La cercanía decide **entre** candidatos del mismo importe; no afloja la ventana ni el sentido.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

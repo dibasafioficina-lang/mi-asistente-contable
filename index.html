@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.26";
+var APP_VERSION = "2026.10.27";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2711,7 +2711,20 @@ function buscarCombinacion(pool, fecha, objetivo, ventanaDias, tolerancia, direc
     idxs.push(i);
   }
   var a, b, c;
-  for(a=0;a<idxs.length;a++){ if(Math.abs(montoConc(pool[idxs[a]]) - objetivo) <= tolerancia) return [idxs[a]]; }
+  /* 1:1 contra el candidato MAS CERCANO en fecha, no contra el primero del array. Con varios importes
+     iguales en la ventana, quedarse con el primero empareja en cascada y deja uno huerfano: en julio de
+     2026 los cuatro prestamos de Topy (1,000 el 3 y 2,000 el 15, 22 y 29) y sus cuatro creditos (1,000 el
+     3 y 2,000 el 16, 22 y 30) cuadran uno a uno, pero el recibo del 15 se llevo el credito del 22, el del
+     22 el del 30, y el credito del 16 quedo como "no aparece registrado en el diario" con su recibo exacto
+     a un dia. Es el mismo problema del ACH del retiro del 13-may: importes intercambiables y uno se va al
+     dia equivocado. combinacionMasCercana ya elegia por distancia minima; este criterio nunca llego aca. */
+  var uno = -1, dUno = Infinity;
+  for(a=0;a<idxs.length;a++){
+    if(Math.abs(montoConc(pool[idxs[a]]) - objetivo) > tolerancia) continue;
+    var dd = distanciaBancaria(fecha, pool[idxs[a]].fecha);
+    if(dd < dUno){ dUno = dd; uno = idxs[a]; }
+  }
+  if(uno >= 0) return [uno];
   for(a=0;a<idxs.length;a++) for(b=a+1;b<idxs.length;b++){
     if(Math.abs(montoConc(pool[idxs[a]]) + montoConc(pool[idxs[b]]) - objetivo) <= tolerancia) return [idxs[a],idxs[b]];
   }
