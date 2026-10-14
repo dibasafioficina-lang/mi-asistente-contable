@@ -89,6 +89,10 @@ Llega de tres formas, y ninguna dice "DEPOSITO":
 2. **Línea sin descripción** — St. Georges escribe el encabezado `"Descripción"` como texto de la fila cuando la transacción no trae ninguna. Son siempre importes chicos que acompañan al ACH del mismo día: el **redondeo del depósito** (el 2-mar-2026, el ACH de 2,380.00 vino con un crédito de 4.88). `sinDescripcion()` las reconoce.
 3. **Depósito de ventanilla** — ese sí dice "DEPOSITO".
 
+**Un cheque tampoco llega siempre como "DEPOSITO".** El de Farid Salmanzadeh por **1,068.00** entró a St. Georges el 15-jul-2026 como `"Descripción"`, con su asiento `ME-00000001998` del mismo día. Así que la fila sin texto no es solo el redondeo: puede ser cualquier importe. Sin reconocerlo, el mismo movimiento se reportaba **dos veces mal** — el cheque del diario salía como *"pendiente por cambiar"* habiendo clareado, y su crédito del estado quedaba huérfano, así que el Paso 3 lo daba como no registrado en el diario.
+
+`conciliarChequesPaso3` acepta las líneas sin descripción **por encima de `TOPE_REDONDEO`**. Las chicas se quedan afuera a propósito: son el redondeo del efectivo, y metidas ahí le darían a `buscarSubsetSuma` centavos de cualquier fecha con los que armar un importe — el falso positivo del 5.85 de enero.
+
 El efectivo de fin de mes es **Brinks + redondeo**, así que hay que reconocer las tres o no tiene contra qué compensar: el del 27 y 28 de feb de 2026 (282.32 + 2,384.88) viajó siete meses en el resumen por este motivo.
 
 ### El redondeo no se toma prestado de otro asiento

@@ -4949,6 +4949,53 @@ test("la cercanía no afloja la ventana", () => {
   eq(buscarCombinacion(pool, "2026-07-16", 2000.00, 7, 0.01, null), null);
 });
 
+/* ── Un cheque tampoco llega siempre al banco como "DEPOSITO" ─────────────────────
+   St. Georges deja la fila sin texto y escribe el encabezado "Descripcion". Ya estaba visto para el
+   efectivo, pero ahi son centavos (el redondeo del deposito) y aca puede ser cualquier importe: el cheque
+   de Farid Salmanzadeh por 1,068.00 entro asi el 15-jul-2026, con su asiento ME-00000001998 del mismo dia.
+   Sin reconocerlo, el mismo movimiento se reportaba DOS VECES mal: el cheque del diario salia como
+   "pendiente por cambiar" habiendo clareado, y su credito del estado quedaba huerfano, asi que el Paso 3
+   lo daba como no registrado en el diario. */
+function chequeDiario(fecha, monto, ref){
+  return { fecha:fecha, debito:monto, credito:0, referencia:ref, fila:1,
+           descripcion:"DEP DE CK DE FARID SALMZANDEH" };
+}
+test("el cheque que el banco acredita sin texto clarea (1,068.00 del 15-jul-2026)", () => {
+  const diario = [chequeDiario("2026-07-15", 1068.00, "ME-00000001998")];
+  const estado = [{ fecha:"2026-07-15", debito:0, credito:1068.00, descripcion:"Descripción", fila:2 }];
+  const h = [];
+  conciliarChequesPaso3(diario, estado, [], null, 0.01, "STG", h, null, false);
+  eq(h.filter(function(x){ return /pendiente por cambiar/.test(x.motivo || ""); }).length, 0,
+     "el cheque clareó: no queda pendiente por cambiar");
+  eq(!!diario[0]._chqUsado, true, "el asiento se aparta");
+  eq(!!estado[0]._chqUsado, true, "y su crédito también: si no, el Paso 3 lo reporta huérfano");
+});
+
+/* El guard: las lineas sin descripcion CHICAS se quedan afuera. Son el redondeo del efectivo, y meterlas
+   aca le daria a buscarSubsetSuma centavos de cualquier fecha con los que armar un importe — el falso
+   positivo del 5.85 de enero, que costo tres depositos huerfanos. */
+test("los redondeos chicos no entran al pool de cheques", () => {
+  const diario = [chequeDiario("2026-07-15", 7.00, "ME-00000001998")];
+  const estado = [{ fecha:"2026-07-15", debito:0, credito:3.00, descripcion:"Descripción", fila:2 },
+                  { fecha:"2026-07-16", debito:0, credito:4.00, descripcion:"Descripción", fila:3 }];
+  const h = [];
+  conciliarChequesPaso3(diario, estado, [], null, 0.01, "STG", h, null, false);
+  eq(h.filter(function(x){ return /pendiente por cambiar/.test(x.motivo || ""); }).length, 1,
+     "3.00 + 4.00 no arma el cheque de 7.00: esos centavos son del efectivo");
+  eq(!!estado[0]._chqUsado, false);
+  eq(!!estado[1]._chqUsado, false);
+});
+
+/* Y la que SI dice DEPOSITO sigue funcionando como siempre. */
+test("el cheque acreditado como DEPOSITO clarea igual", () => {
+  const diario = [chequeDiario("2026-07-15", 1068.00, "ME-00000001998")];
+  const estado = [{ fecha:"2026-07-16", debito:0, credito:1068.00, descripcion:"DEPOSITO", fila:2 }];
+  const h = [];
+  conciliarChequesPaso3(diario, estado, [], null, 0.01, "STG", h, null, false);
+  eq(h.filter(function(x){ return /pendiente por cambiar/.test(x.motivo || ""); }).length, 0);
+  eq(!!estado[0]._chqUsado, true);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

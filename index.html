@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.27";
+var APP_VERSION = "2026.10.28";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4251,7 +4251,19 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
 function conciliarChequesPaso3(diario, estado, prevCheques, ultimoDia, tolerancia, banco, hallazgos, poolDescargo, soloSinBanco){
   var VENTANA = 366;
   var ckDiario = (diario||[]).filter(function(x){ return x.debito>0 && !x._chqUsado && esChequeDesc(x.descripcion) && normTxt((x.descripcion||"")+" "+(x.referencia||"")).indexOf("ABORTED")===-1; });
-  var depos = (estado||[]).filter(function(x){ return x.credito>0 && !x._transitoUsado && esDepositoEstado(x.descripcion) && normTxt(x.descripcion).indexOf("ABORTED")===-1; });
+  /* Un cheque tampoco llega siempre como "DEPOSITO": St. Georges deja la fila sin texto y escribe el
+     encabezado "Descripcion". Ya estaba visto para el efectivo, pero ahi son centavos (el redondeo del
+     deposito) y aca puede ser cualquier importe: el cheque de Farid Salmanzadeh por 1,068.00 del
+     15-jul-2026 entro asi. Sin reconocerlo se equivocaba DOS VECES con el mismo movimiento — el cheque
+     del diario salia como "pendiente por cambiar" habiendo clareado, y su credito del estado quedaba
+     huerfano y el Paso 3 lo reportaba como no registrado en el diario.
+     Las sin descripcion CHICAS (hasta TOPE_REDONDEO) se dejan afuera a proposito: son el redondeo del
+     efectivo, y meterlas aca le daria a buscarSubsetSuma centavos de cualquier fecha con los que armar un
+     importe — el falso positivo del 5.85 de enero. */
+  var depos = (estado||[]).filter(function(x){
+    if(!(x.credito>0) || x._transitoUsado || normTxt(x.descripcion).indexOf("ABORTED")!==-1) return false;
+    return esDepositoEstado(x.descripcion) || (sinDescripcion(x.descripcion) && x.credito > TOPE_REDONDEO);
+  });
   if(!ckDiario.length && !(prevCheques && prevCheques.length)) return;
   var chq = [];
   ckDiario.forEach(function(x){
