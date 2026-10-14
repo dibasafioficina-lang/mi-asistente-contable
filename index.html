@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.23";
+var APP_VERSION = "2026.10.24";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2462,6 +2462,22 @@ function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
   }
   return mejor ? mejor.sel : null;
 }
+/* El ACH del camion de un asiento de efectivo al que solo le falta el redondeo.
+   Devuelve el ACH unico cuyo retiro es compatible con el asiento y cuyo resto tiene tamano de redondeo;
+   null si no hay ninguno o si hay mas de uno. Con dos ACH posibles no se toca: elegir uno manda el
+   efectivo al dia equivocado, que es lo que el ciclo del camion existe para evitar.
+   El tope del resto es el mismo de la ventanilla (20): el redondeo mas grande visto en un dia es 12.87. */
+var TOPE_REDONDEO = 20;
+function achDelCamionConResto(pool, d, ventana, tolerancia){
+  var achs = (pool||[]).filter(function(e){
+    if(e.usado || !esBrinks(e.descripcion)) return false;
+    if(e.fecha < d.fecha || distanciaBancaria(d.fecha, e.fecha) > ventana) return false;
+    if(!retiroCompatible(e.descripcion, d.fecha)) return false;
+    var r = Math.round((d.monto - e.monto)*100)/100;
+    return r > tolerancia && r <= TOPE_REDONDEO;
+  });
+  return achs.length === 1 ? achs[0] : null;
+}
 /* El efectivo SE NOMBRA, aunque no diga un metodo de tarjeta: el camion dice Brinks y la ventanilla es
    "DEPOSITO DEL <fecha>" y nada mas. Queda fuera de la pasada 4 de conciliarBancoEstado — si no, un Brinks
    de 38.17 se comeria la remision de tarjeta de 38.17 del mismo dia, que es justo lo que
@@ -4111,6 +4127,37 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             fuente: "Diario Caja General / Diario " + bancoEf + " / Estado de cuenta " + bancoEf });
         });
         poolEstEf.forEach(function(e){ if(e.usado) e.ref.usado = true; });
+        /* El camion entro y falta el redondeo: compensa a medias y viaja SOLO el resto.
+           El redondeo normalmente llega el dia del retiro o el del ACH, pero puede atrasarse meses: el
+           1.92 del efectivo del 20-mar-2026 (166.92) entro por "Descripcion" el 3 de JUNIO, mientras su
+           ACH de 165.00 ya habia entrado el 23-mar. Hasta ahora el Paso 2 era todo o nada —cuadraba el
+           total, lo mandaba entero a transito, o lo sacaba como diferencia por los 166.92 completos— y en
+           los tres casos reclamaba al banco plata que ya tenia.
+           Se exige: UN solo ACH con retiro compatible (el ciclo del camion decide cual, no el importe), y
+           que el resto tenga tamano de redondeo (TOPE_VENTANILLA). Si hubiera dos ACH posibles no se toca:
+           elegir uno manda el efectivo al dia equivocado. El resto viaja como partida propia, asi que el
+           mes siguiente lo busca por 1.92 y no por 166.92. */
+        poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var ach = achDelCamionConResto(candEf, d, Math.max(ventanaDias, 10), tolerancia);
+          if(!ach) return;
+          var resto = Math.round((d.monto - ach.monto)*100)/100;
+          ach.usado = true; d.usado = true;
+          var dsc = String(d.descripcion||"").trim();
+          hallazgos.push({
+            fecha:d.fecha, banco:bancoEf, monto:resto, clase:"en_transito",
+            concepto:dsc, comprobante:refME(d.src.referencia),
+            partes:[{ metodo:"EFECTIVO", monto:resto }],
+            motivo:"el camión entró, falta el redondeo",
+            texto: bancoEf + " " + d.fecha + ": del efectivo de B/ " + fmt(d.monto) + " (\"" + dsc + "\") el camión " +
+                   "YA entró: B/ " + fmt(ach.monto) + " en el ACH del " + ach.fecha +
+                   (fechaRetiroBrinks(ach.descripcion) ? " (retiro del " + fechaRetiroBrinks(ach.descripcion) + ")" : "") +
+                   ". Falta el redondeo del depósito, B/ " + fmt(resto) + ", que el banco todavía no acreditó — puede " +
+                   "tardar meses. Al resumen viaja ese resto, no el total, para que el mes siguiente lo busque por " +
+                   "B/ " + fmt(resto) + "." + refComprobante(d.src.referencia),
+            fuente: "Diario Caja General / Estado de cuenta " + bancoEf
+          });
+        });
         poolDiaEf.forEach(function(d){
           if(d.usado) return;
           var desc = String(d.descripcion||"").trim(), refE = refME(d.src.referencia);

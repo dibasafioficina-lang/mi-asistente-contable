@@ -91,9 +91,9 @@ Llega de tres formas, y ninguna dice "DEPOSITO":
 
 El efectivo de fin de mes es **Brinks + redondeo**, así que hay que reconocer las tres o no tiene contra qué compensar: el del 27 y 28 de feb de 2026 (282.32 + 2,384.88) viajó siete meses en el resumen por este motivo.
 
-### El redondeo no es posterior al ACH
+### El redondeo no se toma prestado de otro asiento
 
-El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres días después, así que el redondeo cae el día del ACH **o antes** — nunca después. Los siete depósitos de efectivo de marzo de 2026 lo confirman:
+El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres días después, así que **normalmente** cae el día del ACH o antes. Los siete depósitos de efectivo de marzo de 2026:
 
 | Asiento | ACH (retiro) | Redondeo | |
 |---|---|---|---|
@@ -106,6 +106,8 @@ El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres d
 
 - `redondeoNoPosteriorAlACH()` lo impide. **No exige mismo día**: eso habría roto el 19-mar y el 24-mar.
 - Es el falso positivo del 5.85 de enero otra vez (armar un importe chico juntando centavos de cualquier fecha). El guard de mismo día quedó en `comboMismoDia` y nunca llegó a esta función — al tocar una, revisar la otra.
+
+**El redondeo propio sí puede atrasarse meses**, así que "no posterior al ACH" vale para *elegir* el redondeo del pool, no como ley del banco: el 1.92 del efectivo del 20-mar entró por "Descripción" el **3 de junio**, cuando su ACH de 165.00 había entrado el 23-mar. Por eso el Paso 2 ya no es todo o nada: `achDelCamionConResto()` reconoce el ACH **único** con retiro compatible cuyo resto tenga tamaño de redondeo (tope 20), informa que el camión entró y arrastra **solo el resto** — antes sacaba una diferencia por los 166.92 completos mientras otro paso ya arrastraba el 1.92, o sea dos relatos de la misma plata.
 
 ### El ACH puede venir consolidado
 

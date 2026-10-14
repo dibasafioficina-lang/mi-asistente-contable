@@ -4762,6 +4762,45 @@ test("sin ACH en la combinación el orden del redondeo no se exige", () => {
   eq(c.length, 2);
 });
 
+/* ── El camion entro y falta el redondeo: viaja solo el resto ─────────────────────────
+   El redondeo normalmente llega el dia del retiro o el del ACH, pero puede atrasarse MESES: el 1.92 del
+   efectivo del 20-mar-2026 (166.92) entro por "Descripcion" el 3 de junio, mientras su ACH de 165.00 ya
+   habia entrado el 23-mar. El Paso 2 era todo o nada —cuadraba el total, lo mandaba entero a transito, o
+   lo sacaba como diferencia por los 166.92 completos— y en los tres casos reclamaba al banco plata que ya
+   tenia; encima otro paso ya arrastraba el 1.92, asi que la misma plata tenia dos relatos.
+   achDelCamionConResto elige el ACH, y solo si es UNICO: con dos posibles no se toca, porque elegir uno
+   manda el efectivo al dia equivocado. */
+function efAsiento(fecha, monto){ return { fecha:fecha, monto:monto, descripcion:"DEPOSITO BRINKS DEL "+fecha, usado:false }; }
+test("el ACH del camión se reconoce cuando solo falta el redondeo (20-mar-2026, 165.00 de 166.92)", () => {
+  const pool = [achBrinks("2026-03-23", 165.00, "220326")];
+  const ach = achDelCamionConResto(pool, efAsiento("2026-03-20", 166.92), 10, 0.01);
+  eq(!!ach, true, "el ACH del 23 es el del efectivo del 20");
+  cerca(ach.monto, 165.00);
+});
+
+/* El guard de unicidad: con dos ACH que dejarian un resto de tamano de redondeo, no se elige. */
+test("con dos ACH posibles no se parte el efectivo", () => {
+  const pool = [achBrinks("2026-03-23", 165.00, "220326"), achBrinks("2026-03-23", 166.00, "220326")];
+  eq(achDelCamionConResto(pool, efAsiento("2026-03-20", 166.92), 10, 0.01), null,
+     "dos candidatos: no se adivina cuál");
+});
+
+/* El guard del retiro: aca SI se exige, porque esto COMPENSA (consume el ACH). Un ACH cuyo retiro es muy
+   posterior al asiento no es de este efectivo — es el ciclo del camion el que decide, no el importe. */
+test("un ACH con retiro incompatible no es el del efectivo", () => {
+  const pool = [achBrinks("2026-03-30", 165.00, "300326")];   // retiro diez dias despues del asiento
+  eq(achDelCamionConResto(pool, efAsiento("2026-03-20", 166.92), 10, 0.01), null,
+     "el retiro no corresponde al asiento");
+});
+
+/* Y el guard del tamano: si lo que falta no es un redondeo sino plata de verdad, no se parte. Un resto
+   grande significa que ese ACH no es el de este asiento, o que falta otro movimiento entero. */
+test("si lo que falta no tiene tamaño de redondeo, no se parte", () => {
+  const pool = [achBrinks("2026-03-23", 100.00, "220326")];   // faltarian 66.92, no es redondeo
+  eq(achDelCamionConResto(pool, efAsiento("2026-03-20", 166.92), 10, 0.01), null,
+     "66.92 no es el redondeo de un depósito");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
