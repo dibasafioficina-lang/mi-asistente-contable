@@ -4801,6 +4801,58 @@ test("si lo que falta no tiene tamaño de redondeo, no se parte", () => {
      "66.92 no es el redondeo de un depósito");
 });
 
+/* ── Las lineas del efectivo no las consume el cotejo general ───────────────────────────
+   El cotejo general del Paso 2 (depositos, cheques, tarjetas) y la seccion de efectivo comparten el pool de
+   creditos, y el general corre primero. En junio de 2026 una linea de 1.92 menos al arrancar le hizo armar
+   otra combinacion y se llevo los SIETE ACH de Brinks y redondeos de principio de mes: el efectivo del 1,
+   2, 3 y 6 de junio llego a su turno sin nada con que cuadrar y salieron cuatro diferencias FALSAS, todas
+   con su plata completa en el banco.
+   Un ACH de Brinks es efectivo del camion por definicion. El Paso 3 ya lo separa asi —esEfectivoConNombre
+   lo deja fuera de la pasada 4, "si no, un Brinks de 38.17 se comeria la remision de tarjeta de 38.17 del
+   mismo dia"—; esto es lo mismo, en el Paso 2.
+   El redondeo NO se reserva, y es a proposito: reservarlo le quitaba al cotejo general lineas que usa para
+   armar los acumulados de fin de mes, y el Yappy de 4,198.23 de mayo dejaba de cuadrar. */
+test("un ACH de Brinks queda reservado para el efectivo", () => {
+  eq(reservadoParaEfectivo("Ach De Brinks Panama, S.A. - D08563bsafe 270326 David", 330.00), true);
+  eq(reservadoParaEfectivo("Ach De Brink S Panama S.A. - D08563bsafe 020626 David", 30.00), true);
+});
+test("el redondeo y los demás créditos siguen disponibles para el cotejo general", () => {
+  eq(reservadoParaEfectivo("Descripción", 1.92), false, "el redondeo no se reserva: el Yappy acumulado lo necesita");
+  eq(reservadoParaEfectivo("DEPOSITO", 500.00), false);
+  eq(reservadoParaEfectivo("Remision Clave 016005605", 253.82), false);
+  eq(reservadoParaEfectivo("Remisión V/Mc 016005605 Liq. No. 3884415", 1221.64), false);
+});
+
+/* ── El resto de un redondeo tiene ventana larga, y la conserva entre meses ──────────────────
+   El banco acredita el redondeo cuando quiere: el 1.92 del 20-mar-2026 entro el 3 de junio, a 75 dias
+   habiles — cinco veces la ventana del efectivo. Y el motivo tiene que CONSERVARSE en cada salto: con el
+   motivo perdido en abril, en junio la partida volvia a la ventana de 15 dias y nunca alcanzaba su linea. */
+test("el resto de un redondeo lleva ventana larga", () => {
+  eq(ventanaTransito({ concepto:"DEPOSITO BRINKS DEL 20/03/2026", restoRedondeo:true }), 150);
+  eq(ventanaTransito({ concepto:"DEPOSITO BRINKS DEL 20/03/2026" }), 15, "el efectivo normal no la recibe");
+});
+test("el motivo del resto de redondeo se conserva al volver a viajar", () => {
+  const tr = [{ fecha:"2026-03-20", banco:"STG", monto:1.92, sentido:"credito", restoRedondeo:true,
+                concepto:"DEPOSITO BRINKS DEL 20/03/2026", comprobante:"ME-00000001895" }];
+  const h = paso0(tr, [], [], null, 7, 0.01);          // sin estado: no puede compensar, vuelve a viajar
+  const p = h.filter(function(x){ return esEnTransito(x) && Math.abs(x.monto - 1.92) < 0.01; });
+  eq(p.length, 1);
+  eq(/falta el redondeo/i.test(p[0].motivo || ""), true,
+     "el motivo viaja: es lo que le da la ventana larga el mes siguiente");
+});
+
+/* Y la marca se LEE del motivo del resumen, no del importe, para que la ventana larga no se le regale a
+   cualquier deposito de efectivo chico. */
+test("la marca del resto de redondeo se lee de la columna Motivo", () => {
+  const rows = [["Fecha","Banco","Monto","Concepto","Comprobante","Motivo","Crédito a Caja General","Desglose"],
+                ["2026-03-20","STG",1.92,"DEPOSITO BRINKS DEL 20/03/2026","ME-00000001895","falta el redondeo — aún pendiente","pendiente",""],
+                ["2026-03-21","STG",1.92,"DEPOSITO BRINKS DEL 21/03/2026","ME-00000001896","aún pendiente de compensar","pendiente",""]];
+  const t = parseTransitoPrevio(rows);
+  eq(t.length, 2);
+  eq(t[0].restoRedondeo, true, "la que el app marcó");
+  eq(t[1].restoRedondeo, false, "una pendiente cualquiera del mismo importe, no");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

@@ -109,6 +109,16 @@ El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres d
 
 **El redondeo propio sí puede atrasarse meses**, así que "no posterior al ACH" vale para *elegir* el redondeo del pool, no como ley del banco: el 1.92 del efectivo del 20-mar entró por "Descripción" el **3 de junio**, cuando su ACH de 165.00 había entrado el 23-mar. Por eso el Paso 2 ya no es todo o nada: `achDelCamionConResto()` reconoce el ACH **único** con retiro compatible cuyo resto tenga tamaño de redondeo (tope 20), informa que el camión entró y arrastra **solo el resto** — antes sacaba una diferencia por los 166.92 completos mientras otro paso ya arrastraba el 1.92, o sea dos relatos de la misma plata.
 
+### Las líneas del efectivo no las toca el cotejo general
+
+El cotejo general del Paso 2 (depósitos, cheques, tarjetas) y la sección de efectivo comparten el pool de créditos, y el general corre primero. Una línea menos al arrancar le hace armar otra combinación, y arrastra: en junio de 2026, quitarle **una** línea de 1.92 le hizo llevarse los **siete** ACH de Brinks y redondeos de principio de mes, y el efectivo del 1, 2, 3 y 6 de junio salió como **cuatro diferencias falsas** teniendo su plata completa en el banco.
+
+- `reservadoParaEfectivo()` esconde del cotejo general los **ACH de Brinks**: son efectivo del camión por definición, así que ni un cheque ni una tarjeta pueden tomarlos. El Paso 3 ya lo separa así (`esEfectivoConNombre` lo deja fuera de su pasada 4, *"si no, un Brinks de 38.17 se comería la remisión de tarjeta de 38.17 del mismo día"*).
+- **El redondeo NO se reserva**, y es a propósito: reservarlo le quita al cotejo general líneas que usa para armar los acumulados de fin de mes, y el Yappy de 4,198.23 de mayo dejaba de cuadrar (5 rojas en el Paso 3).
+- Los objetos del pool se comparten, así que `usado` sigue siendo global: la reserva esconde, no duplica.
+
+Con los ACH reservados, el resto de un redondeo puede recibir **ventana larga** (150 días hábiles) sin costo: el 1.92 del 20-mar compensa el 3-jun y junio se mantiene en cero rojas. Esa ventana la da el **motivo** que el resumen conserva salto a salto, no el importe — si se re-rotula como una pendiente cualquiera, vuelve a los 15 días y nunca llega.
+
 ### El ACH puede venir consolidado
 
 Brinks recoge el efectivo de Caja General **junto con plata que no pasa por Caja General** —la caja menuda que los dueños prestan, registrada solo en el diario del banco (`PDN-…`)— y el banco acredita todo en una línea:

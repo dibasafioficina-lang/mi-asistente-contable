@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.24";
+var APP_VERSION = "2026.10.25";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2462,6 +2462,20 @@ function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
   }
   return mejor ? mejor.sel : null;
 }
+/* Las lineas del banco que son del EFECTIVO y nadie mas puede consumir.
+   El cotejo general del Paso 2 (depositos, cheques, tarjetas) y la seccion de efectivo comparten el pool
+   de creditos, y el general corre primero: en junio de 2026 una linea menos al arrancar le hizo encontrar
+   otra combinacion y se llevo los SIETE ACH de Brinks y redondeos de principio de mes, dejando sin nada
+   con que cuadrar al efectivo del 1, 2, 3 y 6 de junio. Cuatro diferencias falsas por una linea de 1.92.
+   Un ACH de Brinks es efectivo del camion por definicion, y el redondeo chico que lo acompana tambien, asi
+   que ni un cheque ni una tarjeta deberian poder tomarlos. El Paso 3 ya lo resuelve asi: esEfectivoConNombre
+   deja el efectivo fuera de la pasada 4 de conciliarBancoEstado, "si no, un Brinks de 38.17 se comeria la
+   remision de tarjeta de 38.17 del mismo dia". Esto es lo mismo, en el Paso 2.
+   El redondeo se reserva solo si es chico: una linea sin descripcion por un importe grande no es redondeo
+   (el 1-jun-2026 hay dos, de 470.00 y 73.00, que son descargos del transito). */
+function reservadoParaEfectivo(desc, monto){
+  return esBrinks(desc);
+}
 /* El ACH del camion de un asiento de efectivo al que solo le falta el redondeo.
    Devuelve el ACH unico cuyo retiro es compatible con el asiento y cuyo resto tiene tamano de redondeo;
    null si no hay ninguno o si hay mas de uno. Con dos ACH posibles no se toca: elegir uno manda el
@@ -3545,7 +3559,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       if(dep._descargo) return;
       // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
       if(usarDetalleCheques && (esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito))) return;
-      var pool = bancoCred[banco];
+      // Comparte los objetos con bancoCred, asi que `usado` sigue siendo global: solo esconde del cotejo
+      // general las lineas que son del efectivo (ver reservadoParaEfectivo).
+      var pool = bancoCred[banco].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto); });
       var objetivo = dep.credito;
       // 0) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo: no tiene
       // contrapartida propia en el estado, porque las lineas que le corresponden ya las consumio el Paso 0
@@ -3823,11 +3839,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
           if(b2===banco || otro) return;
-          var c = buscarCombinacion(bancoCred[b2], dep.fecha, objetivo, ventanaDias, tolerancia);
-          if(c){ comboOtro = {banco:b2, idxs:c}; otro = b2; }
+          var pool2 = bancoCred[b2].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto); });
+          var c = buscarCombinacion(pool2, dep.fecha, objetivo, ventanaDias, tolerancia);
+          if(c){ comboOtro = {banco:b2, idxs:c, pool:pool2}; otro = b2; }
         });
         if(otro){
-          comboOtro.idxs.forEach(function(i){ bancoCred[otro][i].usado = true; });
+          comboOtro.idxs.forEach(function(i){ comboOtro.pool[i].usado = true; });
           hallazgos.push({
             fecha:dep.fecha, banco:banco, monto:objetivo, clase:"diff",
             texto: "Cheque de B/ " + fmt(objetivo) + " (" + dep.fecha + ") que Caja General asignó a " + banco +
@@ -8371,6 +8388,11 @@ function parseTransitoPrevio(rows){
   // Desglose por medio de pago de un deposito de fin de mes ("CHEQUE 1463.08 + VISA 1124.69 + CLAVE 983.83"):
   // el descargo suele asentarse asi, una linea por medio, y con el total solo no se lo puede reconocer.
   var cDes=colIdx(h,"Desglose");
+  /* El MOTIVO con que el mes pasado cerro la partida. Se usa para una sola cosa: reconocer el resto de un
+     redondeo cuyo ACH ya compenso ("el camion entro, falta el redondeo"), que necesita una ventana mucho
+     mas larga — el 1.92 del 20-mar-2026 entro el 3 de junio, a 75 dias habiles. Se lee del motivo y no del
+     importe para que la ventana larga la reciban SOLO las partidas que la app marco asi. */
+  var cMot=colIdx(h,"Motivo");
   var mesesOK = cF>=0 ? mesesInequivocos(rows, cF, hIdx+1) : [];
   var out = [];
   for(var r=hIdx+1;r<rows.length;r++){
@@ -8392,6 +8414,7 @@ function parseTransitoPrevio(rows){
     var sentido = (rowTxt.indexOf("DEBITO")!==-1 || /^PAY/i.test(comprobante)) ? "debito" : "credito";
     out.push({ fecha:iso, banco: banco, monto:monto, concepto: concepto,
                comprobante: comprobante, sentido: sentido, creditoCG: leerCreditoCG(cCG>=0?row[cCG]:null),
+               restoRedondeo: /FALTA EL REDONDEO/.test(normTxt(cMot>=0 ? String(row[cMot]||"") : "")),
                partes: leerDesglose(cDes>=0?row[cDes]:null, monto) });
   }
   // Un resumen bajado con una version anterior no trae la columna: el Paso 0 lo avisa.
@@ -8476,6 +8499,11 @@ function primeraFecha(arr){
    Las ventanas van en días HÁBILES del banco (ver distanciaBancaria). */
 function ventanaTransito(item){
   var c = normTxt((item && item.concepto) || "");
+  /* El resto de un redondeo cuyo ACH ya compenso: el banco lo acredita cuando quiere y se vio tardar 75
+     dias habiles (el 1.92 del 20-mar-2026, acreditado el 3 de junio). La ventana larga es segura aca y no
+     para el efectivo entero: son centavos, su ACH ya esta consumido —asi que no puede engancharse con un
+     deposito— y la marca la pone la app, no el importe. */
+  if(item && item.restoRedondeo) return 150;
   if(/CHEQUE|CK|CIRCULACION/.test(c)) return 90;   // ~4 meses de calendario
   if(/VISA|V\/MC|CLAVE|TARJETA/.test(c)) return 12;
   return 15;                                       // efectivo, ventanilla, ACH, Yappy
@@ -8532,7 +8560,8 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
         fechasRaras.push({banco:banco, item:t, iniEstado:iniEstado});
       }
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
-              sentido:t.sentido, creditoCG:t.creditoCG, reingresada:t.reingresada, partes:t.partes, banco:banco, usado:false, pool:poolDe(t)};
+              sentido:t.sentido, creditoCG:t.creditoCG, reingresada:t.reingresada, partes:t.partes,
+              restoRedondeo:t.restoRedondeo, banco:banco, usado:false, pool:poolDe(t)};
     });
     // Paso A: cada partida contra su pool, hacia adelante. Primero 1:1; si no aparece, una combinación de
     // líneas DEL MISMO DÍA, porque cuando el banco parte un depósito lo acredita el mismo día (el depósito
@@ -9079,8 +9108,14 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
     var cs = ch.corteSugerido;
     hallazgos.push({ fecha:ch.fechaOrig, banco:ch.banco, monto:ch.monto, clase:"en_transito",
       concepto:ch.concepto, comprobante:ch.comprobante, creditoCG:ch.creditoCG, reingresada:ch.reingresada,
-      partes:ch.partes, motivo:"aún pendiente de compensar", corteSugerido:cs,
-      texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") de un período anterior aún NO compensó este mes."+
+      partes:ch.partes, corteSugerido:cs,
+      /* El motivo de un resto de redondeo se CONSERVA, porque es lo que le da su ventana larga: si se
+         re-rotula como una pendiente cualquiera, al siguiente salto vuelve a los 15 dias y nunca llega a
+         su acreditacion. El 1.92 lo mostro: con el motivo perdido en abril, en junio ya no la alcanzaba. */
+      motivo: ch.restoRedondeo ? "falta el redondeo — aún pendiente" : "aún pendiente de compensar",
+      texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+")"+
+            (ch.restoRedondeo ? " es el redondeo que le falta a un depósito cuyo camión YA compensó, y el banco"+
+                                " todavía no lo acreditó" : "")+" de un período anterior aún NO compensó este mes."+
             (cs ? " Puede estar PARTIDA entre dos meses: el banco acreditó un ACH de Brinks de B/ "+fmt(cs.monto)+
                   " el "+cs.fecha+(cs.retiro?" (retiro del "+cs.retiro+")":"")+
                   (cs.cicloNormal?"":", que queda FUERA del ciclo normal de retiro al día siguiente — confirmá que ese ACH es de este efectivo")+
