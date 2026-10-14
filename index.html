@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.25";
+var APP_VERSION = "2026.10.26";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2965,6 +2965,28 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     var combo = buscarCombinacion(cand, e.fecha, e.monto, ventanaDias, tolerancia,
                                   esAchDesc(e.descripcion) ? null : "atras");
     if(combo){ combo.forEach(function(i){ cand[i].usado=true; }); e.usado=true; }
+  });
+  /* ---- 2b) El cobro a un tercero puede registrarse DESPUES de que el banco lo acredita ----
+     Las pasadas 1 y 2 filtran por sentido: "adelante" descarta creditos anteriores al asiento ("el banco
+     no acredita antes del deposito") y "atras" descarta asientos posteriores al credito. El supuesto vale
+     para un deposito propio —nadie deposita antes de registrarlo— pero NO para un cobro que llega por
+     iniciativa de quien paga: el banco acredita cuando el tercero transfiere y contabilidad lo registra
+     cuando se entera. El 232.15 de Tejar lo acredito St. Georges el 21-jul-2026 y el asiento RCP00248 es
+     del 22 (digitado el 23): quedo como "no aparece registrado en el diario" teniendo su asiento exacto a
+     un dia. En el mismo mes, el de 2,000.00 de Tejar SI cuadro, porque su RCP00252 es del mismo dia.
+     El discriminante es la referencia: el navegador del banco usa ME- para los asientos de caja, PAY para
+     los pagos y RCP (fuente AR-PAY) para los recibos de COBRO. Solo esos reciben la excusa del sentido.
+     Guards: 1:1 por el importe EXACTO —nunca una combinacion, que es lo que podria armar un falso
+     positivo— y candidato UNICO: con dos recibos del mismo importe en la ventana no se adivina cual. */
+  function esReciboDeCobro(d){ return /^RCP/i.test(String(d.referencia == null ? "" : d.referencia).trim()); }
+  poolEstado.forEach(function(e){
+    if(e.usado) return;
+    var cand = poolDiario.filter(function(d){
+      return !d.usado && esReciboDeCobro(d) && Math.abs(montoConc(d) - e.monto) <= tolerancia &&
+             distanciaBancaria(e.fecha, d.fecha) <= ventanaDias;
+    });
+    if(cand.length !== 1) return;
+    cand[0].usado = true; e.usado = true;
   });
   /* ---- 3) GRUPO contra GRUPO: el mismo total repartido de otra forma ----
      Las pasadas 1 y 2 prueban un asiento contra varios creditos y un credito contra varios asientos, pero

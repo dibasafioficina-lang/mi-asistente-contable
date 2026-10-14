@@ -4853,6 +4853,59 @@ test("la marca del resto de redondeo se lee de la columna Motivo", () => {
   eq(t[1].restoRedondeo, false, "una pendiente cualquiera del mismo importe, no");
 });
 
+/* ── El cobro a un tercero puede registrarse DESPUES de que el banco lo acredita ──────────
+   El Paso 3 filtra por sentido: "adelante" descarta creditos anteriores al asiento ("el banco no acredita
+   antes del deposito") y "atras" descarta asientos posteriores al credito. El supuesto vale para un
+   deposito propio —nadie deposita antes de registrarlo— pero NO para un cobro que llega por iniciativa de
+   quien paga: el banco acredita cuando el tercero transfiere y contabilidad lo registra cuando se entera.
+   El 232.15 de Tejar lo acredito St. Georges el 21-jul-2026 y el asiento RCP00248 es del 22 (digitado el
+   23): salia como "no aparece registrado en el diario" teniendo su asiento exacto a UN dia. En el mismo
+   mes el de 2,000.00 de Tejar si cuadraba, porque su RCP00252 es del mismo dia — la unica diferencia era
+   la fecha.
+   El discriminante es la referencia: el navegador del banco usa ME- para los asientos de caja, PAY para
+   los pagos y RCP (fuente AR-PAY) para los recibos de COBRO. */
+function reciboCobro(fecha, monto, ref){
+  return { fecha:fecha, debito:monto, credito:0, referencia:ref, fila:1,
+           descripcion:"TEJAR, S.A - Pago:" + ref + " CASH" };
+}
+function credTercero(fecha, monto, fila){
+  return { fecha:fecha, debito:0, credito:monto, fila:fila||2,
+           descripcion:"Pago De Cxc Y Cxp De Tejar A Petty" };
+}
+test("el cobro de un tercero cuadra con su recibo del día siguiente (232.15 de Tejar, 21-jul-2026)", () => {
+  const c = conciliarBancoEstado([reciboCobro("2026-07-22", 232.15, "RCP00248")],
+                                 [credTercero("2026-07-21", 232.15)], 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 0, "el recibo del 22 explica el crédito del 21");
+  eq(c.faltanEnBanco.length, 0, "y el recibo tampoco queda suelto en el diario");
+});
+
+/* El guard de unicidad: con dos recibos del mismo importe en la ventana no se elige. Emparejar el
+   equivocado deja huerfano al que de verdad le tocaba, que es el falso positivo de siempre. */
+test("con dos recibos del mismo importe no se empareja", () => {
+  const c = conciliarBancoEstado([reciboCobro("2026-07-22", 232.15, "RCP00248"),
+                                  reciboCobro("2026-07-23", 232.15, "RCP00249")],
+                                 [credTercero("2026-07-21", 232.15)], 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 1, "dos candidatos: no se adivina cuál");
+});
+
+/* Y el guard de fondo: la excusa del sentido es SOLO para los recibos de cobro. Un asiento de caja (ME-)
+   posterior al credito sigue sin explicarlo — ahi el supuesto es correcto: el deposito se registra
+   cuando se hace, no despues de que el banco lo acredita. */
+test("un asiento de caja posterior al crédito no recibe la excusa del sentido", () => {
+  const dep = { fecha:"2026-07-22", debito:232.15, credito:0, referencia:"ME-00000002001", fila:1,
+                descripcion:"DEPOSITO POR TARJETA CLAVE STG DEL 22/07/2026" };
+  const c = conciliarBancoEstado([dep], [credTercero("2026-07-21", 232.15)], 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 1, "solo los RCP pueden ir después del banco");
+});
+
+/* Y no se empareja por aproximación: 1:1 por el importe exacto, nunca una combinación. */
+test("el recibo de cobro no se empareja por una suma de importes", () => {
+  const c = conciliarBancoEstado([reciboCobro("2026-07-22", 200.00, "RCP00248"),
+                                  reciboCobro("2026-07-22", 32.15, "RCP00249")],
+                                 [credTercero("2026-07-21", 232.15)], 7, 0.01, null);
+  eq(c.faltanEnDiario.length, 1, "200.00 + 32.15 no arma el crédito: solo 1:1 exacto");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

@@ -160,6 +160,20 @@ El pool de compensación del Paso 0 son **solo los créditos del estado del mes 
 - Cuando queda **un solo** ACH de Brinks que podría ser la parte gruesa, el hallazgo **propone** el desglose a anotar y nombra la fecha de retiro. Solo informa: no consume la línea ni mueve plata.
 - La sugerencia **no exige** `retiroCompatible`, y es a propósito: el efectivo del 27-may se retiró el 1-jun, cinco días hábiles después, porque el camión no pasa todos los días al cerrar el mes. Ese margen no se puede aflojar para *compensar* —hace intercambiables los ACH, que es lo que `ACH_ANTICIPO_MAX` evita—, pero sugerir no compensa, así que el texto advierte cuando el retiro cae fuera del ciclo X+1 y lo confirma quien concilia.
 
+### El cobro a un tercero se registra después de que el banco lo acredita
+
+El Paso 3 filtra por **sentido**: `"adelante"` descarta créditos anteriores al asiento (*"el banco no acredita antes del depósito"*) y `"atras"` descarta asientos posteriores al crédito. El supuesto vale para un depósito propio —nadie deposita antes de registrarlo— pero **no** para un cobro que llega por iniciativa de quien paga: el banco acredita cuando el tercero transfiere y contabilidad lo registra cuando se entera.
+
+```
+21-jul  232.15  Pago De Cxc Y Cxp De Tejar A Petty      (estado de cuenta)
+22-jul  232.15  TEJAR, S.A - Pago:RCP00248 CASH         (diario, digitado el 23)
+```
+
+Salía como *"no aparece registrado en el diario"* teniendo su asiento exacto a **un día**. La prueba por contraste está en el mismo mes: el de **2,000.00** de Tejar sí cuadraba, porque su `RCP00252` es del mismo día — la única diferencia era la fecha.
+
+- El discriminante es la **referencia**, no el texto: el navegador del banco usa `ME-` (MAN-ENTRY) para los asientos de caja, `PAY` (AP-PAY) para los pagos y **`RCP` (AR-PAY) para los recibos de cobro**. Solo esos reciben la excusa del sentido.
+- La pasada 2b exige **1:1 por el importe exacto** (nunca una combinación, que es lo que armaría un falso positivo) y **candidato único**: con dos recibos del mismo importe en la ventana no se adivina cuál.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.
