@@ -113,6 +113,21 @@ El redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres d
 
 **El redondeo propio sí puede atrasarse meses**, así que "no posterior al ACH" vale para *elegir* el redondeo del pool, no como ley del banco: el 1.92 del efectivo del 20-mar entró por "Descripción" el **3 de junio**, cuando su ACH de 165.00 había entrado el 23-mar. Por eso el Paso 2 ya no es todo o nada: `achDelCamionConResto()` reconoce el ACH **único** con retiro compatible cuyo resto tenga tamaño de redondeo (tope 20), informa que el camión entró y arrastra **solo el resto** — antes sacaba una diferencia por los 166.92 completos mientras otro paso ya arrastraba el 1.92, o sea dos relatos de la misma plata.
 
+### El efectivo del Paso 0 también es ACH + redondeo en días distintos
+
+`comboMismoDia` no junta líneas de fechas distintas, y su restricción existe por una razón buena: sin ella un importe chico se arma con centavos de cualquier fecha — el falso positivo del 5.85 de enero. Pero el efectivo de un día **es** un ACH más su redondeo, y esas piezas caen en días distintos:
+
+```
+31-mar  DEPOSITO BRINKS DEL 31/03/2026  324.32  =  320.00  (ACH del 2-abr, retiro 01/04)
+                                                 +    4.32  (redondeo del 1-abr)
+```
+
+El redondeo entró el día del **retiro** y el ACH dos días después — el ciclo del camión. El Paso 2 ya sabía todo esto (`redondeoNoPosteriorAlACH`); al Paso 0 no había llegado, así que la partida viajaba desde marzo.
+
+`comboAchConRedondeo()` lo resuelve con cuatro guards: **un solo** ACH con retiro compatible, el redondeo **no posterior** a su ACH, suma **exacta**, y solución **única** tanto entre los redondeos como entre los ACH.
+
+Un detalle que costó un test mal hecho: para probar la ambigüedad entre dos ACH, **los dos restos** tienen que ser de tamaño de redondeo (≤ `TOPE_REDONDEO`). Con un resto mayor, ese ACH no tiene con qué completarse y no hay ambigüedad que probar.
+
 ### Las líneas del efectivo no las toca el cotejo general
 
 El cotejo general del Paso 2 (depósitos, cheques, tarjetas) y la sección de efectivo comparten el pool de créditos, y el general corre primero. Una línea menos al arrancar le hace armar otra combinación, y arrastra: en junio de 2026, quitarle **una** línea de 1.92 le hizo llevarse los **siete** ACH de Brinks y redondeos de principio de mes, y el efectivo del 1, 2, 3 y 6 de junio salió como **cuatro diferencias falsas** teniendo su plata completa en el banco.

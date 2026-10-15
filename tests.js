@@ -5041,6 +5041,64 @@ test("un crédito normal no alcanza partidas de hace cinco meses", () => {
   eq(r.pendientes.length, 1, "sin señal de devolución, la ventana del tránsito manda");
 });
 
+/* ── El efectivo del Paso 0 es ACH + redondeo, y caen en dias distintos ───────────────
+   comboMismoDia no junta lineas de fechas distintas, y su restriccion existe por una razon buena: sin ella
+   un importe chico se arma con centavos de cualquier fecha — el falso positivo del 5.85 de enero. Pero el
+   efectivo de un dia ES un ACH mas su redondeo, y esas piezas caen en dias distintos: el 324.32 del
+   31-mar-2026 son 320.00 del ACH del 2-abr (retiro 01/04) mas 4.32 de redondeo del 1-abr. El redondeo
+   entro el dia del RETIRO y el ACH dos dias despues, que es el ciclo del camion.
+   El Paso 2 ya sabia esto (redondeoNoPosteriorAlACH); al Paso 0 no habia llegado. */
+function trEfectivo(fecha, monto, ref){
+  return { fecha:fecha, banco:"STG", monto:monto, sentido:"credito", comprobante:ref,
+           concepto:"DEPOSITO BRINKS DEL " + fecha };
+}
+function credAch(fecha, monto, retiro){
+  return { fecha:fecha, debito:0, credito:monto,
+           descripcion:"Ach De Brinks Panama, S.A. - D08563bsafe " + retiro + " David" };
+}
+function credRed(fecha, monto){ return { fecha:fecha, debito:0, credito:monto, descripcion:"Descripción" }; }
+test("el efectivo cuadra con su ACH y su redondeo de días distintos (324.32 del 31-mar-2026)", () => {
+  const tr = [trEfectivo("2026-03-31", 324.32, "ME-00000001906")];
+  const est = [credRed("2026-04-01", 2.43), credRed("2026-04-01", 31.40), credRed("2026-04-01", 4.32),
+               credAch("2026-04-01", 295.00, "310326"), credAch("2026-04-02", 320.00, "010426")];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.compensadas.length, 1, "320.00 del 2-abr + 4.32 del 1-abr = 324.32");
+  eq(r.pendientes.length, 0);
+});
+
+/* El guard del orden: el redondeo acompana a su ACH, asi que no puede ser POSTERIOR. Si lo fuera, se
+   estaria tomando el redondeo de un deposito que todavia no ocurrio. */
+test("el redondeo posterior al ACH no completa el efectivo", () => {
+  const tr = [trEfectivo("2026-03-31", 324.32, "ME-00000001906")];
+  const est = [credAch("2026-04-01", 320.00, "310326"), credRed("2026-04-03", 4.32)];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1, "el redondeo del 3 no es de este ACH del 1");
+});
+
+/* El guard de unicidad entre ACH: con dos que cuadren no se elige. Tomar el equivocado deja huerfano al
+   que de verdad le tocaba, que es el problema del ACH del retiro del 13-may. */
+test("con dos ACH que cuadran no se parte el efectivo", () => {
+  const tr = [trEfectivo("2026-03-31", 324.32, "ME-00000001906")];
+  /* Dos detalles del armado, que costaron un test mal hecho:
+     - las piezas van en dias DISTINTOS, porque si no comboMismoDia las cuadra antes y no se ejercita este
+       guard;
+     - los DOS restos tienen que ser de tamano de redondeo (<= 20). Con un resto de 24.32 el segundo ACH
+       no tiene con que completarse y no hay ambiguedad que probar. */
+  const est = [credRed("2026-04-01", 4.32), credRed("2026-04-01", 14.32),
+               credAch("2026-04-02", 320.00, "010426"), credAch("2026-04-03", 310.00, "020426")];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1, "320+4.32 y 310+14.32 dan lo mismo: no se adivina");
+});
+
+/* Y el guard del tamano: una linea sin descripcion GRANDE no es redondeo (puede ser un cheque, ver
+   conciliarChequesPaso3), asi que no completa un ACH. */
+test("una línea sin descripción grande no hace de redondeo", () => {
+  const tr = [trEfectivo("2026-03-31", 420.00, "ME-00000001906")];
+  const est = [credRed("2026-04-01", 100.00), credAch("2026-04-02", 320.00, "010426")];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1, "100.00 no es el redondeo de un depósito");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

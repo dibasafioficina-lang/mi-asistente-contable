@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.29";
+var APP_VERSION = "2026.10.30";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2461,6 +2461,35 @@ function combinacionMasCercana(pool, fecha, objetivo, ventanaDias, tolerancia){
     }
   }
   return mejor ? mejor.sel : null;
+}
+/* El efectivo de un dia es ACH de Brinks + redondeo, y esas dos piezas caen en dias DISTINTOS.
+   comboMismoDia no las junta —su restriccion de dia existe por una razon buena: sin ella un importe chico
+   se arma con centavos de cualquier fecha, que es el falso positivo del 5.85 de enero— asi que el efectivo
+   necesita su propio intento. El 324.32 del 31-mar-2026 son 320.00 del ACH del 2-abr (retiro 01/04) mas
+   4.32 de redondeo del 1-abr: el redondeo entro el dia del RETIRO y el ACH dos dias despues, que es el
+   ciclo del camion. El Paso 2 ya sabia todo esto (redondeoNoPosteriorAlACH); al Paso 0 no habia llegado.
+   Guards: UN solo ACH con retiro compatible, el redondeo no posterior a su ACH, suma exacta, y solucion
+   UNICA tanto entre los redondeos como entre los ACH — con dos ACH que cuadren no se adivina cual. */
+function comboAchConRedondeo(pool, fecha, objetivo, ventanaDias, tolerancia){
+  var achs = [], reds = [];
+  for(var i=0;i<pool.length;i++){
+    var o = pool[i];
+    if(o.usado || o.fecha < fecha || distanciaBancaria(fecha, o.fecha) > ventanaDias) continue;
+    if(esBrinks(o.desc)){ if(retiroCompatible(o.desc, fecha)) achs.push(i); }
+    else if(sinDescripcion(o.desc) && o.monto <= TOPE_REDONDEO) reds.push(i);
+  }
+  if(!achs.length || !reds.length) return null;
+  var sols = [];
+  achs.forEach(function(ai){
+    var falta = Math.round((objetivo - pool[ai].monto)*100)/100;
+    if(falta <= tolerancia) return;                        // el ACH solo ya lo probo el 1:1
+    var cand = reds.filter(function(ri){ return pool[ri].fecha <= pool[ai].fecha; });
+    if(!cand.length) return;
+    var ss = solucionesSuma(cand.map(function(ri){ return pool[ri].monto; }), falta, tolerancia, 3, 2);
+    if(!ss || ss.length !== 1) return;
+    sols.push([ai].concat(ss[0].map(function(k){ return cand[k]; })));
+  });
+  return sols.length === 1 ? sols[0] : null;
 }
 /* La DEVOLUCION de un deposito mal enviado la declara el banco, no el asiento.
    Un deposito que se envio a la cuenta equivocada puede tardar MESES en volver, y mientras tanto la
@@ -8636,6 +8665,9 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       var vent = ventanaTransito(ch);
       var combo = buscarSubsetSuma(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 1, "adelante");
       if(!combo) combo = comboMismoDia(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 3);
+      // Y el efectivo, que es ACH + redondeo en dias distintos (ver comboAchConRedondeo).
+      if(!combo && /EFECTIVO|BRINK|VENTANILLA/.test(normTxt(ch.concepto)))
+        combo = comboAchConRedondeo(ch.pool, ch.fecha, ch.monto, vent, tolerancia);
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
     /* Paso A2: la partida compenso POR PARTES, no de una vez.
