@@ -194,6 +194,15 @@ Pero el recibo del 15 se llevó el crédito del **22**, el del 22 el del **30**,
 - Es el mismo problema del ACH del retiro del 13-may: importes intercambiables y uno se va al día equivocado. `combinacionMasCercana` ya elegía por distancia mínima; ese criterio **nunca había llegado** a `buscarCombinacion`.
 - La cercanía decide **entre** candidatos del mismo importe; no afloja la ventana ni el sentido.
 
+### La devolución de un depósito mal enviado la declara el banco
+
+Un depósito enviado a la cuenta equivocada puede tardar **meses** en volver, y mientras tanto la partida viaja en el resumen. El 27-may-2026 St. Georges devolvió **11.70 en una sola línea** (`"Blvd A Petty Dev De Dep Mal Enviado"`) que son **dos partidas de 5.85**: la del 27-may y la del **6-dic-2025**, a 172 días hábiles — once veces la ventana del tránsito.
+
+- La señal se lee del **banco**, no del asiento: uno dice *"REE DEPOSITO DE BLVD ENVIADO POR ERROR"* pero el otro dice solo *"deposito en transito"*. `esDevolucionEstado()` la reconoce y el Paso B usa `VENT_DEVOLUCION` (250 días hábiles).
+- A cambio se exige **solución única**: con una ventana de un año, varias partidas chicas armarían el importe de muchas maneras.
+
+**Esto no cierra el caso de mayo de 2026**, y conviene saber por qué: la partida del 27-may **nace en el propio mes** (la genera el Paso 2) y el Paso 0 solo recibe la de diciembre, así que las dos piezas nunca coinciden en un mismo mes — y en junio, cuando el resumen ya trae las dos, el crédito de 11.70 quedó en el estado de mayo. Es el mismo patrón del 76.50: **hay partidas que solo se cierran a mano**, descargándolas del resumen.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

@@ -4996,6 +4996,51 @@ test("el cheque acreditado como DEPOSITO clarea igual", () => {
   eq(!!estado[0]._chqUsado, true);
 });
 
+/* ── La devolucion de un deposito mal enviado alcanza partidas viejas ─────────────────
+   Un deposito enviado a la cuenta equivocada puede tardar MESES en volver, y mientras tanto la partida
+   viaja en el resumen. El 27-may-2026 St. Georges devolvio 11.70 en UNA linea ("Blvd A Petty Dev De Dep
+   Mal Enviado") que son dos partidas de 5.85: la del 27-may y la del 6-DIC-2025, a 172 dias habiles, once
+   veces la ventana del transito.
+   La senal se lee del BANCO porque los asientos no la traen: uno dice "REE DEPOSITO DE BLVD ENVIADO POR
+   ERROR" pero el otro dice solo "deposito en transito".
+   Nota: esto NO cierra el caso real de mayo de 2026, porque ahi la partida del 27-may nace en el propio
+   mes (la genera el Paso 2) y el Paso 0 solo recibe la de diciembre — las dos piezas nunca coinciden en un
+   mismo mes. Sirve cuando las dos vienen del resumen, que es el caso normal. */
+test("la devolución junta dos partidas de 5.85 separadas por cinco meses", () => {
+  const tr = [{ fecha:"2026-05-27", banco:"STG", monto:5.85, sentido:"credito", comprobante:"ME-00000001958",
+                concepto:"REE DEPOSITO DE BLVD ENVIADO POR ERROR DE 12/1/2026 POR 5.85" },
+              { fecha:"2025-12-06", banco:"STG", monto:5.85, sentido:"credito", comprobante:"ME-00000001799",
+                concepto:"deposito en transito" }];
+  const est = [{ fecha:"2026-05-27", debito:0, credito:11.70, fila:22,
+                 descripcion:"Blvd A Petty Dev De Dep Mal Enviado" }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.compensadas.length, 2, "las dos compensan contra la devolución");
+  eq(r.pendientes.length, 0);
+});
+
+/* El guard de unicidad: con una ventana de un ano, varias partidas chicas armarian el importe de muchas
+   maneras. Si hay mas de una combinacion no se elige ninguna. */
+test("si la devolución se puede armar de dos maneras, no se compensa", () => {
+  const tr = [["2026-05-20",5.85],["2025-12-06",5.85],["2026-01-15",11.70]].map(function(p, i){
+    return { fecha:p[0], banco:"STG", monto:p[1], sentido:"credito", concepto:"deposito en transito",
+             comprobante:"ME-" + (1800 + i) }; });
+  const est = [{ fecha:"2026-05-27", debito:0, credito:11.70, fila:22,
+                 descripcion:"Blvd A Petty Dev De Dep Mal Enviado" }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.compensadas.length, 0, "11.70 sale de la partida sola o de los dos 5.85: no se adivina");
+  eq(r.pendientes.length, 3);
+});
+
+/* Y la ventana larga es SOLO para la devolucion: un credito normal sigue con la ventana de su tipo, asi
+   que no alcanza una partida de hace cinco meses. */
+test("un crédito normal no alcanza partidas de hace cinco meses", () => {
+  const tr = [{ fecha:"2025-12-06", banco:"STG", monto:11.70, sentido:"credito",
+                concepto:"deposito en transito", comprobante:"ME-00000001799" }];
+  const est = [{ fecha:"2026-05-27", debito:0, credito:11.70, descripcion:"DEPOSITO", fila:22 }];
+  const r = consumirTransitoPrevio(tr, { STG:est, Banistmo:[] }, 0.01);
+  eq(r.pendientes.length, 1, "sin señal de devolución, la ventana del tránsito manda");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
