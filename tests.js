@@ -2625,6 +2625,94 @@ test("una venta sin deposito queda en transito y viaja al mes siguiente", () => 
 });
 
 
+/* ---- Un pendiente que nacio del asiento, no de un deposito que falte ----
+   11-abr-2026, ME-00000001915: el debito "REPORTE DE VENTA DEL 11/04/2026" dice 2,111.02 y sus creditos
+   suman 2,046.94 (Brinks 332.10 + CK Banistmo 164.08 + VISA/CLAVE Banistmo 1,550.76). El informe de
+   cajeras de ese dia declara exactamente 2,046.94 de venta, y el 2,111.02 no aparece en ningun otro
+   documento: ni en el reporte, ni en el estado de Banistmo, ni en el navegador del banco, ni en las
+   retenciones VISA. Los 64.08 son del ASIENTO: esa plata nunca existio, asi que no hay credito que
+   buscar y la partida viajo de abril a julio diciendo "aun NO compenso este mes" todos los meses.
+   El Paso 1 no lo ve: coteja por banco/dia y el debito de venta es una linea sola sin banco en el texto. */
+test("el pendiente que viene de un asiento digitado por mas NO se busca en el banco", () => {
+  STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null; STATE.estados = null;
+  STATE.saldoCajaGeneral = { inicial: 0, final: 64.08, fechaFinal: "2026-04-30" };
+  STATE.results = { paso0: [], paso1: [], paso2: [],
+    paso3: [{ clase: "en_transito", motivo: "x", banco: "STG", fecha: "2026-04-11", monto: 332.10, concepto: "DEPOSITO BRINKS DEL 11/04/2026", texto: "x" }] };
+  STATE.diarioCaja = [
+    { fecha: "2026-04-11", referencia: "ME-00000001915", debito: 2111.02, credito: 0, descripcion: "REPORTE DE VENTA DEL 11/04/2026" },
+    { fecha: "2026-04-11", referencia: "ME-00000001915", debito: 0, credito: 332.10, descripcion: "DEPOSITO BRINKS DEL 11/04/2026" },
+    { fecha: "2026-04-11", referencia: "ME-00000001915", debito: 0, credito: 164.08, descripcion: "DEPOSITO DE BANISTMO CK DEL 11/04/2026" },
+    { fecha: "2026-04-11", referencia: "ME-00000001915", debito: 0, credito: 1550.76, descripcion: "DEPOSITO POR TARJETA VISA BANISTMO DEL 11/04/2026" }
+  ];
+  const rep = [
+    { fecha: "2026-04-11", banco: "Banistmo", metodo: "VISA", monto: 982.09 },
+    { fecha: "2026-04-11", banco: "Banistmo", metodo: "CLAVE", monto: 568.67 },
+    { fecha: "2026-04-11", banco: "Banistmo", metodo: "CHEQUE", monto: 164.08 }
+  ];
+  // El efectivo viene aparte: parseReporteConsolidado lo devuelve en .efectivo, no como metodo por banco.
+  rep.efectivo = [ { fecha: "2026-04-11", tipo: "BRINK", monto: 330.00 }, { fecha: "2026-04-11", tipo: "VENTANILLA", monto: 2.10 } ];
+  STATE.reporteCajas = rep;
+
+  cerca(ventaReportadaDia(rep, "2026-04-11"), 2046.94);
+  const v = ventasSinDeposito();
+  eq(v.length, 1, "el pendiente se detecta igual");
+  cerca(v[0].pendiente, 64.08);
+  eq(!!v[0].digitacion, true, "y se reconoce que sale del propio asiento");
+  cerca(v[0].digitacion.reportado, 2046.94);
+  cerca(v[0].digitacion.dif, 64.08);
+
+  const it = partidasVentaSinDeposito();
+  eq(it.length, 1);
+  cerca(it[0].monto, 64.08, "igual viaja al resumen: el debito esta posteado y el saldo lo tiene dentro");
+  eq(/DIGITADO POR MAS/.test(normTxt(it[0].motivo)), true, "el motivo lleva la marca que cruza al mes siguiente");
+  eq(it[0].texto.indexOf("2,111.02") >= 0 && it[0].texto.indexOf("2,046.94") >= 0, true, "nombra los dos importes");
+  eq(it[0].texto.indexOf("hasta que el depósito aparezca en el banco"), -1,
+     "y NO manda a buscar un deposito que no existe");
+
+  /* El guard: la diferencia tiene que COINCIDIR con el pendiente. Si el informe declara otra cosa, hay dos
+     cosas distintas pasando el mismo dia y rotularlo como error de digitacion mandaria a corregir un
+     asiento que esta bien. */
+  const rep2 = [{ fecha: "2026-04-11", banco: "Banistmo", metodo: "VISA", monto: 2000.00 }];
+  rep2.efectivo = [];
+  STATE.reporteCajas = rep2;
+  const v2 = ventasSinDeposito();
+  eq(v2.length, 1);
+  eq(v2[0].digitacion, null, "una diferencia que no coincide con el pendiente no es error de digitacion");
+  eq(partidasVentaSinDeposito()[0].texto.indexOf("hasta que el depósito aparezca en el banco") >= 0, true,
+     "ahi sigue siendo un deposito que falta");
+
+  // Sin informe de cajeras no hay con que comparar: no se inventa el diagnostico.
+  STATE.reporteCajas = null;
+  eq(ventaReportadaDia(null, "2026-04-11"), null);
+  eq(ventasSinDeposito()[0].digitacion, null, "sin informe de cajeras no se rotula nada");
+  STATE.diarioCaja = null; STATE.reporteCajas = null;
+});
+
+/* La marca tiene que CRUZAR de un mes al siguiente, porque el hallazgo que Diba ve en julio lo emite el
+   Paso 0 leyendo el resumen, no el Paso 1. Lo unico que viaja es la columna Motivo — igual que con el
+   resto de redondeo (restoRedondeo), que se perdia al re-rotularse y volvia a los 15 dias de ventana. */
+test("la marca de asiento digitado por mas viaja en el resumen al mes siguiente", () => {
+  const rows = [
+    ["Fecha","Banco","Monto","Concepto","Comprobante","Motivo","Crédito a Caja General"],
+    ["11/04/2026","STG",64.08,"Depósito pendiente de identificar","ME-00000001915","el asiento está DIGITADO POR MÁS de lo vendido","pendiente"],
+    ["11/04/2026","STG",50.00,"Depósito pendiente de identificar","ME-00000001916","aún pendiente de compensar","pendiente"]
+  ];
+  const tr = parseTransitoPrevio(rows);
+  eq(tr.length, 2);
+  eq(tr[0].digitado, true, "se lee del resumen");
+  eq(tr[1].digitado, false, "y no se le pega a las demas");
+
+  // Y el Paso 0 lo vuelve a decir, con el mismo motivo, para que sobreviva al salto siguiente.
+  const h = paso0(tr, [], [], null, 7, 0.01);
+  const d = h.filter(function(x){ return Math.abs(x.monto - 64.08) < 0.005; });
+  eq(d.length, 1);
+  eq(/DIGITADO POR MAS/.test(normTxt(d[0].motivo)), true, "el motivo se conserva salto a salto");
+  eq(d[0].texto.indexOf("NO hay nada que buscar en el banco") >= 0, true, "y el hallazgo lo dice");
+  const otra = h.filter(function(x){ return Math.abs(x.monto - 50.00) < 0.005; });
+  eq(otra.length, 1);
+  eq(otra[0].texto.indexOf("NO hay nada que buscar en el banco"), -1, "la partida normal no hereda el texto");
+});
+
 test("el descargo se reconoce ANTES de buscarle contrapartida en el banco", () => {
   // Un descargo no tiene linea propia en el estado: las que le corresponden ya las consumio el Paso 0.
   // Buscandole match primero, el motor le adjudicaba lineas de OTROS depositos. En febrero de 2026 el

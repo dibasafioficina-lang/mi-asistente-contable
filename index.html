@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.30";
+var APP_VERSION = "2026.10.31";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7482,8 +7482,18 @@ function ventasSinDeposito(opt){
     var visa = visaDia[c.fecha] || 0, trans = transDia[c.fecha] || 0, dif = difDia[c.fecha] || 0;
     var pend = Math.round((c.venta - c.acreditado - visa - trans - dif)*100)/100;
     if(pend <= 1) return;   // hasta un dolar es redondeo de faltantes/sobrantes, no una omision
+    /* ---- El asiento digitado por mas de lo que se vendio ----
+       No todo pendiente es un deposito que falte: si el DEBITO de venta esta digitado por mas de lo que la
+       cajera cobro, la plata nunca existio y no hay credito que buscar — la partida viaja mes tras mes para
+       siempre. El 11-abr-2026 ME-00000001915 tiene un debito de 2,111.02 contra 2,046.94 de creditos, y el
+       informe de cajeras de ese dia declara 2,046.94: los 64.08 son del asiento. El Paso 1 no lo ve porque
+       coteja por banco/dia y el debito de venta es una linea sola sin banco en el texto.
+       Se exige que la diferencia entre el debito y la venta declarada COINCIDA con el pendiente (dentro de
+       los centavos del faltante/sobrante): si no coincide, hay dos cosas distintas pasando el mismo dia y
+       rotularlo como error de digitacion mandaria a corregir un asiento que esta bien. */
+    var dig = diferenciaDeDigitacion(opt && opt.reporte, c.fecha, c.venta, pend, tolPend);
     out.push({ ref:c.ref, fecha:c.fecha, venta:c.venta, acreditado:c.acreditado,
-               visa:visa, reportado:trans, diferido:dif, pendiente:pend,
+               visa:visa, reportado:trans, diferido:dif, pendiente:pend, digitacion:dig,
                // El banco sale del METODO que falta, no de donde compenso el efectivo: ver bancoDeMetodoRep.
                metodo: metodoDelPendiente(opt && opt.reporte, c.fecha, pend, tolPend) });
   });
@@ -7508,6 +7518,27 @@ function metodoDelPendiente(reporte, fecha, pendiente, tol){
     n++; hit = { metodo:x.metodo, banco:x.banco };
   });
   return n === 1 ? hit : null;
+}
+/* ---- La venta que el informe de cajeras declara para un dia ----
+   Suma de TODOS los metodos de ese dia: los que van por banco (VISA, CLAVE, ACH, CHEQUE, YAPPY) mas el
+   efectivo (Brink y ventanilla), que parseReporteConsolidado devuelve aparte en .efectivo. No entran
+   faltante ni sobrante: son centavos y el asiento los registra como credito, asi que quedan dentro del
+   margen de tolerancia. Devuelve null si el informe no trae ese dia: sin dato no se compara nada. */
+function ventaReportadaDia(reporte, fecha){
+  if(!reporte || !reporte.length) return null;
+  var t = 0, hay = false;
+  reporte.forEach(function(x){ if(x.fecha === fecha && x.monto){ t += x.monto; hay = true; } });
+  (reporte.efectivo || []).forEach(function(x){ if(x.fecha === fecha && x.monto){ t += x.monto; hay = true; } });
+  return hay ? Math.round(t*100)/100 : null;
+}
+// El pendiente explicado por el debito: debito de venta - venta declarada por la cajera. Solo cuenta si
+// coincide con el pendiente y si el debito dice MAS que el informe (al reves es otro problema).
+function diferenciaDeDigitacion(reporte, fecha, venta, pend, tol){
+  var vr = ventaReportadaDia(reporte, fecha);
+  if(vr === null) return null;
+  var d = Math.round((venta - vr)*100)/100;
+  if(!(d > 0) || Math.abs(d - pend) > tol) return null;
+  return { reportado: vr, dif: d };
 }
 /* ---- Donde compensa el efectivo ----
    Una venta que entro y no salio por ningun deposito tiene que viajar al mes siguiente como cualquier
@@ -7542,6 +7573,23 @@ function itemVentaSinDeposito(v, banco){
   // donde entro el camion, y una partida con el banco equivocado no compensa nunca.
   var porMetodo = v.metodo && v.metodo.banco ? v.metodo.banco : null;
   var bk = porMetodo || banco || "";
+  /* El pendiente que viene del propio asiento no se cuenta como deposito que falte: decirle que "se
+     arrastra hasta que el deposito aparezca en el banco" manda a buscar algo que no existe. Igual viaja al
+     resumen —el debito esta posteado y el saldo de Caja General lo tiene dentro—, pero rotulado por lo que
+     es. El motivo lleva "DIGITADO POR MAS" porque el Paso 0 lo vuelve a leer del resumen el mes siguiente. */
+  if(v.digitacion) return {
+    fecha: v.fecha, banco: bk, monto: v.pendiente, clase: "en_transito",
+    concepto: "Depósito pendiente de identificar", comprobante: v.ref,
+    motivo: "el asiento está DIGITADO POR MÁS de lo vendido",
+    texto: "El " + v.fecha + " el asiento de venta de Caja General está digitado por B/ " + fmt(v.venta) +
+      " y el informe de cajeras declara B/ " + fmt(v.digitacion.reportado) + " de venta ese día: los B/ " +
+      fmt(v.digitacion.dif) + " de diferencia son del ASIENTO, no de un depósito que falte — no hay nada " +
+      "que buscar en el banco y la partida se va a arrastrar mes tras mes hasta que se corrija el débito. " +
+      "Verificá el comprobante y corregí el débito a B/ " + fmt(v.digitacion.reportado) + " (o registrá un " +
+      "ajuste por B/ " + fmt(v.digitacion.dif) + " acreditando Caja General); después sacá la partida del resumen.",
+    fuente: "Diario Caja General / Reporte consolidado de caja",
+    _paso: "ventas"
+  };
   return {
     fecha: v.fecha, banco: bk, monto: v.pendiente, clase: "en_transito",
     concepto: "Depósito pendiente de identificar", comprobante: v.ref,
@@ -8506,6 +8554,9 @@ function parseTransitoPrevio(rows){
     out.push({ fecha:iso, banco: banco, monto:monto, concepto: concepto,
                comprobante: comprobante, sentido: sentido, creditoCG: leerCreditoCG(cCG>=0?row[cCG]:null),
                restoRedondeo: /FALTA EL REDONDEO/.test(normTxt(cMot>=0 ? String(row[cMot]||"") : "")),
+               // Error de digitacion del asiento: no hay credito que buscar, pero la partida sigue viajando
+               // porque el debito esta posteado. La marca se conserva salto a salto como la del redondeo.
+               digitado: /DIGITADO POR MAS/.test(normTxt(cMot>=0 ? String(row[cMot]||"") : "")),
                partes: leerDesglose(cDes>=0?row[cDes]:null, monto) });
   }
   // Un resumen bajado con una version anterior no trae la columna: el Paso 0 lo avisa.
@@ -8652,7 +8703,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
       }
       return {fecha:fechaEf, fechaOrig:t.fecha, monto:t.monto, concepto:t.concepto, comprobante:t.comprobante,
               sentido:t.sentido, creditoCG:t.creditoCG, reingresada:t.reingresada, partes:t.partes,
-              restoRedondeo:t.restoRedondeo, banco:banco, usado:false, pool:poolDe(t)};
+              restoRedondeo:t.restoRedondeo, digitado:t.digitado, banco:banco, usado:false, pool:poolDe(t)};
     });
     // Paso A: cada partida contra su pool, hacia adelante. Primero 1:1; si no aparece, una combinación de
     // líneas DEL MISMO DÍA, porque cuando el banco parte un depósito lo acredita el mismo día (el depósito
@@ -9219,10 +9270,17 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       /* El motivo de un resto de redondeo se CONSERVA, porque es lo que le da su ventana larga: si se
          re-rotula como una pendiente cualquiera, al siguiente salto vuelve a los 15 dias y nunca llega a
          su acreditacion. El 1.92 lo mostro: con el motivo perdido en abril, en junio ya no la alcanzaba. */
-      motivo: ch.restoRedondeo ? "falta el redondeo — aún pendiente" : "aún pendiente de compensar",
+      motivo: ch.digitado ? "el asiento está DIGITADO POR MÁS de lo vendido"
+            : ch.restoRedondeo ? "falta el redondeo — aún pendiente" : "aún pendiente de compensar",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+")"+
             (ch.restoRedondeo ? " es el redondeo que le falta a un depósito cuyo camión YA compensó, y el banco"+
                                 " todavía no lo acreditó" : "")+" de un período anterior aún NO compensó este mes."+
+            /* Y no va a compensar nunca: el pendiente nacio de un debito de venta digitado por mas de lo que
+               la cajera cobro, asi que no hay credito en el banco que lo pueda cerrar. La marca viene del
+               resumen (columna Motivo), que es lo unico que cruza de un mes al siguiente. */
+            (ch.digitado ? " NO hay nada que buscar en el banco: este pendiente nació de un asiento de venta"+
+                           " digitado por MÁS de lo que declaró la cajera. Se va a arrastrar mes tras mes hasta"+
+                           " que se corrija el débito en Caja General y se saque la partida del resumen." : "")+
             (cs ? " Puede estar PARTIDA entre dos meses: el banco acreditó un ACH de Brinks de B/ "+fmt(cs.monto)+
                   " el "+cs.fecha+(cs.retiro?" (retiro del "+cs.retiro+")":"")+
                   (cs.cicloNormal?"":", que queda FUERA del ciclo normal de retiro al día siguiente — confirmá que ese ACH es de este efectivo")+

@@ -218,6 +218,25 @@ Un depósito enviado a la cuenta equivocada puede tardar **meses** en volver, y 
 
 **Esto no cierra el caso de mayo de 2026**, y conviene saber por qué: la partida del 27-may **nace en el propio mes** (la genera el Paso 2) y el Paso 0 solo recibe la de diciembre, así que las dos piezas nunca coinciden en un mismo mes — y en junio, cuando el resumen ya trae las dos, el crédito de 11.70 quedó en el estado de mayo. Es el mismo patrón del 76.50: **hay partidas que solo se cierran a mano**, descargándolas del resumen.
 
+### No todo pendiente es un depósito que falta
+
+El asiento de venta puede estar **digitado por más de lo que se cobró**, y entonces el pendiente no tiene contrapartida en ningún banco: esa plata nunca existió. El `ME-00000001915` del 11-abr-2026:
+
+| Línea | Monto |
+|---|---|
+| Débito `REPORTE DE VENTA DEL 11/04/2026` | **2,111.02** |
+| Crédito `DEPOSITO BRINKS` (330.00 + 2.10) | 332.10 |
+| Crédito `DEPOSITO DE BANISTMO CK` | 164.08 |
+| Crédito `VISA + CLAVE BANISTMO` (982.09 + 568.67) | 1,550.76 |
+| **Diferencia** | **64.08** |
+
+El informe de cajeras de ese día declara **2,046.94**, exacto a los créditos. El `2,111.02` no aparece en ningún otro documento —ni en el reporte, ni en el estado de Banistmo, ni en el navegador del banco, ni en las retenciones VISA—, así que el outlier es el asiento. La partida viajó de abril a julio diciendo *"aún NO compensó este mes"* todos los meses, mandando a buscar al banco algo que no existe.
+
+- `diferenciaDeDigitacion()` lo reconoce: `ventaReportadaDia()` suma todos los métodos del informe de ese día (los de banco más el efectivo, que `parseReporteConsolidado` devuelve aparte en `.efectivo`) y se exige que `débito − venta declarada` **coincida con el pendiente**, dentro de los centavos del faltante/sobrante. Si no coincide, hay dos cosas distintas pasando el mismo día y rotularlo como error de digitación mandaría a corregir un asiento que está bien.
+- **La partida igual viaja al resumen**: el débito está posteado y el saldo de Caja General lo tiene dentro. Lo que cambia es el rótulo, no el arrastre.
+- **El Paso 1 no lo ve** porque cotea por banco/día y el débito de venta es una línea sola sin banco en el texto. El hallazgo que se lee cada mes lo emite el **Paso 0**, leyendo el resumen — así que la marca tiene que cruzar de un mes al siguiente por la columna **Motivo** (`digitado`, igual que `restoRedondeo`). Al tocar una, revisar la otra.
+- El banco que muestra es **deducido** (`bancoDelEfectivo`), no real: ningún banco lo debe. Acá dio STG cuando todos los depósitos del 11-abr son Banistmo.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.
