@@ -238,6 +238,44 @@ test("un asiento que ya cuadro en la pasada 0 no vuelve a emparejarse en la pasa
    ME-00000002041 es del 31: la pasada 2 lo descartaba por sentido ("atras" descarta asientos posteriores
    al credito) y la 2b solo salva los RCP. La misma plata salia DOS veces: el asiento como pendiente que
    viaja al mes siguiente y el credito como no registrado en el diario. */
+/* ---- La reversa de un cargo que el banco duplico y corrigio solo ----
+   24-ago-2026: St. Georges cobro "Retencion Clave 22-08" DOS veces (13.02 + 13.02) y acredito
+   "Rev. Retencion Clave 22-08" por 13.02. El neto es un solo cargo, que es lo que el diario registra, asi
+   que la reversa no tiene asiento ni le corresponde tenerlo: no es una diferencia, es ruido del banco.
+   Lo que la convierte en reversa no es el texto solo, sino que el DUPLICADO exista. */
+test("la reversa de un cargo duplicado por el banco es informativo, no diferencia", () => {
+  // El estado CORTA la descripcion a ~30 caracteres y el "Rev." se come cinco, asi que los textos NO son
+  // iguales: el credito dice "...22-08 160" y el debito "...22-08 16005605". Se comparan por prefijo.
+  const est = [
+    { fecha: "2026-08-24", debito: 0,     credito: 13.02, descripcion: "Rev. Retencion Clave 22-08 160", fila: 63 },
+    { fecha: "2026-08-24", debito: 13.02, credito: 0,     descripcion: "Retencion Clave 22-08 16005605", fila: 64 },
+    { fecha: "2026-08-24", debito: 13.02, credito: 0,     descripcion: "Retencion Clave 22-08 16005605", fila: 66 }
+  ];
+  const dup = cargoDuplicadoDelEstado(est, est[0]);
+  eq(dup ? dup.length : 0, 2, "reconoce los dos cargos del mismo día y el mismo importe");
+
+  // Con UN solo cargo no hay nada duplicado: la reversa es plata que vuelve y SÍ es una diferencia.
+  eq(cargoDuplicadoDelEstado([est[0], est[1]], est[0]), null, "con un solo cargo no es reversa de un duplicado");
+
+  // El texto por sí solo no alcanza: tiene que hablar de un cargo del banco.
+  const otro = [
+    { fecha: "2026-08-24", debito: 0,     credito: 13.02, descripcion: "Rev. Deposito De Cliente 22-08", fila: 63 },
+    { fecha: "2026-08-24", debito: 13.02, credito: 0,     descripcion: "Deposito De Cliente 22-08 1600", fila: 64 },
+    { fecha: "2026-08-24", debito: 13.02, credito: 0,     descripcion: "Deposito De Cliente 22-08 1600", fila: 66 }
+  ];
+  eq(cargoDuplicadoDelEstado(otro, otro[0]), null, "una reversa que no es de un cargo del banco no entra");
+
+  // Y el importe tiene que ser el mismo: una reversa parcial no se explica con el duplicado.
+  const dist = [est[0], Object.assign({}, est[1], {debito: 20.00}), Object.assign({}, est[2], {debito: 20.00})];
+  eq(cargoDuplicadoDelEstado(dist, est[0]), null, "con otro importe no hay par");
+
+  // Funciona con el objeto del POOL del Paso 3, que lleva .monto y no .credito: mirar solo .credito hacía
+  // que la regla no disparara nunca desde el paso (el 13.02 de agosto seguía saliendo rojo).
+  const delPool = { fecha: "2026-08-24", monto: 13.02, descripcion: "Rev. Retencion Clave 22-08 160", fila: 63 };
+  const dup2 = cargoDuplicadoDelEstado(est, delPool);
+  eq(dup2 ? dup2.length : 0, 2, "también desde el objeto del pool del Paso 3");
+});
+
 test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
   const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
   const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];

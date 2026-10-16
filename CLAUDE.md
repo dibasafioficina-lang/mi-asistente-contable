@@ -197,7 +197,19 @@ Salía como *"no aparece registrado en el diario"* teniendo su asiento exacto a 
 
 - `esAjusteDeBanco()` lee la señal del **texto**, y la exige en los **dos lados**: `AJUSTE`/`REVERSO`/`REV.` junto con `RETENCION`/`RET.`/`COMISION`/`ITBMS`. Eso es lo que protege, no la ventana — que es larga a propósito (`VENT_AJUSTE = 45` días hábiles) porque el asiento llega al cierre.
 - Los demás guards son los de la 2b: 1:1 por el importe exacto y candidato único.
-- La **reversa de un cargo que el banco duplicó y corrigió solo** no tiene asiento ni lo necesita, así que sigue siendo diferencia: el 24-ago-2026 St. Georges cobró `Retencion Clave 22-08` **dos veces** (13.02 + 13.02) y revirtió una. Neto: un cargo, que es lo que el diario tiene.
+**La reversa de un cargo que el banco duplicó y corrigió solo** no tiene asiento ni le corresponde tenerlo. El 24-ago-2026 St. Georges cobró `Retencion Clave 22-08` **dos veces** y acreditó la reversa:
+
+```
+24-ago  Retencion Clave 22-08 16005605      débito  13.02
+24-ago  Retencion Clave 22-08 16005605      débito  13.02   ← cobrada dos veces
+24-ago  Rev. Retencion Clave 22-08 160      crédito 13.02   ← y revertida una
+```
+
+Neto: **un** cargo, que es lo que el diario registra. No es una diferencia, es ruido del banco — pero no se silencia: `cargoDuplicadoDelEstado()` lo reconoce y el Paso 3 lo reporta como **informativo**, con la exclusión explícita.
+
+- Lo que la convierte en reversa no es el texto solo —cualquier crédito podría decir *"Rev."*— sino que el **duplicado exista**: se exigen, el **mismo día** y por el **mismo importe exacto**, **dos o más** débitos del estado con el texto del crédito sin el `Rev.`. Con un solo cargo no hay nada duplicado y la reversa es plata que vuelve: **esa sí es una diferencia** y tiene que salir.
+- El estado **corta la descripción a unos 30 caracteres** y el `Rev.` se come cinco, así que los textos no son iguales (`...22-08 160` contra `...22-08 16005605`): se compara por **prefijo**, con un mínimo de 12 caracteres para que identifique el cargo de verdad.
+- Costó una iteración: `f` en el bucle de `faltanEnDiario` es un objeto del **pool**, que lleva `.monto` y **no** `.credito`. Mirando solo `.credito` la regla no disparaba nunca desde el paso, aunque la función aislada funcionara.
 
 ### Con importes iguales se empareja el más cercano en fecha
 
