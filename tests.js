@@ -588,6 +588,49 @@ test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
   eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
 });
 
+/* ---- Un lote de cheques se acredita cheque por cheque, en dias distintos ----
+   Los cheques del dia se depositan JUNTOS en un solo asiento y el banco los acredita UNO POR UNO. El
+   "DEPOSITO POR CK BANISTMO DEL 31/7/2026" de 506.99 (ME-00000002012) entro como 247.66 el 3-ago y
+   259.33 el 11-ago: seis dias habiles entre las dos piezas. comboMismoDia no las junta (exige mismo dia)
+   y comboAchConRedondeo solo corre para el efectivo, asi que la partida viajaba mes tras mes inflando el
+   resumen en 506.99 con su plata completa en el banco. El Paso A2 ya sabe de cheques repartidos en varios
+   depositos, pero exige el DESGLOSE declarado, y esta partida es toda cheque: no hay desglose que declarar. */
+test("un lote de cheques compensa con depósitos de días distintos", () => {
+  const chq = () => [{ fecha: "2026-07-31", banco: "Banistmo", monto: 506.99, concepto: "DEPOSITO POR CK BANISTMO DEL 31/7/2026", comprobante: "ME-00000002012", sentido: "credito" }];
+  // El estado real de agosto: cuatro depósitos libres, y 247.66 + 259.33 es la ÚNICA forma de armar 506.99.
+  const est = () => [
+    { fecha: "2026-08-03", debito: 0, credito: 247.66, descripcion: "DEPOSITO", fila: 5 },
+    { fecha: "2026-08-11", debito: 0, credito: 179.62, descripcion: "DEPOSITO", fila: 19 },
+    { fecha: "2026-08-11", debito: 0, credito: 259.33, descripcion: "DEPOSITO", fila: 21 },
+    { fecha: "2026-08-31", debito: 0, credito: 139.59, descripcion: "DEPOSITO", fila: 60 }
+  ];
+  const e = est();
+  const r = consumirTransitoPrevio(chq(), { Banistmo: e }, 0.01);
+  eq(r.pendientes.length, 0, "el lote compensa");
+  eq(r.compensadas.length, 1);
+  eq(e.filter(x => x._transitoUsado).length, 2, "consume exactamente las dos líneas que le tocan");
+  eq(e.filter(x => x._transitoUsado).map(x => x.credito).sort().join("+"), "247.66+259.33");
+
+  // Solución ÚNICA: con dos formas de llegar al total, elegir sería adivinar.
+  const amb = est().concat([{ fecha: "2026-08-20", debito: 0, credito: 506.99 - 139.59, descripcion: "DEPOSITO", fila: 70 }]);
+  eq(consumirTransitoPrevio(chq(), { Banistmo: amb }, 0.01).pendientes.length, 1,
+     "con dos combinaciones posibles se deja pendiente");
+
+  // Solo líneas que el estado llama DEPOSITO: los redondeos y las líneas sin descripción quedan afuera,
+  // que son justamente los céntimos con los que se armó el falso positivo del 5.85 de enero.
+  const mudas = [
+    { fecha: "2026-08-03", debito: 0, credito: 247.66, descripcion: "Descripción", fila: 5 },
+    { fecha: "2026-08-11", debito: 0, credito: 259.33, descripcion: "Descripción", fila: 21 }
+  ];
+  eq(consumirTransitoPrevio(chq(), { Banistmo: mudas }, 0.01).pendientes.length, 1,
+     "líneas sin descripción no arman un lote de cheques");
+
+  // Y solo para partidas de CHEQUES: un depósito de tarjeta no se arma juntando días distintos.
+  const tarjeta = [{ fecha: "2026-07-31", banco: "Banistmo", monto: 506.99, concepto: "DEPOSITO POR TARJETA VISA DEL 31/7/2026", comprobante: "", sentido: "credito" }];
+  eq(consumirTransitoPrevio(tarjeta, { Banistmo: est() }, 0.01).pendientes.length, 1,
+     "la excepción es del lote de cheques, no de cualquier partida");
+});
+
 /* ---- El reembolso de un cheque que quedo en circulacion ----
    19-mar-2026: queda en circulacion un cheque de 500.00. El 6-ago Banistmo acredita
    "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY": el cheque nunca se cambio y quien lo giro

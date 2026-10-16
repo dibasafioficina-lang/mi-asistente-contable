@@ -271,6 +271,29 @@ pasada 1:  05-ago  DEPOSITO BRINKS 90.00   ↔  12-ago  20.01 + 19.98 + 50.00 = 
 - El diario incluso declara el desglose en sus sub-líneas (`7/5 6.11`, `4/4 20.01`, `4/5 19.98`), pero no hacía falta leerlo: con el guard, `buscarSubsetSuma` arma la combinación correcta sola.
 - Es el falso positivo de siempre —un importe armado con lo primero que sume— pero del lado del **asiento**, no de las líneas. Las otras pasadas (2, 2b, 2c, 3) ya traían el guard.
 
+### Un lote de cheques se acredita cheque por cheque, en días distintos
+
+Los cheques del día se depositan **juntos** en un solo asiento y el banco los acredita **uno por uno**: cada cheque clarea cuando clarea.
+
+```
+31-jul   DEPOSITO POR CK BANISTMO DEL 31/7/2026  506.99  (ME-00000002012)
+                                                 =  247.66  (3-ago)
+                                                 +  259.33  (11-ago)
+```
+
+Seis días hábiles entre las dos piezas. `comboMismoDia` no las junta —exige mismo día— y `comboAchConRedondeo`, que es la excepción que ya existe para días distintos, solo corre para el efectivo. Así que la partida viajaba mes tras mes **inflando el resumen en 506.99 con su plata completa en el banco**.
+
+El **Paso A2** ya sabe de cheques repartidos en varios depósitos (el caso de febrero de arriba), pero exige el **desglose declarado**: esta partida es toda cheque, no mixta, así que no hay desglose que declarar.
+
+La restricción de mismo día de `comboMismoDia` existe por una razón buena —sin ella un importe chico se arma con céntimos de cualquier fecha, el falso positivo del 5.85 de enero—, así que aflojarla pide guards que la reemplacen. `comboLoteDeCheques()`:
+
+- Solo para partidas de **cheques** (`esChequeTransito`): un lote de cheques es lo que el banco acredita pieza por pieza. Una tarjeta no.
+- Solo líneas que el estado llama **DEPOSITO**. Eso saca de juego los redondeos y las líneas sin descripción, que son justamente los céntimos con los que se armó el 5.85.
+- Suma **exacta** y solución **única** entre los depósitos libres de la ventana. Con dos formas de llegar al total se deja pendiente.
+- Al menos **dos** líneas (una sola ya la resuelve el 1:1) y a lo sumo tres.
+
+En agosto de 2026 había **cuatro** depósitos libres en Banistmo (247.66, 179.62, 259.33, 139.59) y **una sola** forma de armar 506.99.
+
 ### Un cheque en circulación puede volver como reembolso, no como depósito
 
 Un cheque recibido puede **no cambiarse nunca** y que quien lo giró devuelva la plata por **transferencia** meses después:
