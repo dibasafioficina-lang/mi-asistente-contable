@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.35";
+var APP_VERSION = "2026.10.36";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -4002,6 +4002,34 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       }
       // 3b) cheque no encontrado en su banco → buscar en los otros bancos
       if(esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito)){
+        /* ---- Un cheque clarea con rezago, y el Paso 2 lo buscaba con la ventana GENERAL ----
+           Tres pasos tenian tres ventanas para lo mismo: el Paso 0 90 dias (ventanaTransito), el Paso 3
+           366 (conciliarChequesPaso3, "dentro del mes") y el Paso 2 los 7 de la ventana general. Julio de
+           2026 lo mostro: el cheque de 112.13 del 1-jul entro el 22 (14 dias habiles) y el de 558.08 del
+           4-jul entro como 336.59 + 44.69 el 17 mas 176.80 el 22 (12 y 17 dias). Los dos quedaban
+           "pendiente por cambiar" en el Paso 2, y el Paso 3 —con su ventana larga— los cuadraba: 670.21
+           viajaban al resumen teniendo su plata completa en el banco. Dos relatos de la misma plata.
+           Se reusa comboLoteDeCheques, que es la misma regla del Paso 0, con minN=1 porque el 1:1 de este
+           paso ya corrio con la ventana corta. Los guards son los suyos: solo lineas que el estado llama
+           DEPOSITO, suma EXACTA, solucion UNICA y hasta tres lineas.
+           Va ANTES de buscar en otros bancos: si clareo en el suyo con rezago, no hay nada que buscar. */
+        var rez = comboLoteDeCheques(pool, dep.fecha, objetivo, VENTANA_CHEQUE_BANCO, tolerancia, 1);
+        if(rez){
+          rez.forEach(function(i){ pool[i].usado = true; });
+          var fRez = rez.map(function(i){ return pool[i].fecha; }).filter(function(f,i,a){ return a.indexOf(f)===i; }).sort();
+          hallazgos.push({
+            fecha:dep.fecha, banco:banco, monto:objetivo, clase:"informativo",
+            concepto:concepto, comprobante:refRaw, motivo:"el cheque clareó con rezago",
+            texto: banco + " " + dep.fecha + ": el cheque de B/ " + fmt(objetivo) + " (\"" + concepto +
+                   "\") clareó con rezago — el banco lo acreditó " +
+                   (rez.length > 1 ? "en " + rez.length + " depósitos (" +
+                      rez.map(function(i){ return "B/ " + fmt(pool[i].monto); }).join(" + ") + ") el " + fRez.join(" y el ")
+                    : "el " + fRez[0]) +
+                   ". Ya está completo en el estado de cuenta: no queda nada en tránsito." + ref,
+            fuente: "Diario Caja General / Estado de cuenta " + banco
+          });
+          return;
+        }
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
           if(b2===banco || otro) return;
@@ -8729,8 +8757,12 @@ function comboMismoDia(pool, fecha, objetivo, ventanaDias, tolerancia, maxN){
      descripcion, que son justamente los centavos con los que se armo el 5.85.
    - Suma EXACTA y solucion UNICA entre los depositos libres de la ventana. Con dos formas de llegar al
      total, elegir seria adivinar: se deja pendiente.
-   - Al menos DOS lineas (una sola ya la resuelve el 1:1) y a lo sumo tres. */
-function comboLoteDeCheques(pool, fecha, objetivo, ventanaDias, tolerancia){
+   - Entre minN y tres lineas. El Paso 0 pide minN=2 porque su 1:1 ya corrio con la misma ventana; el
+     Paso 2 pide minN=1, porque su 1:1 corrio con la ventana GENERAL (7 dias) y un cheque clarea mucho
+     despues: el de 112.13 del 1-jul-2026 entro el 22, a 14 dias habiles. */
+var VENTANA_CHEQUE_BANCO = 366;   // el mismo numero que usa conciliarChequesPaso3: "dentro del mes"
+function comboLoteDeCheques(pool, fecha, objetivo, ventanaDias, tolerancia, minN){
+  var min = minN || 2;
   var idxs = [];
   for(var i=0;i<pool.length;i++){
     var o = pool[i];
@@ -8739,9 +8771,9 @@ function comboLoteDeCheques(pool, fecha, objetivo, ventanaDias, tolerancia){
     if(!esDepositoEstado(o.desc)) continue;
     idxs.push(i);
   }
-  if(idxs.length < 2) return null;
+  if(idxs.length < min) return null;
   var sols = solucionesSuma(idxs.map(function(i){ return pool[i].monto; }), objetivo, tolerancia, 3, 2);
-  if(!sols || sols.length !== 1 || sols[0].length < 2) return null;
+  if(!sols || sols.length !== 1 || sols[0].length < min) return null;
   return sols[0].map(function(k){ return idxs[k]; });
 }
 // Primera fecha de un arreglo de movimientos (inicio real del período del estado de cuenta).
@@ -8852,7 +8884,7 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
         combo = comboAchConRedondeo(ch.pool, ch.fecha, ch.monto, vent, tolerancia);
       // Y el lote de cheques, que el banco acredita cheque por cheque (ver comboLoteDeCheques).
       if(!combo && esChequeTransito(ch.concepto))
-        combo = comboLoteDeCheques(ch.pool, ch.fecha, ch.monto, vent, tolerancia);
+        combo = comboLoteDeCheques(ch.pool, ch.fecha, ch.monto, vent, tolerancia, 2);
       if(combo){ combo.forEach(function(i){ ch.pool[i].usado=true; ch.compensoEn=ch.pool[i]; }); ch.usado=true; }
     });
     /* Paso A2: la partida compenso POR PARTES, no de una vez.

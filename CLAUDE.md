@@ -290,9 +290,24 @@ La restricción de mismo día de `comboMismoDia` existe por una razón buena —
 - Solo para partidas de **cheques** (`esChequeTransito`): un lote de cheques es lo que el banco acredita pieza por pieza. Una tarjeta no.
 - Solo líneas que el estado llama **DEPOSITO**. Eso saca de juego los redondeos y las líneas sin descripción, que son justamente los céntimos con los que se armó el 5.85.
 - Suma **exacta** y solución **única** entre los depósitos libres de la ventana. Con dos formas de llegar al total se deja pendiente.
-- Al menos **dos** líneas (una sola ya la resuelve el 1:1) y a lo sumo tres.
+- Entre `minN` y tres líneas. El Paso 0 pide **2** porque su 1:1 ya corrió con la misma ventana; el Paso 2 pide **1** (ver abajo).
 
 En agosto de 2026 había **cuatro** depósitos libres en Banistmo (247.66, 179.62, 259.33, 139.59) y **una sola** forma de armar 506.99.
+
+**La misma regla hacía falta en el Paso 2**, porque tres pasos tenían **tres ventanas** para lo mismo:
+
+| Paso | Ventana para un cheque |
+|---|---|
+| Paso 0 (`ventanaTransito`) | 90 |
+| Paso 2 | **7** — la ventana general |
+| Paso 3 (`conciliarChequesPaso3`) | 366 |
+
+Julio de 2026 lo mostró: el cheque de **112.13** del 1-jul entró el **22** (14 días hábiles) y el de **558.08** del 4-jul entró como `336.59 + 44.69` el **17** más `176.80` el **22** (12 y 17 días). Los dos quedaban *"pendiente por cambiar"* en el Paso 2 y el Paso 3 —con su ventana larga— los cuadraba: **670.21 viajaban al resumen teniendo su plata completa en el banco**. Dos relatos de la misma plata.
+
+- El Paso 2 reusa `comboLoteDeCheques` con `minN = 1`, porque su 1:1 ya corrió con la ventana **corta**, y con `VENTANA_CHEQUE_BANCO = 366` — el mismo número del Paso 3, que en la práctica significa "dentro del mes".
+- Va **antes** de buscar en otros bancos: si clareó en el suyo con rezago, no hay nada que buscar.
+- Se reporta como **informativo** con el motivo *"el cheque clareó con rezago"*, nombrando los depósitos y sus fechas — igual que `acreditadoEnRango`.
+- Las otras **nueve** pendientes de julio siguen pendientes: esos cheques sí están sin cambiar, y el Paso 3 también las deja así.
 
 ### Un cheque en circulación puede volver como reembolso, no como depósito
 

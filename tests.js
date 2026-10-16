@@ -588,6 +588,45 @@ test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
   eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
 });
 
+/* ---- Un cheque clarea con rezago, y el Paso 2 lo buscaba con la ventana GENERAL ----
+   Tres pasos tenian tres ventanas para lo mismo: el Paso 0 90 dias (ventanaTransito), el Paso 3 366
+   (conciliarChequesPaso3) y el Paso 2 los 7 de la ventana general. Julio de 2026: el cheque de 112.13 del
+   1-jul entro el 22 (14 dias habiles) y el de 558.08 del 4-jul entro como 336.59 + 44.69 el 17 mas 176.80
+   el 22. Los dos quedaban "pendiente por cambiar" en el Paso 2 y el Paso 3 -con su ventana larga- los
+   cuadraba: 670.21 viajaban al resumen teniendo su plata completa en el banco. */
+test("el Paso 2 reconoce el cheque que clareó con rezago", () => {
+  const diario = [
+    { fecha: "2026-07-01", debito: 0, credito: 112.13, descripcion: "DEPOSITO POR CK BANISTMO DEL 01/7/2026", referencia: "ME-00000001987", fila: 2 },
+    { fecha: "2026-07-04", debito: 0, credito: 558.08, descripcion: "DEPOSITO POR CK BANISTMO DEL 04/7/2026", referencia: "ME-00000001990", fila: 3 }
+  ];
+  const est = [
+    { fecha: "2026-07-17", debito: 0, credito: 336.59, descripcion: "DEPOSITO", fila: 27 },
+    { fecha: "2026-07-17", debito: 0, credito: 44.69,  descripcion: "DEPOSITO", fila: 28 },
+    { fecha: "2026-07-22", debito: 0, credito: 176.80, descripcion: "DEPOSITO", fila: 30 },
+    { fecha: "2026-07-22", debito: 0, credito: 112.13, descripcion: "DEPOSITO", fila: 31 }
+  ];
+  const h = paso2(diario, est, [], null, null, null, 7, 0.01, null);
+  eq(h.filter(x => x.motivo === "cheque pendiente por cambiar").length, 0, "ninguno queda pendiente");
+  const rez = h.filter(x => x.motivo === "el cheque clareó con rezago");
+  eq(rez.length, 2, "los dos se reconocen");
+  eq(rez.every(x => x.clase === "informativo"), true, "no son diferencias ni tránsito");
+  eq(rez.filter(x => Math.abs(x.monto - 558.08) < 0.005)[0].texto.indexOf("3 depósitos") >= 0, true,
+     "el de 558.08 nombra los tres depósitos");
+  eq(contarRojas(h), 0);
+
+  // Solución ÚNICA: con dos formas de armar el importe se deja pendiente, que es lo que protege la
+  // ventana larga. 112.13 podría salir del depósito propio o de 100.00 + 12.13.
+  const amb = est.concat([{ fecha: "2026-07-23", debito: 0, credito: 100.00, descripcion: "DEPOSITO", fila: 32 },
+                          { fecha: "2026-07-23", debito: 0, credito: 12.13,  descripcion: "DEPOSITO", fila: 33 }]);
+  const h2 = paso2([diario[0]], amb, [], null, null, null, 7, 0.01, null);
+  eq(h2.filter(x => x.motivo === "cheque pendiente por cambiar").length, 1, "con dos combinaciones se deja pendiente");
+
+  // Y solo líneas que el estado llama DEPOSITO: una línea sin descripción no clarea un cheque acá.
+  const mudo = [{ fecha: "2026-07-22", debito: 0, credito: 112.13, descripcion: "Descripción", fila: 31 }];
+  const h3 = paso2([diario[0]], mudo, [], null, null, null, 7, 0.01, null);
+  eq(h3.filter(x => x.motivo === "cheque pendiente por cambiar").length, 1, "una línea sin descripción no alcanza");
+});
+
 /* ---- Un lote de cheques se acredita cheque por cheque, en dias distintos ----
    Los cheques del dia se depositan JUNTOS en un solo asiento y el banco los acredita UNO POR UNO. El
    "DEPOSITO POR CK BANISTMO DEL 31/7/2026" de 506.99 (ME-00000002012) entro como 247.66 el 3-ago y
