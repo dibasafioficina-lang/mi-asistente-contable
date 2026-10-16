@@ -335,6 +335,30 @@ El **Paso B2** cruza el límite del pool a propósito, así que lo que protege s
 
 `esChequeTransito()` quedó como **única** definición de "esto es un cheque en tránsito", usada por `ventanaTransito` y por el Paso B2: con dos copias del mismo regex, tocar una y olvidar la otra ya costó caro antes.
 
+### El banco del efectivo se vota, y la ventanilla puede ir a otro
+
+`efDec.banco` sale de un conteo de **votos**: los ACH de Brinks del mes más las partidas de efectivo del resumen anterior. Eso vota siempre al banco del **camión** —St. Georges—, pero la **ventanilla** puede ir a otro banco.
+
+```
+Reporte 28-mar       Ventanilla                       189.31   (no hubo Brink)
+Caja General         DEPOSITO DEL 28/03/2026           31.40   (ME-00000001904)
+                                                      ──────
+pendiente                                             157.91   ← la partida, con banco STG
+```
+```
+Estado BANCO GENERAL  28-mar   DEPOSITO               157.94   ✓
+```
+
+Los **0.03** son el `FALTANTE DEL 28/03/2026`, cuyo crédito está en el mismo comprobante: al banco entraron 31.40 + 157.94 = 189.34, o sea la ventanilla más el faltante. Por eso el depósito no coincide al céntimo con el pendiente y se admite el margen `TOL_CENTAVOS_DIA = 0.15`, el mismo que usa `metodoDelPendiente`.
+
+`depositoDelEfectivo()` lo identifica **por importe**, con un guard de unicidad global: **un** solo banco con **un** solo `DEPOSITO` libre que encaje. El hallazgo pasa a decir dónde está la plata y **qué asiento falta** (`Débito Banco General / Crédito Caja General`).
+
+**El banco de la partida NO se cambia, y eso se midió.** Puesta en Banco General, la partida llega al Paso 0 de julio y se come **tres** créditos de Yappy de ese banco que suman **157.91 exacto** (`8.16 + 114.75 + 35.00`) y les tocaban a los depósitos del 3, 20 y 22 de julio, que salían huérfanos. Suma exacta y contablemente falsa — el falso positivo de siempre. Y no hay nada que ganar: la línea que la compensa está en el estado de **marzo** y ningún mes posterior lo trae.
+
+- La partida **sigue en tránsito**: Caja General no la acreditó, así que esos pesos siguen dentro de la cuenta. Lo que falta no es que el banco compense, es el **asiento**.
+- El texto avisa de la discrepancia: *"en el resumen va como STG, que es donde compensa el efectivo del mes, pero esta plata está en Banco General… se cierra con el asiento, no esperando al banco"*.
+- Al Paso 1 se le pasan los estados de cuenta **solo** para esto. El Paso 1 no concilia contra el banco: eso es del Paso 2.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

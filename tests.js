@@ -588,6 +588,54 @@ test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
   eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
 });
 
+/* ---- Donde esta el efectivo que la cajera reporto ----
+   El banco del efectivo se deduce por VOTOS (los ACH de Brinks del mes), asi que vota al banco del
+   CAMION. Pero la ventanilla puede ir a otro banco: el 28-mar-2026 la cajera reporto 189.31 de
+   ventanilla, Caja General acredito 31.40 y los 157.91 que quedaban entraron en BANCO GENERAL el mismo
+   dia como "DEPOSITO 157.94" (los 0.03 son el FALTANTE del dia, su credito esta en el mismo comprobante).
+   El hallazgo decia solo "queda en transito y viaja al resumen del proximo mes", sin decir que la plata YA
+   estaba en el banco ni en cual: viajaba mes tras mes y lo unico que la cierra es el asiento.
+   El BANCO de la partida NO se cambia, y eso se midio: puesta en Banco General, en el Paso 0 de julio se
+   comia tres creditos de Yappy de ese banco que sumaban 157.91 exacto (8.16 + 114.75 + 35.00) y les
+   tocaban a los depositos del 3, 20 y 22 de julio. Suma exacta y contablemente falsa. */
+test("el efectivo de fin de mes dice en qué banco ya entró y qué asiento falta", () => {
+  const rep = [];
+  rep.efectivo = [{ fecha: "2026-03-28", cajera: "DARY", tipo: "VENTANILLA", monto: 189.31, fila: 34 }];
+  const caja = [
+    { fecha: "2026-03-28", referencia: "ME-00000001885", debito: 0, credito: 31.40, descripcion: "DEPOSITO DEL 28/03/2026", fila: 245 },
+    { fecha: "2026-03-28", referencia: "ME-00000001885", debito: 2002.43, credito: 0, descripcion: "REPORTE DE VENTA DEL 28/03/2026", fila: 253 }
+  ];
+  const estados = {
+    "STG": [{ fecha: "2026-03-30", debito: 0, credito: 999.99, descripcion: "DEPOSITO", fila: 10 }],
+    "Banco General": [{ fecha: "2026-03-28", debito: 0, credito: 157.94, descripcion: "DEPOSITO", fila: 17 }]
+  };
+  eq(depositoDelEfectivo(estados, "2026-03-28", 157.91, 10).banco, "Banco General",
+     "lo identifica por importe, con el margen de los centavos del día");
+
+  const h = paso1(rep, caja, null, 0.01, null, null, null, estados);
+  const ef = h.filter(x => x.concepto === "Efectivo de fin de mes reportado por la cajera");
+  eq(ef.length, 1);
+  eq(ef[0].motivo, "ya está en el banco — falta el crédito a Caja General");
+  eq(ef[0].texto.indexOf("YA ENTRÓ en Banco General") >= 0, true, "nombra el banco donde está la plata");
+  eq(ef[0].texto.indexOf("Débito Banco General / Crédito Caja General") >= 0, true, "y el asiento que falta");
+  eq(ef[0].texto.indexOf("centavos del faltante/sobrante") >= 0, true, "explica los 0.03");
+  eq(ef[0].clase, "en_transito", "sigue en tránsito: Caja General no la acreditó, la plata sigue dentro");
+
+  // Candidato ÚNICO: con el mismo importe en dos bancos no se adivina dónde está.
+  const dos = { "STG": [{ fecha: "2026-03-28", debito: 0, credito: 157.94, descripcion: "DEPOSITO", fila: 9 }],
+                "Banco General": [{ fecha: "2026-03-28", debito: 0, credito: 157.94, descripcion: "DEPOSITO", fila: 17 }] };
+  eq(depositoDelEfectivo(dos, "2026-03-28", 157.91, 10), null, "con dos candidatos no se decide");
+
+  // Y tiene que ser un DEPOSITO: una línea sin descripción no identifica el banco del efectivo.
+  const mudo = { "Banco General": [{ fecha: "2026-03-28", debito: 0, credito: 157.94, descripcion: "Descripción", fila: 17 }] };
+  eq(depositoDelEfectivo(mudo, "2026-03-28", 157.91, 10), null, "una línea sin descripción no alcanza");
+
+  // Sin estados de cuenta el Paso 1 se comporta como antes.
+  const h2 = paso1(rep, caja, null, 0.01, null, null, null, null);
+  const ef2 = h2.filter(x => x.concepto === "Efectivo de fin de mes reportado por la cajera");
+  eq(ef2[0].motivo, "efectivo de fin de mes sin crédito en Caja General", "sin estados, el motivo de siempre");
+});
+
 /* ---- Un cheque clarea con rezago, y el Paso 2 lo buscaba con la ventana GENERAL ----
    Tres pasos tenian tres ventanas para lo mismo: el Paso 0 90 dias (ventanaTransito), el Paso 3 366
    (conciliarChequesPaso3) y el Paso 2 los 7 de la ventana general. Julio de 2026: el cheque de 112.13 del

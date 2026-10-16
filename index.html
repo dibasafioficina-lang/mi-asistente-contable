@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.36";
+var APP_VERSION = "2026.10.37";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1591,7 +1591,35 @@ function metodoDeposito(desc){
   if(n.indexOf("CHEQUE")!==-1 || /(^|\s)CK(\s|$)/.test(n)) return "CHEQUE";
   return null;
 }
-function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte, aperturaCaja, transitoPrevio){
+/* ---- De que banco es el efectivo que la cajera reporto ----
+   El banco del efectivo se deduce por VOTOS: los ACH de Brinks del mes mas las partidas de efectivo del
+   resumen anterior. Eso vota siempre al banco del CAMION —St. Georges—, pero la VENTANILLA puede ir a
+   otro banco. El 28-mar-2026 la cajera reporto 189.31 de ventanilla, Caja General acredito 31.40 y los
+   157.91 que quedaban entraron en BANCO GENERAL el mismo dia como "DEPOSITO 157.94". Con banco STG la
+   partida buscaba en un estado donde nunca iba a estar y viajaba mes tras mes — es literal lo que ya
+   advierte metodoDelPendiente para los otros medios, y al efectivo no habia llegado.
+   Los 0.03 son el FALTANTE del dia (su credito esta en el mismo comprobante, ME-00000001904), asi que el
+   deposito real no coincide al centavo con el pendiente: se admite el margen de los centavos del
+   faltante/sobrante, el mismo que usa metodoDelPendiente.
+   Guards: UN solo banco con UN solo deposito libre que encaje. Con dos de cualquiera no se adivina y se
+   deja el banco de los votos, que es lo que habia. */
+var TOL_CENTAVOS_DIA = 0.15;
+function depositoDelEfectivo(estados, fecha, pendiente, ventanaDias){
+  if(!estados) return null;
+  var hit = null, n = 0;
+  Object.keys(estados).forEach(function(b){
+    (estados[b] || []).forEach(function(x){
+      if(!(x.credito > 0) || x._transitoUsado) return;
+      if(normTxt(x.descripcion).indexOf("ABORTED") !== -1) return;
+      if(!esDepositoEstado(x.descripcion)) return;
+      if(x.fecha < fecha || distanciaBancaria(fecha, x.fecha) > ventanaDias) return;
+      if(Math.abs(x.credito - pendiente) > TOL_CENTAVOS_DIA) return;
+      n++; hit = { banco: b, linea: x };
+    });
+  });
+  return n === 1 ? hit : null;
+}
+function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte, aperturaCaja, transitoPrevio, estados){
   // Se usan las lineas de CREDITO del diario (el deposito real ruteado a cada banco: "DEPOSITO DE
   // BANISTMO CK", "DEPOSITO POR TARJETA CLAVE STG", etc.), clasificadas por banco segun su texto.
   // El DEBITO es "la venta" (el desglose de lo cobrado que entra a caja) y es irrelevante para este
@@ -2089,14 +2117,42 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
       var det = [brink > 0 ? "Brink B/ " + fmt(brink) : "", vent > 0 ? "Ventanilla B/ " + fmt(vent) : ""].filter(Boolean).join(" + ");
       var enCaja = ls.length ? " (" + ls.map(function(x){ return "\"" + String(x.descripcion||"").trim() + "\" B/ " + fmt(x.credito); }).join("; ") + ")" : "";
       if(diffEf > tolerancia && esFinDeMesP1(f)){
+        /* El banco por IMPORTE manda sobre el banco por votos, y ademas dice que la plata YA esta en el
+           banco: la partida sigue en transito porque Caja General no la acredito —esos pesos siguen
+           dentro de la cuenta—, pero lo que falta no es que el banco compense, es el ASIENTO. */
+        var depEf = depositoDelEfectivo(estados, f, diffEf, 10);
         hallazgos.push({
+          /* El banco sigue siendo el de los VOTOS a proposito, aunque depositoDelEfectivo haya encontrado
+             la plata en otro. Cambiarlo se midio y sale peor: la partida de 157.91 del 28-mar-2026, puesta
+             en Banco General, llega al Paso 0 de julio y se come tres creditos de Yappy de ese banco que
+             sumaban 157.91 exacto (8.16 + 114.75 + 35.00) y les tocaban a los depositos del 3, 20 y 22 de
+             julio, que salian huerfanos. Suma exacta y contablemente falsa: el falso positivo de siempre.
+             Y no hay nada que ganar cambiandolo, porque la linea que la compensa esta en el estado de
+             MARZO y ningun mes posterior lo trae. Lo que agrega valor es el TEXTO: decir donde esta la
+             plata y que asiento falta, que es como la partida se resuelve de verdad. */
           fecha:f, banco:efDec.banco || "", monto:diffEf, clase:"en_transito",
           concepto:"Efectivo de fin de mes reportado por la cajera", comprobante:"",
           partes: [{ metodo:"EFECTIVO BRINK", monto:brink }, { metodo:"EFECTIVO VENTANILLA", monto:vent }].filter(function(p){ return p.monto > 0; }),
-          motivo:"efectivo de fin de mes sin crédito en Caja General",
+          motivo: depEf ? "ya está en el banco — falta el crédito a Caja General"
+                        : "efectivo de fin de mes sin crédito en Caja General",
           texto: "Efectivo " + f + ": la cajera reportó B/ " + fmt(a) + (det ? " (" + det + ")" : "") + " y Caja General " +
-                 (b > 0 ? "acreditó B/ " + fmt(b) + enCaja : "no tiene su crédito") + ". Es de los últimos días del mes: queda en tránsito y viaja al resumen del próximo mes." +
-                 (efDec.banco ? "" : " No se pudo deducir el banco del efectivo: completalo en el resumen en tránsito.") + comprobanteTxt(f),
+                 (b > 0 ? "acreditó B/ " + fmt(b) + enCaja : "no tiene su crédito") + ". " +
+                 (depEf
+                   ? "El depósito YA ENTRÓ en " + depEf.banco + " el " + depEf.linea.fecha + " por B/ " + fmt(depEf.linea.credito) +
+                     (Math.abs(depEf.linea.credito - diffEf) > tolerancia
+                        ? " (B/ " + fmt(Math.round((depEf.linea.credito - diffEf)*100)/100) + " de diferencia: son los centavos del faltante/sobrante del día)"
+                        : "") +
+                     ", así que lo que falta no es que el banco compense sino el ASIENTO: Débito " + depEf.banco +
+                     " / Crédito Caja General. Registralo y la partida sale del resumen." +
+                     (depEf.banco !== efDec.banco
+                        ? " OJO: en el resumen la partida va como " + (efDec.banco || "sin banco") + ", que es donde compensa el " +
+                          "efectivo del mes, pero esta plata está en " + depEf.banco + ". Viajar no le sirve de nada —su línea " +
+                          "está en el estado de " + depEf.linea.fecha.slice(0,7) + " y ningún mes posterior lo trae—: se cierra " +
+                          "con el asiento, no esperando al banco."
+                        : "")
+                   : "Es de los últimos días del mes: queda en tránsito y viaja al resumen del próximo mes." +
+                     (efDec.banco ? "" : " No se pudo deducir el banco del efectivo: completalo en el resumen en tránsito.")) +
+                 comprobanteTxt(f),
           fuente: "Reporte consolidado de caja (efectivo) / Diario Caja General"
         });
         return;
@@ -4931,9 +4987,15 @@ function computaPaso(pasoKey, raws, opts){
     // Faltantes/sobrantes del informe y fecha de apertura: para cotejar lo que mueve el saldo de Caja
     // General sin ser un depósito (los ajustes de apertura los cuenta el Paso 0, no el Paso 1).
     var apertura = STATE.saldoCajaGeneral ? STATE.saldoCajaGeneral.fechaInicial : null;
+    /* Los estados de cuenta llegan al Paso 1 SOLO para identificar el banco del efectivo por importe
+       (ver depositoDelEfectivo). El Paso 1 no concilia contra el banco: eso es del Paso 2. */
+    var estP1 = {};
+    if(raws.estBanistmo) estP1["Banistmo"] = parseEstadoCuenta(raws.estBanistmo,"banistmo");
+    if(raws.estStg) estP1["STG"] = parseEstadoCuenta(raws.estStg,"stg");
+    if(raws.estBancoGeneral) estP1["Banco General"] = parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral");
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"),
                  parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura,
-                 transitoPrevioDe(raws));
+                 transitoPrevioDe(raws), estP1);
   }
   if(pasoKey==="paso2"){
     if(!raws.diarioCaja || !raws.estBanistmo || !raws.estStg) return null;
