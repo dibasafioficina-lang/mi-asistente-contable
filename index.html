@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.33";
+var APP_VERSION = "2026.10.34";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2506,6 +2506,18 @@ function esDevolucionEstado(desc){
   return n.indexOf("MAL ENVIADO") !== -1 || n.indexOf("ENVIADO POR ERROR") !== -1 ||
          n.indexOf("DEV DE DEP") !== -1 || n.indexOf("DEVOLUCION DE DEP") !== -1;
 }
+/* El REEMBOLSO de un cheque que quedo en circulacion lo declara el banco, igual que la devolucion.
+   Un cheque recibido puede no cambiarse NUNCA y que quien lo giro devuelva la plata por transferencia
+   meses despues. El 19-mar-2026 quedo en circulacion un cheque de 500.00 y el 6-ago Banistmo acredito
+   "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY": 140 dias de espera y ninguna linea que
+   diga "DEPOSITO". */
+function esReembolsoEstado(desc){
+  var n = normTxt(desc);
+  return /REEMBOLSO|REINTEGRO|DEVOLUCION|TRANSFERENCIA ENTRE CUENTAS/.test(n);
+}
+// Una sola definicion de "esto es un cheque en transito": la usan ventanaTransito y la pasada del
+// reembolso. Con dos copias del mismo regex, tocar una y olvidar la otra ya costo caro antes.
+function esChequeTransito(concepto){ return /CHEQUE|CK|CIRCULACION/.test(normTxt(concepto)); }
 /* Las lineas del banco que son del EFECTIVO y nadie mas puede consumir.
    El cotejo general del Paso 2 (depositos, cheques, tarjetas) y la seccion de efectivo comparten el pool
    de creditos, y el general corre primero: en junio de 2026 una linea menos al arrancar le hizo encontrar
@@ -8733,7 +8745,7 @@ function ventanaTransito(item){
      para el efectivo entero: son centavos, su ACH ya esta consumido —asi que no puede engancharse con un
      deposito— y la marca la pone la app, no el importe. */
   if(item && item.restoRedondeo) return 150;
-  if(/CHEQUE|CK|CIRCULACION/.test(c)) return 90;   // ~4 meses de calendario
+  if(esChequeTransito(c)) return 90;               // ~4 meses de calendario
   if(/VISA|V\/MC|CLAVE|TARJETA/.test(c)) return 12;
   return 15;                                       // efectivo, ventanilla, ACH, Yappy
 }
@@ -8874,6 +8886,39 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
         }
         if(combo){ combo.forEach(function(i){ candidatos[i].usado=true; candidatos[i].compensoEn=d; }); d.usado=true; }
       });
+    });
+    /* ---- Paso B2) El reembolso de un cheque que quedo en circulacion ----
+       Dos cosas lo bloqueaban, y la ventana era la MENOS importante:
+       - El POOL. poolDe() manda un cheque pendiente a poolDep, que son solo los creditos cuyo texto dice
+         "DEPOSITO" (esDepositoEstado). Un reembolso por transferencia no lo dice, asi que la linea no
+         estaba en el pool y el cheque no la veia nunca: subir la ventana a 250 tampoco lo resolvia.
+       - La ventana: 90 dias para un cheque contra 140 reales. Y distanciaBancaria cae a dias CALENDARIO
+         cuando la fecha queda fuera del calendario bancario del mes que se corre (CAL_BANCARIO solo
+         cubre el mes), asi que para una partida vieja la ventana es de calendario, no habil.
+
+       Es el mismo patron que CLAUDE.md ya documenta —"un cheque tampoco llega siempre como DEPOSITO"—
+       pero esa leccion habia quedado solo en conciliarChequesPaso3; al Paso 0 no habia llegado.
+
+       Cruza el limite del pool a proposito, asi que lo que protege son los guards:
+       - La partida tiene que ser un CHEQUE: son las que quedan en circulacion meses.
+       - El credito tiene que decir que NO es un deposito normal (esReembolsoEstado).
+       - 1:1 por el importe EXACTO, nunca una combinacion.
+       - Candidato UNICO por los DOS lados: un solo credito de ese importe y un solo cheque pendiente de
+         ese importe. Con dos de cualquiera se deja como diferencia; con una ventana de un ano elegir
+         seria adivinar, que es el falso positivo de siempre. */
+    chs.forEach(function(ch){
+      if(ch.usado || !esChequeTransito(ch.concepto)) return;
+      var cands = poolCred.filter(function(o){
+        return !o.usado && esReembolsoEstado(o.desc) && o.fecha >= ch.fecha &&
+               Math.abs(o.monto - ch.monto) <= tolerancia &&
+               distanciaBancaria(ch.fecha, o.fecha) <= VENT_DEVOLUCION;
+      });
+      if(cands.length !== 1) return;
+      var gemelos = chs.filter(function(c){
+        return !c.usado && esChequeTransito(c.concepto) && Math.abs(c.monto - ch.monto) <= tolerancia;
+      });
+      if(gemelos.length !== 1) return;
+      cands[0].usado = true; ch.usado = true; ch.compensoEn = cands[0]; ch.reembolso = cands[0];
     });
     /* Paso C: la partida compenso SOLO ALGUNAS de sus partes, y el resto viaja.
        El Paso A2 exige que cuadren TODAS: con una sola que falte, la partida entera se va al resumen del
@@ -9326,6 +9371,11 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       motivo:"compensó — venía del mes anterior",
       texto:etiqueta+" de B/ "+fmt(ch.monto)+" ("+ch.fechaOrig+", "+ch.banco+") venía en tránsito del mes anterior y COMPENSÓ en el banco"+
             (fCierre?" el "+fCierre:"")+" — su asiento es del mes pasado, no es una diferencia."+
+            /* El reembolso no es el cobro del cheque: el cheque NUNCA se cambió y quien lo giró devolvió
+               la plata por otra vía. Decirlo cambia lo que hay que hacer con el cheque en el sistema. */
+            (ch.reembolso ? " Y no entró como depósito sino como REEMBOLSO (\""+String(ch.reembolso.desc||"").trim()+
+                            "\"): el cheque nunca se cambió y quien lo giró devolvió la plata por otra vía, así que"+
+                            " dalo de baja en el sistema en vez de seguir esperando que claree." : "")+
             (ch.creditoCG==="hecho"?" No lleva asiento de descargo: su crédito a Caja General ya se hizo al depositar.":"")+
             (ch.comprobante?" · Comprobante "+ch.comprobante:""),
       fuente:"Paso 0 — partidas en tránsito / Estado de cuenta "+ch.banco });

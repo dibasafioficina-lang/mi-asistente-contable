@@ -271,6 +271,32 @@ pasada 1:  05-ago  DEPOSITO BRINKS 90.00   ↔  12-ago  20.01 + 19.98 + 50.00 = 
 - El diario incluso declara el desglose en sus sub-líneas (`7/5 6.11`, `4/4 20.01`, `4/5 19.98`), pero no hacía falta leerlo: con el guard, `buscarSubsetSuma` arma la combinación correcta sola.
 - Es el falso positivo de siempre —un importe armado con lo primero que sume— pero del lado del **asiento**, no de las líneas. Las otras pasadas (2, 2b, 2c, 3) ya traían el guard.
 
+### Un cheque en circulación puede volver como reembolso, no como depósito
+
+Un cheque recibido puede **no cambiarse nunca** y que quien lo giró devuelva la plata por **transferencia** meses después:
+
+```
+19-mar   Cheque (detalle individual)  500.00   ← queda en circulación
+06-ago   CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY   crédito 500.00
+```
+
+**Dos cosas lo bloqueaban, y la ventana era la menos importante:**
+
+- **El pool.** `poolDe()` manda un cheque pendiente a `poolDep`, que son **solo los créditos cuyo texto dice "DEPOSITO"** (`esDepositoEstado`). Un reembolso por transferencia no lo dice, así que la línea **no estaba en el pool** y el cheque no la veía nunca. Medido: subir la ventana del cheque de 90 a 250 **tampoco** lo resolvía.
+- **La ventana.** 90 días para un cheque contra **140** reales. Y ojo: `distanciaBancaria` **cae a días calendario** cuando la fecha queda fuera del calendario bancario del mes que se corre (`CAL_BANCARIO` solo cubre ese mes), así que para una partida vieja la ventana es de calendario, no hábil.
+
+Es el mismo patrón que ya está arriba —*"un cheque tampoco llega siempre como DEPOSITO"*— pero esa lección había quedado solo en `conciliarChequesPaso3`; **al Paso 0 no había llegado**.
+
+El **Paso B2** cruza el límite del pool a propósito, así que lo que protege son los guards:
+
+- La partida tiene que ser un **cheque** (`esChequeTransito`): son las que quedan en circulación meses.
+- El crédito tiene que declararse reembolso (`esReembolsoEstado`: `REEMBOLSO`/`REINTEGRO`/`DEVOLUCION`/`TRANSFERENCIA ENTRE CUENTAS`), o sea decir que **no es un depósito normal**.
+- **1:1 por el importe exacto**, nunca una combinación.
+- **Candidato único por los dos lados**: un solo crédito de ese importe y un solo cheque pendiente de ese importe. Con dos de cualquiera se deja como diferencia — con una ventana de un año, elegir sería adivinar.
+- El hallazgo lo **dice**: el cheque nunca se cambió, así que hay que **darlo de baja** en el sistema en vez de seguir esperando que claree. No es lo mismo que un cheque cobrado.
+
+`esChequeTransito()` quedó como **única** definición de "esto es un cheque en tránsito", usada por `ventanaTransito` y por el Paso B2: con dos copias del mismo regex, tocar una y olvidar la otra ya costó caro antes.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

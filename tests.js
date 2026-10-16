@@ -588,6 +588,45 @@ test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
   eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
 });
 
+/* ---- El reembolso de un cheque que quedo en circulacion ----
+   19-mar-2026: queda en circulacion un cheque de 500.00. El 6-ago Banistmo acredita
+   "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY": el cheque nunca se cambio y quien lo giro
+   devolvio la plata por transferencia, 140 dias despues.
+   Dos cosas lo bloqueaban, y la ventana era la MENOS importante: poolDe() manda un cheque pendiente a
+   poolDep, que son solo los creditos cuyo texto dice "DEPOSITO", asi que la linea no estaba en el pool y
+   subir la ventana a 250 tampoco lo resolvia. */
+test("el reembolso por transferencia descarga un cheque en circulación", () => {
+  const chq = () => [{ fecha: "2026-03-19", banco: "Banistmo", monto: 500.00, concepto: "Cheque (detalle individual)", comprobante: "", sentido: "credito" }];
+  const estReemb = () => [{ fecha: "2026-08-06", debito: 0, credito: 500.00, descripcion: "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY DE BOUTI, SOCIEDAD ANO", fila: 7 }];
+  eq(esReembolsoEstado("CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY"), true);
+  eq(esDepositoEstado("CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI A PETTY"), false,
+     "por esto el crédito no estaba en el pool del cheque");
+
+  const r = consumirTransitoPrevio(chq(), { Banistmo: estReemb() }, 0.01);
+  eq(r.pendientes.length, 0, "el cheque se descarga");
+  eq(r.compensadas.length, 1);
+  eq(!!r.compensadas[0].reembolso, true, "y queda marcado como reembolso, no como depósito cobrado");
+
+  // Candidato UNICO del lado del BANCO: con dos transferencias de 500.00 no se adivina cuál.
+  const est2 = estReemb().concat([{ fecha: "2026-08-20", debito: 0, credito: 500.00, descripcion: "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//OTRA", fila: 30 }]);
+  eq(consumirTransitoPrevio(chq(), { Banistmo: est2 }, 0.01).pendientes.length, 1, "con dos créditos iguales se deja pendiente");
+
+  // Candidato UNICO del lado del RESUMEN: con dos cheques pendientes de 500.00 tampoco.
+  const dos = chq().concat([{ fecha: "2026-04-10", banco: "Banistmo", monto: 500.00, concepto: "Cheque (detalle individual)", comprobante: "", sentido: "credito" }]);
+  eq(consumirTransitoPrevio(dos, { Banistmo: estReemb() }, 0.01).pendientes.length, 2, "con dos cheques iguales se dejan los dos");
+
+  // El texto del crédito tiene que decir que NO es un depósito normal.
+  const estDep = () => [{ fecha: "2026-08-06", debito: 0, credito: 500.00, descripcion: "ACH De Un Tercero Cualquiera", fila: 7 }];
+  eq(consumirTransitoPrevio(chq(), { Banistmo: estDep() }, 0.01).pendientes.length, 1,
+     "un crédito que no se declara reembolso no descarga el cheque");
+
+  // Y el importe EXACTO: nunca una combinación.
+  const estParcial = () => [{ fecha: "2026-08-06", debito: 0, credito: 400.00, descripcion: "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI", fila: 7 },
+                            { fecha: "2026-08-06", debito: 0, credito: 100.00, descripcion: "CR TRANSFERENCIA ENTRE CUENTAS PROPIAS//PRP BOUTI", fila: 8 }];
+  eq(consumirTransitoPrevio(chq(), { Banistmo: estParcial() }, 0.01).pendientes.length, 1,
+     "400 + 100 no arman el reembolso: se exige 1:1");
+});
+
 test("una partida del Paso 0 no puede consumir dos líneas del estado", () => {
   // 315.00 aparece dos veces en el estado y solo una vez en tránsito: solo una línea queda consumida.
   const est = [
