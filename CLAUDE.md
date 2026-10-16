@@ -359,6 +359,25 @@ Los **0.03** son el `FALTANTE DEL 28/03/2026`, cuyo crédito está en el mismo c
 - El texto avisa de la discrepancia: *"en el resumen va como STG, que es donde compensa el efectivo del mes, pero esta plata está en Banco General… se cierra con el asiento, no esperando al banco"*.
 - Al Paso 1 se le pasan los estados de cuenta **solo** para esto. El Paso 1 no concilia contra el banco: eso es del Paso 2.
 
+### El informe de retenciones fecha la VISA el día que VISA la procesa
+
+`ventasSinDeposito` descuenta la VISA de St. Georges con `visaDia[c.fecha]`, que sale del informe de retenciones y se busca **el mismo día** del asiento. Pero el informe fecha la venta el día en que **VISA la procesa**, que puede ser el siguiente:
+
+```
+Caja General      10-mar   ME-00000001885   venta 1,234.47 − créditos 1,024.35 = 210.12
+Reporte cajera    10-mar   VISA STG                                              210.15
+Informe VISA      11-mar   "03/11/2026"  Sub total fecha: bruto                  210.15   ← un día después
+```
+
+Con `visaDia["2026-03-10"]` vacío, los 210.12 salían como *"la venta entró a Caja General y no salió por ningún depósito"*. La partida viajó de **marzo a agosto** y le restaba 210.12 al cuadre de apertura de cada mes: al sacarla, el de agosto pasó de **324.12 a 114.00**.
+
+**Las fechas se leen bien** — el informe usa `MM/DD/YYYY` y la app lo lee como `2026-03-11`; no hay bug de formato. Lo que había que aceptar es que el crédito de la VISA de STG llega en el **acumulado de fin de mes**, con informe o sin él:
+
+- No se parchea la fecha. Si el reporte de cajeras declara que ese pendiente **es** la VISA de St. Georges, el crédito llega a fin de mes por definición. El guard es el de `metodoDelPendiente`: **un solo** método del día que coincida con el pendiente.
+- La excusa es **solo** de la VISA de STG. La VISA de Banistmo y la CLAVE de STG siguen siendo depósitos que faltan: el acumulado de fin de mes es de la VISA de St. Georges.
+- Si la VISA no llegara de verdad, no se silencia: el **Paso 2** cotea el acumulado de fin de mes contra las remisiones del estado y el **Paso 4** valida las retenciones.
+- Los **0.03** entre 210.15 y 210.12 son los centavos del faltante/sobrante del día, el mismo patrón del 157.91 de arriba.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

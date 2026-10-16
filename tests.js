@@ -588,6 +588,45 @@ test("una fecha imposible en el Paso 0 concilia igual y levanta aviso", () => {
   eq(h.filter(x => !esNoRojo(x)).length, 0, "un aviso no es una diferencia roja");
 });
 
+/* ---- La VISA de St. Georges no es un deposito que falte ----
+   ventasSinDeposito ya descuenta la VISA de STG con visaDia, que sale del informe de retenciones. Pero el
+   informe fecha la venta el dia en que VISA la PROCESA, que puede ser el siguiente: la venta del
+   10-mar-2026 (ME-00000001885) aparece bajo "03/11/2026" con bruto 210.15 exacto, asi que
+   visaDia["2026-03-10"] venia vacio y los 210.12 salian como "la venta entro a Caja General y no salio por
+   ningun deposito". La partida viajo de marzo a agosto y le restaba 210.12 al cuadre de apertura de cada
+   mes (en agosto, de 324.12 a 114.00 al sacarla).
+   Las fechas se leen BIEN -el informe usa MM/DD y la app lo lee como 2026-03-11-, asi que no es un bug de
+   formato: es que el credito de la VISA de STG llega en el acumulado de fin de mes, con informe o sin el. */
+test("el pendiente que el reporte identifica como VISA de STG no es un depósito que falte", () => {
+  STATE.transitoPrevio = null; STATE.chequesDetalle = null; STATE.retVisaDetalle = null; STATE.estados = null;
+  STATE.results = { paso0: [], paso1: [], paso2: [], paso3: [] };
+  STATE.diarioCaja = [
+    { fecha: "2026-03-10", referencia: "ME-00000001885", debito: 1234.47, credito: 0, descripcion: "REPORTE DE VENTA DEL 10/03/2026" },
+    { fecha: "2026-03-10", referencia: "ME-00000001885", debito: 0, credito: 1024.35, descripcion: "DEPOSITO BRINKS DEL 10/03/2026" }
+  ];
+  // El informe de retenciones NO trae el 10-mar (su bloque es del 11), así que visaDia queda vacío.
+  const rep = [
+    { fecha: "2026-03-10", banco: "STG", metodo: "VISA", monto: 210.15 },
+    { fecha: "2026-03-10", banco: "Banistmo", metodo: "VISA", monto: 365.27 },
+    { fecha: "2026-03-10", banco: "STG", metodo: "CLAVE", monto: 108.51 }
+  ];
+  STATE.reporteCajas = rep;
+  eq(metodoDelPendiente(rep, "2026-03-10", 210.12, 0.15).banco, "STG", "el método se identifica igual");
+  eq(ventasSinDeposito().length, 0, "la VISA de STG no se denuncia como depósito faltante");
+
+  // Si el método que falta es de OTRO banco, sí es un depósito que falta: la excusa es solo de la VISA STG,
+  // que es la que se acredita en un asiento acumulado a fin de mes.
+  const repBts = [{ fecha: "2026-03-10", banco: "Banistmo", metodo: "VISA", monto: 210.15 }];
+  STATE.reporteCajas = repBts;
+  eq(ventasSinDeposito().length, 1, "la VISA de Banistmo sí queda pendiente");
+
+  // Y con CLAVE de STG también: el acumulado de fin de mes es de la VISA.
+  const repClave = [{ fecha: "2026-03-10", banco: "STG", metodo: "CLAVE", monto: 210.15 }];
+  STATE.reporteCajas = repClave;
+  eq(ventasSinDeposito().length, 1, "la CLAVE de STG sí queda pendiente");
+  STATE.diarioCaja = null; STATE.reporteCajas = null;
+});
+
 /* ---- Donde esta el efectivo que la cajera reporto ----
    El banco del efectivo se deduce por VOTOS (los ACH de Brinks del mes), asi que vota al banco del
    CAMION. Pero la ventanilla puede ir a otro banco: el 28-mar-2026 la cajera reporto 189.31 de

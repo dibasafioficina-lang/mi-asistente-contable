@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.37";
+var APP_VERSION = "2026.10.38";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7680,11 +7680,26 @@ function ventasSinDeposito(opt){
        Se exige que la diferencia entre el debito y la venta declarada COINCIDA con el pendiente (dentro de
        los centavos del faltante/sobrante): si no coincide, hay dos cosas distintas pasando el mismo dia y
        rotularlo como error de digitacion mandaria a corregir un asiento que esta bien. */
+    // El banco sale del METODO que falta, no de donde compenso el efectivo: ver bancoDeMetodoRep.
+    var met = metodoDelPendiente(opt && opt.reporte, c.fecha, pend, tolPend);
+    /* ---- La VISA de St. Georges no es un deposito que falte ----
+       El punto 1 de arriba ya descuenta la VISA de STG usando visaDia, que sale del informe de
+       retenciones. Pero el informe fecha la venta el dia en que VISA la PROCESA, que puede ser el
+       siguiente: la venta del 10-mar-2026 (ME-00000001885) aparece en el informe bajo "03/11/2026" con
+       bruto 210.15 exacto, asi que visaDia["2026-03-10"] venia vacio y los 210.12 salian como "la venta
+       entro a Caja General y no salio por ningun deposito" — la partida viajo de marzo a agosto. (Las
+       fechas se leen bien: el informe usa MM/DD y la app lo lee como 2026-03-11, no hay bug de formato.
+       Los 0.03 son los centavos del faltante/sobrante del dia, el mismo patron del 157.91.)
+       No hace falta parchear la fecha: si el reporte de cajeras declara que ese pendiente ES la VISA de
+       St. Georges, su credito llega en el acumulado de fin de mes POR DEFINICION, con informe o sin el.
+       El guard es el de metodoDelPendiente: UN solo metodo del dia que coincida con el pendiente.
+       Si la VISA no llegara de verdad, no se silencia: el Paso 2 coteja el acumulado de fin de mes contra
+       las remisiones del estado y el Paso 4 valida las retenciones. */
+    if(met && met.metodo === "VISA" && met.banco === "STG") return;
     var dig = diferenciaDeDigitacion(opt && opt.reporte, c.fecha, c.venta, pend, tolPend);
     out.push({ ref:c.ref, fecha:c.fecha, venta:c.venta, acreditado:c.acreditado,
                visa:visa, reportado:trans, diferido:dif, pendiente:pend, digitacion:dig,
-               // El banco sale del METODO que falta, no de donde compenso el efectivo: ver bancoDeMetodoRep.
-               metodo: metodoDelPendiente(opt && opt.reporte, c.fecha, pend, tolPend) });
+               metodo: met });
   });
   out.sort(function(a,b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0; });
   return out;
