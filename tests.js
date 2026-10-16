@@ -202,6 +202,67 @@ test("Brinks + ventanilla del mismo día se emparejan con un solo crédito conso
   eq(c.faltanEnDiario.length, 0, "créditos del estado sin emparejar");
 });
 
+/* ---- Un asiento ya emparejado no se cobra dos veces ----
+   Agosto de 2026: el Brinks de 90.00 del 5-ago ya habia cuadrado en la pasada 0 contra su ACH de 90.00
+   del 7 (retiro 06/08, el ciclo del camion). La pasada 1 era la UNICA sin el guard `if(d.usado) return`,
+   asi que lo volvia a mirar y "cuadraba" otra vez contra tres lineas sin descripcion del 12 que suman
+   89.99 — a un centavo del objetivo, justo dentro de la tolerancia. Con eso se robaba las piezas del
+   "DEP DE FALTANTES" de 46.10 del 11-ago, que el banco acredito partido en 6.11 + 20.01 + 19.98 el 12.
+   Resultado: el asiento de 46.10 salia "pendiente por compensar" teniendo su plata en el banco Y el 6.11
+   salia como credito no registrado en el diario. La misma plata, dos relatos falsos. */
+test("un asiento que ya cuadro en la pasada 0 no vuelve a emparejarse en la pasada 1", () => {
+  const diario = [
+    { fecha: "2026-08-05", debito: 90.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 05/8/2026", referencia: "ME-00000002017", fila: 1 },
+    { fecha: "2026-08-11", debito: 46.10, credito: 0, descripcion: "DEP DE FALTANTES",              referencia: "ME-00000002022", fila: 2 }
+  ];
+  // El 50.00 es lo que hace posible el falso positivo: 20.01 + 19.98 + 50.00 = 89.99, a un centavo de
+  // 90.00 y justo dentro de la tolerancia. En el mes real tiene su propio asiento (RCP00266, un prestamo);
+  // aca se deja suelto para que la unica lectura posible de las tres chicas sea el DEP DE FALTANTES.
+  const estado = [
+    { fecha: "2026-08-07", debito: 0, credito: 90.00, descripcion: "Ach De Brink S Panama S.A. - D08563bsafe 060826 David", fila: 10 },
+    { fecha: "2026-08-12", debito: 0, credito: 6.11,  descripcion: "Descripción", fila: 11 },
+    { fecha: "2026-08-12", debito: 0, credito: 20.01, descripcion: "Descripción", fila: 12 },
+    { fecha: "2026-08-12", debito: 0, credito: 19.98, descripcion: "Descripción", fila: 13 },
+    { fecha: "2026-08-12", debito: 0, credito: 50.00, descripcion: "Descripción", fila: 14 }
+  ];
+  const c = conciliarBancoEstado(diario, estado, 7, 0.01, null);
+  // Sin el guard salian las DOS rojas falsas de agosto: el 46.10 como "pendiente por compensar" y el
+  // 6.11 como "no aparece registrado en el diario" — la misma plata contada dos veces mal.
+  eq(c.faltanEnBanco.length, 0, "el DEP DE FALTANTES de 46.10 tiene su plata en el banco");
+  eq(c.faltanEnDiario.length, 1, "lo único suelto es el 50.00, que no es de este asiento");
+  cerca(c.faltanEnDiario[0].monto, 50.00);
+});
+
+/* ---- El ajuste lo hace el banco; el asiento llega al cierre del mes ----
+   El "Ajuste De Ret. Itbms Julio" de 0.42 lo acredito St. Georges el 10-ago-2026 y su asiento
+   ME-00000002041 es del 31: la pasada 2 lo descartaba por sentido ("atras" descarta asientos posteriores
+   al credito) y la 2b solo salva los RCP. La misma plata salia DOS veces: el asiento como pendiente que
+   viaja al mes siguiente y el credito como no registrado en el diario. */
+test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
+  const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
+  const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];
+  const c = conciliarBancoEstado(diario, estado, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 0, "el asiento no queda pendiente");
+  eq(c.faltanEnDiario.length, 0, "y el crédito no sale como no registrado");
+
+  // Los DOS lados tienen que hablar del mismo tipo de ajuste: un deposito normal no entra por esta puerta.
+  const d2 = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "DEPOSITO DEL 31/8/2026", referencia: "ME-00000002041", fila: 1 }];
+  const c2 = conciliarBancoEstado(d2, [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }], 7, 0.01, null);
+  eq(c2.faltanEnDiario.length, 1, "un depósito con fecha posterior no se cuela como ajuste");
+
+  // Y candidato UNICO: con dos asientos de ajuste del mismo importe no se adivina cual.
+  const d3 = [
+    { fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42",  referencia: "ME-00000002041", fila: 1 },
+    { fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS AGOSTO 0.42", referencia: "ME-00000002042", fila: 2 }
+  ];
+  const c3 = conciliarBancoEstado(d3, [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }], 7, 0.01, null);
+  eq(c3.faltanEnDiario.length, 1, "con dos candidatos del mismo importe se deja como diferencia");
+
+  // La reversa de un cargo que el banco duplico y corrigio solo no tiene asiento: sigue siendo diferencia.
+  const c4 = conciliarBancoEstado([], [{ fecha: "2026-08-24", debito: 0, credito: 13.02, descripcion: "Rev. Retencion Clave 22-08 160", fila: 10 }], 7, 0.01, null);
+  eq(c4.faltanEnDiario.length, 1, "sin asiento del otro lado no hay nada que emparejar");
+});
+
 test("si el banco los acredita por separado, también cuadra", () => {
   const diario = [
     { fecha: "2026-06-08", debito: 400.00, credito: 0, descripcion: "DEPOSITO BRINKS DEL 08/6/2026", fila: 1 },

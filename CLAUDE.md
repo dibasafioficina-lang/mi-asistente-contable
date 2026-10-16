@@ -193,6 +193,12 @@ Salía como *"no aparece registrado en el diario"* teniendo su asiento exacto a 
 - El discriminante es la **referencia**, no el texto: el navegador del banco usa `ME-` (MAN-ENTRY) para los asientos de caja, `PAY` (AP-PAY) para los pagos y **`RCP` (AR-PAY) para los recibos de cobro**. Solo esos reciben la excusa del sentido.
 - La pasada 2b exige **1:1 por el importe exacto** (nunca una combinación, que es lo que armaría un falso positivo) y **candidato único**: con dos recibos del mismo importe en la ventana no se adivina cuál.
 
+**Lo mismo vale para un ajuste que mueve el banco por su cuenta**, y ahí la referencia no sirve de discriminante porque el asiento es un `ME-`: el `Ajuste De Ret. Itbms Julio` de **0.42** lo acreditó St. Georges el 10-ago-2026 y su asiento `ME-00000002041` es del **31** — se digita al cerrar el mes, cuando se nota. Salía dos veces: el asiento como pendiente que viaja al mes siguiente y el crédito como no registrado.
+
+- `esAjusteDeBanco()` lee la señal del **texto**, y la exige en los **dos lados**: `AJUSTE`/`REVERSO`/`REV.` junto con `RETENCION`/`RET.`/`COMISION`/`ITBMS`. Eso es lo que protege, no la ventana — que es larga a propósito (`VENT_AJUSTE = 45` días hábiles) porque el asiento llega al cierre.
+- Los demás guards son los de la 2b: 1:1 por el importe exacto y candidato único.
+- La **reversa de un cargo que el banco duplicó y corrigió solo** no tiene asiento ni lo necesita, así que sigue siendo diferencia: el 24-ago-2026 St. Georges cobró `Retencion Clave 22-08` **dos veces** (13.02 + 13.02) y revirtió una. Neto: un cargo, que es lo que el diario tiene.
+
 ### Con importes iguales se empareja el más cercano en fecha
 
 `buscarCombinacion` tomaba el **primer** candidato del array que coincidía en importe. Con varios importes iguales en la ventana eso empareja **en cascada** y deja uno huérfano. Los cuatro préstamos de Topy de julio de 2026 cuadran uno a uno:
@@ -236,6 +242,22 @@ El informe de cajeras de ese día declara **2,046.94**, exacto a los créditos. 
 - **La partida igual viaja al resumen**: el débito está posteado y el saldo de Caja General lo tiene dentro. Lo que cambia es el rótulo, no el arrastre.
 - **El Paso 1 no lo ve** porque cotea por banco/día y el débito de venta es una línea sola sin banco en el texto. El hallazgo que se lee cada mes lo emite el **Paso 0**, leyendo el resumen — así que la marca tiene que cruzar de un mes al siguiente por la columna **Motivo** (`digitado`, igual que `restoRedondeo`). Al tocar una, revisar la otra.
 - El banco que muestra es **deducido** (`bancoDelEfectivo`), no real: ningún banco lo debe. Acá dio STG cuando todos los depósitos del 11-abr son Banistmo.
+
+### Un asiento ya emparejado no se cobra dos veces
+
+La **pasada 1** de `conciliarBancoEstado` era la única sin el guard `if(d.usado) return`, así que un asiento que las pasadas 0 (efectivo del día consolidado) o 0b (acumulado del período) ya habían cuadrado **volvía a buscar match** y se robaba líneas del estado que le tocaban a otro.
+
+Agosto de 2026:
+
+```
+pasada 0:  05-ago  DEPOSITO BRINKS 90.00   ↔  07-ago  ACH Brinks 90.00 (retiro 06/08)   ✓ correcto
+pasada 1:  05-ago  DEPOSITO BRINKS 90.00   ↔  12-ago  20.01 + 19.98 + 50.00 = 89.99     ✗ otra vez
+```
+
+89.99 está a **un centavo** de 90.00, justo dentro de la tolerancia. Con esas dos piezas consumidas, el `DEP DE FALTANTES` de **46.10** del 11-ago —que el banco acreditó partido en `6.11 + 20.01 + 19.98` el 12— se quedaba sin nada, y la misma plata salía **dos veces mal**: el asiento como *"pendiente por compensar en banco"* teniendo su crédito, y el 6.11 como *"no aparece registrado en el diario"*.
+
+- El diario incluso declara el desglose en sus sub-líneas (`7/5 6.11`, `4/4 20.01`, `4/5 19.98`), pero no hacía falta leerlo: con el guard, `buscarSubsetSuma` arma la combinación correcta sola.
+- Es el falso positivo de siempre —un importe armado con lo primero que sume— pero del lado del **asiento**, no de las líneas. Las otras pasadas (2, 2b, 2c, 3) ya traían el guard.
 
 ### Dónde nace un descuadre de apertura
 

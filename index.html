@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.31";
+var APP_VERSION = "2026.10.32";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2989,6 +2989,15 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
   conciliarAcumuladoPeriodo(poolDiario, poolEstado, retVisaPorDia, tolerancia);
   // 1) cada débito del diario contra una combinación de créditos del estado
   poolDiario.forEach(function(d){
+    /* Lo que las pasadas 0 y 0b ya emparejaron NO se vuelve a mirar. Sin este guard un asiento se cobra
+       DOS veces: el Brinks de 90.00 del 5-ago-2026 ya habia cuadrado en la pasada 0 contra su ACH de
+       90.00 del 7 (retiro 06/08, el ciclo del camion) y aca volvia a "cuadrar" contra tres lineas sin
+       descripcion del 12 que suman 89.99 —a un centavo del objetivo, justo en la tolerancia—, robandose
+       las piezas que le tocaban al "DEP DE FALTANTES" de 46.10 del 11-ago. Ese asiento quedaba entonces
+       "pendiente por compensar" teniendo su plata en el banco (6.11 + 20.01 + 19.98 = 46.10 el 12-ago) y
+       encima el 6.11 salia como credito no registrado en el diario: la misma plata, dos relatos falsos.
+       Todas las demas pasadas ya traian el guard; esta era la unica sin el. */
+    if(d.usado) return;
     // VISA: el banco SIEMPRE compensa el NETO (bruto − retención del día); el diario registra el bruto y la
     // 'Remisión V/Mc' del estado ya viene con la retención descontada. Por eso, cuando se conoce la
     // retención del día, el neto es la ÚNICA interpretación válida y se prueba PRIMERO: si se probara el
@@ -3041,6 +3050,34 @@ function conciliarBancoEstado(diarioDeb, estadoCred, ventanaDias, tolerancia, re
     var cand = poolDiario.filter(function(d){
       return !d.usado && esReciboDeCobro(d) && Math.abs(montoConc(d) - e.monto) <= tolerancia &&
              distanciaBancaria(e.fecha, d.fecha) <= ventanaDias;
+    });
+    if(cand.length !== 1) return;
+    cand[0].usado = true; e.usado = true;
+  });
+  /* ---- 2c) El ajuste lo hace el banco; el asiento se digita cuando contabilidad se entera ----
+     Un ajuste o una reversa de retencion no es un deposito nuestro: lo mueve el banco por su cuenta y el
+     asiento se teclea cuando se nota, tipicamente al CERRAR el mes. El "Ajuste De Ret. Itbms Julio" de
+     0.42 lo acredito St. Georges el 10-ago-2026 y su asiento ME-00000002041 es del 31: la pasada 2 lo
+     descarta por sentido ("atras" descarta asientos posteriores al credito) y la 2b solo salva los RCP,
+     asi que la misma plata salia DOS veces —el asiento como pendiente que viaja al mes siguiente y el
+     credito como no registrado en el diario—.
+     La senal se lee del BANCO, igual que con la devolucion de un deposito mal enviado: el texto del
+     estado dice que es un ajuste. Guards: los DOS lados tienen que hablar del mismo tipo de ajuste, 1:1
+     por el importe EXACTO (nunca una combinacion) y candidato UNICO.
+     La ventana es larga a proposito —el asiento llega al cierre del mes, 15 dias habiles en este caso—, y
+     lo que protege no es la ventana sino el doble filtro de texto: un deposito normal no entra aca. */
+  function esAjusteDeBanco(desc){
+    var n = normTxt(desc);
+    if(!/AJUSTE|REVERSO|(^|\s)REV(\.|\s|$)/.test(n)) return false;
+    return /RETENCION|(^|\s)RET(\.|\s|$)|COMISION|ITBMS/.test(n);
+  }
+  var VENT_AJUSTE = 45;
+  poolEstado.forEach(function(e){
+    if(e.usado || !esAjusteDeBanco(e.descripcion)) return;
+    var cand = poolDiario.filter(function(d){
+      return !d.usado && esAjusteDeBanco(d.descripcion) &&
+             Math.abs(montoConc(d) - e.monto) <= tolerancia &&
+             distanciaBancaria(e.fecha, d.fecha) <= VENT_AJUSTE;
     });
     if(cand.length !== 1) return;
     cand[0].usado = true; e.usado = true;
