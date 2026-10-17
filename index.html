@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.41";
+var APP_VERSION = "2026.10.42";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -723,6 +723,14 @@ function toISODate(v, mdY){
   if(v===null||v===undefined||v==="") return null;
   if(v instanceof Date && !isNaN(v)) {
     return v.getFullYear()+"-"+String(v.getMonth()+1).padStart(2,"0")+"-"+String(v.getDate()).padStart(2,"0");
+  }
+  /* Numero suelto = SERIAL de Excel. Una celda con formato de fecha llega como Date (cellDates), pero
+     una columna escrita a mano puede quedar como numero crudo: el Paso 0 de diciembre de 2025 de BOUTI
+     trae "45789" en vez de 05/12/2025 y esa partida (120.00) se perdia sin avisar. El origen es el
+     1899-12-30, como en todo Excel. Se exige rango razonable para no confundir un importe con una fecha. */
+  if(typeof v === "number" && isFinite(v) && v > 20000 && v < 80000 && Math.floor(v) === v){
+    var dt = new Date(Date.UTC(1899, 11, 30) + v*86400000);
+    if(!isNaN(dt)) return dt.getUTCFullYear()+"-"+String(dt.getUTCMonth()+1).padStart(2,"0")+"-"+String(dt.getUTCDate()).padStart(2,"0");
   }
   var s = String(v).trim();
   var m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
@@ -9022,6 +9030,23 @@ function fechaTransito(raw, meses){
 }
 function parseTransitoPrevio(rows){
   var hIdx = findHeaderRow(rows, ["Fecha","Banco","Monto"]);
+  /* ---- El resumen puede no estar en la PRIMERA hoja ----
+     El que exporta la app si lo esta, pero el de un mes armado a mano no: el Paso 0 de diciembre de 2025
+     de BOUTI trae la conciliacion bancaria del sistema en Hoja1 y Hoja2 (Saldo Segun Libro / Saldo Segun
+     Banco / Deposito en Transito, con la partida entera en una celda de texto) y la tabla que la app sabe
+     leer en Hoja3. Mirando solo la primera hoja el archivo entero era un error de lectura.
+     readWorkbook ya adjunta todas las hojas en .hojas justamente para esto. Se toma la PRIMERA que traiga
+     el encabezado: con dos tablas distintas no se adivina cual es, y la primera es la que el orden del
+     libro propone. */
+  if(hIdx === -1 && rows && rows.hojas){
+    var nombres = Object.keys(rows.hojas);
+    for(var h2=0; h2<nombres.length; h2++){
+      var hoja = rows.hojas[nombres[h2]];
+      if(!hoja || hoja === rows) continue;
+      var i2 = findHeaderRow(hoja, ["Fecha","Banco","Monto"]);
+      if(i2 !== -1){ hoja.hojas = rows.hojas; rows = hoja; hIdx = i2; break; }
+    }
+  }
   if(hIdx===-1) throw new Error("No se encontró el encabezado (Fecha, Banco, Monto) en el resumen en tránsito.");
   var h = rows[hIdx];
   var cF=colIdx(h,"Fecha"), cB=colIdx(h,"Banco"), cM=colIdx(h,"Monto"), cC=colIdx(h,"Concepto"), cR=colIdx(h,"Comprobante");
