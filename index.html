@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.38";
+var APP_VERSION = "2026.10.39";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2559,7 +2559,10 @@ function comboAchConRedondeo(pool, fecha, objetivo, ventanaDias, tolerancia){
 var VENT_DEVOLUCION = 250;   // dias habiles, ~un ano: el caso real son 172
 function esDevolucionEstado(desc){
   var n = normTxt(desc);
-  return n.indexOf("MAL ENVIADO") !== -1 || n.indexOf("ENVIADO POR ERROR") !== -1 ||
+  /* "MAL ENV", no "MAL ENVIADO": el estado CORTA la descripcion a unos 30 caracteres y la frase queda
+     partida. El 4-sep-2026 St. Georges escribio "Dev Petty A Market Ref Dep Mal Env" — es la misma
+     devolucion que la linea del 5-sep que si dice "Mal Enviado" completo, y sin esto no se reconocia. */
+  return n.indexOf("MAL ENV") !== -1 || n.indexOf("ENVIADO POR ERROR") !== -1 ||
          n.indexOf("DEV DE DEP") !== -1 || n.indexOf("DEVOLUCION DE DEP") !== -1;
 }
 /* El REEMBOLSO de un cheque que quedo en circulacion lo declara el banco, igual que la devolucion.
@@ -2964,6 +2967,50 @@ function cargoDuplicadoDelEstado(estado, cred){
     if(Math.abs(x.debito - monto) > 0.01) return false;
     var t = textoSinRev(x.descripcion);
     return t.indexOf(base) === 0 || base.indexOf(t) === 0;
+  });
+  return gemelos.length >= 2 ? gemelos : null;
+}
+/* ---- La devolucion que se mando mal DOS VECES y una volvio ----
+   Un deposito que llego por error a la cuenta de Petty se devuelve a su dueno, y la devolucion puede
+   salir mal otra vez: el banco la cobra dos veces y acredita la que rebota. El neto es UNA devolucion,
+   que es exactamente lo que el diario registra, asi que el credito NO tiene asiento ni le corresponde
+   tenerlo. Caso real (184.26, St. Georges):
+
+     12-ago  credito 184.26  "Descripcion"                            <- entro plata de SHOPPING MARKET
+     11-ago  ME-00000002022  "DEP ENVIADO POR ERROR A PETTY SHOP..."  <- Petty la registra
+     04-sep  debito  184.26  "Dev Petty A Market Ref Dep Mal Env"
+     05-sep  debito  184.26  "Petty A Mark Ref Dep Mal Enviado"       <- mandada dos veces
+     05-sep  credito 184.26  "Dec De Ah Mal Enviado Graphic A Pett"   <- una rebota
+     05-sep  PAY0004549      SHOPPING MARKET  credito 184.26          <- el diario, UNA sola vez
+
+   Banco: -184.26 -184.26 +184.26 = -184.26. Diario: -184.26. Cuadra.
+
+   Es la misma forma que cargoDuplicadoDelEstado (dos debitos, un credito, un asiento) pero NO el mismo
+   caso: ahi el banco cobra un cargo PROPIO dos veces y el texto del credito es el del debito con un
+   "Rev." delante. Aca el texto es otro —otro redactado, otra direccion, otros nombres— y los debitos no
+   son del mismo dia, asi que aflojar aquella regla le abriria la puerta a cualquier credito con un
+   debito igual cerca. Va como regla aparte.
+
+   Lo que la protege, igual que alla, es que el DUPLICADO exista: se exigen DOS o mas debitos del estado
+   por el MISMO importe exacto y con la misma senal de deposito mal enviado, dentro de la ventana. Con UN
+   solo debito el credito es plata que vuelve de verdad: esa SI es una diferencia y tiene que salir —es
+   el caso del 11.70 de mayo de 2026, que sigue rojo.
+
+   Se reporta como informativo, no se silencia: la exclusion queda explicita. */
+var VENT_DEVOLUCION_REENVIO = 5;   // dias habiles entre los intentos: el caso real son 1
+function devolucionReenviadaDelEstado(estado, cred, tolerancia){
+  // Puede llegar la FILA cruda del estado (lleva .credito) o el objeto del pool del Paso 3, que solo
+  // lleva .monto — ver la nota de cargoDuplicadoDelEstado, el mismo descuido ya costo una iteracion.
+  if(!cred) return null;
+  var monto = cred.credito > 0 ? cred.credito : cred.monto;
+  if(!(monto > 0)) return null;
+  if(!esDevolucionEstado(cred.descripcion)) return null;
+  var tol = tolerancia || 0.01;
+  var gemelos = (estado||[]).filter(function(x){
+    if(x === cred || !(x.debito > 0)) return false;
+    if(Math.abs(x.debito - monto) > tol) return false;
+    if(!esDevolucionEstado(x.descripcion)) return false;
+    return distanciaBancaria(x.fecha, cred.fecha) <= VENT_DEVOLUCION_REENVIO;
   });
   return gemelos.length >= 2 ? gemelos : null;
 }
@@ -4707,6 +4754,19 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
                  "que el banco cobró " + dup.length + " veces el mismo día por el mismo importe. El neto es un solo " +
                  "cargo, que es lo que el diario registra: no hay asiento de esta reversa ni le corresponde tenerlo.",
           fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") — cargo del banco, neto cero"
+        });
+        return;
+      }
+      // Devolucion de un deposito mal enviado que salio DOS veces y una rebotó: neto una sola salida.
+      var reenv = devolucionReenviadaDelEstado(cfg.estado, f, tolerancia);
+      if(reenv){
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"informativo",
+          texto: cfg.nombre + " " + f.fecha + ": B/ " + fmt(f.monto) + " (\"" + desc + "\") es el rebote de una " +
+                 "devolución de depósito mal enviado que salió " + reenv.length + " veces por el mismo importe (" +
+                 reenv.map(function(x){ return x.fecha; }).join(", ") + "). El neto es una sola devolución, que es " +
+                 "lo que el diario registra: no hay asiento de este crédito ni le corresponde tenerlo.",
+          fuente: "Estado de cuenta " + cfg.nombre + " (fila " + f.fila + ") — devolución reenviada, neto una salida"
         });
         return;
       }

@@ -236,6 +236,27 @@ Un depósito enviado a la cuenta equivocada puede tardar **meses** en volver, y 
 
 **Esto no cierra el caso de mayo de 2026**, y conviene saber por qué: la partida del 27-may **nace en el propio mes** (la genera el Paso 2) y el Paso 0 solo recibe la de diciembre, así que las dos piezas nunca coinciden en un mismo mes — y en junio, cuando el resumen ya trae las dos, el crédito de 11.70 quedó en el estado de mayo. Es el mismo patrón del 76.50: **hay partidas que solo se cierran a mano**, descargándolas del resumen.
 
+### La devolución se puede mandar mal dos veces, y una rebota
+
+Un depósito que llega por error a la cuenta de Petty se devuelve a su dueño, y **la devolución puede salir mal otra vez**. St. Georges, 184.26:
+
+```
+12-ago  crédito 184.26  "Descripción"                             entró plata de SHOPPING MARKET
+11-ago  ME-00000002022  "DEP ENVIADO POR ERROR A PETTY SHOP…"     Petty la registra
+04-sep  débito  184.26  "Dev Petty A Market Ref Dep Mal Env"
+05-sep  débito  184.26  "Petty A Mark Ref Dep Mal Enviado"        mandada dos veces
+05-sep  crédito 184.26  "Dec De Ah Mal Enviado Graphic A Pett"    una rebota
+05-sep  PAY0004549      SHOPPING MARKET  crédito 184.26           el diario, UNA sola vez
+```
+
+Banco: −184.26 −184.26 +184.26 = **−184.26**. Diario: **−184.26**. Cuadra — **el asiento está bien** y no hay nada que corregir en el sistema. El crédito del rebote salía como *"no aparece registrado en el diario contable"*.
+
+Es la misma **forma** que la reversa duplicada de agosto (dos débitos, un crédito, un asiento) pero **no el mismo caso**: ahí el banco cobra un cargo **propio** dos veces y el texto del crédito es el del débito con un `Rev.` delante. Acá el texto es otro —otro redactado, otra dirección, otros nombres— y los débitos **no son del mismo día**, así que aflojar `cargoDuplicadoDelEstado` le abriría la puerta a cualquier crédito con un débito igual cerca. Va como regla aparte, `devolucionReenviadaDelEstado()`.
+
+- Lo que la protege es lo mismo de allá: que el **duplicado exista**. Se exigen **dos o más** débitos del estado por el **importe exacto** y con la misma señal de depósito mal enviado, dentro de `VENT_DEVOLUCION_REENVIO` (5 días hábiles; el caso real es 1).
+- Con **un solo** débito el crédito es plata que vuelve de verdad: **esa sí es una diferencia** y tiene que salir. Es el 11.70 del 27-may de arriba, que sigue rojo.
+- **La descripción viene cortada y eso decidía la regla.** El estado corta a unos 30 caracteres: el débito del 4-sep queda en `"…Ref Dep Mal Env"` y el del 5-sep alcanza a decir `"Mal Enviado"`. `esDevolucionEstado` buscaba la frase entera, así que reconocía **uno solo** de los dos y el guard de "dos o más" no disparaba nunca. Ahora busca `MAL ENV`. Es el mismo problema del `Rev.` que se comía cinco caracteres en la reversa de agosto — **al tocar una, revisar la otra**.
+
 ### No todo pendiente es un depósito que falta
 
 El asiento de venta puede estar **digitado por más de lo que se cobró**, y entonces el pendiente no tiene contrapartida en ningún banco: esa plata nunca existió. El `ME-00000001915` del 11-abr-2026:

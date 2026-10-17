@@ -276,6 +276,57 @@ test("la reversa de un cargo duplicado por el banco es informativo, no diferenci
   eq(dup2 ? dup2.length : 0, 2, "también desde el objeto del pool del Paso 3");
 });
 
+/* ---- La devolucion que se mando mal dos veces y una volvio ----
+   Un deposito de SHOPPING MARKET llego por error a la cuenta de Petty el 12-ago-2026 (184.26, linea sin
+   descripcion) y Petty lo registro con el ME-00000002022. La devolucion salio DOS veces —el 4 y el 5 de
+   septiembre— y la que fue a "Graphic" rebotó el mismo 5. El neto es UNA devolucion, que es lo que el
+   diario registra con el PAY0004549, asi que el credito del rebote no tiene asiento ni le corresponde.
+   Misma forma que la reversa duplicada pero otro caso: otro redactado, otra direccion, otros nombres y
+   los debitos NO son del mismo dia, asi que es una regla aparte. */
+test("el rebote de una devolución mandada dos veces es informativo, no diferencia", () => {
+  // El estado CORTA la descripcion a ~30 caracteres: el debito del 4-sep queda en "Mal Env" y el del
+  // 5-sep alcanza a decir "Mal Enviado". Por eso esDevolucionEstado busca "MAL ENV", no la frase entera
+  // — con la frase entera quedaba UN solo gemelo y el guard de "dos o mas" no disparaba.
+  eq(esDevolucionEstado("Dev Petty A Market Ref Dep Mal Env"), true, "reconoce la descripción cortada");
+  const est = [
+    { fecha: "2026-09-05", debito: 0,      credito: 184.26, descripcion: "Dec De Ah Mal Enviado Graphic A Pett", fila: 123 },
+    { fecha: "2026-09-05", debito: 184.26, credito: 0,      descripcion: "Petty A Mark Ref Dep Mal Enviado",     fila: 124 },
+    { fecha: "2026-09-04", debito: 184.26, credito: 0,      descripcion: "Dev Petty A Market Ref Dep Mal Env",   fila: 127 }
+  ];
+  const r = devolucionReenviadaDelEstado(est, est[0], 0.01);
+  eq(r ? r.length : 0, 2, "reconoce las dos salidas por el mismo importe");
+
+  // Con UNA sola salida el credito es plata que vuelve de verdad: esa SI es una diferencia y tiene que
+  // salir. Es el caso del 11.70 del 27-may-2026, que sigue rojo.
+  eq(devolucionReenviadaDelEstado([est[0], est[1]], est[0], 0.01), null, "con una sola salida no se silencia");
+
+  // El texto tiene que declarar el deposito mal enviado; un credito cualquiera no entra.
+  const otro = [
+    { fecha: "2026-09-05", debito: 0,      credito: 184.26, descripcion: "Deposito De Cliente", fila: 123 },
+    { fecha: "2026-09-05", debito: 184.26, credito: 0,      descripcion: "Pago A Proveedor",    fila: 124 },
+    { fecha: "2026-09-04", debito: 184.26, credito: 0,      descripcion: "Pago A Proveedor",    fila: 127 }
+  ];
+  eq(devolucionReenviadaDelEstado(otro, otro[0], 0.01), null, "sin la señal de mal enviado no entra");
+
+  // Y el importe tiene que ser el mismo: un rebote parcial no se explica con el duplicado.
+  const dist = [est[0], Object.assign({}, est[1], {debito: 90.00}), Object.assign({}, est[2], {debito: 90.00})];
+  eq(devolucionReenviadaDelEstado(dist, est[0], 0.01), null, "con otro importe no hay par");
+
+  // Desde el objeto del POOL del Paso 3, que lleva .monto y no .credito (el descuido que ya costó una
+  // iteración en cargoDuplicadoDelEstado).
+  const delPool = { fecha: "2026-09-05", monto: 184.26, descripcion: "Dec De Ah Mal Enviado Graphic A Pett", fila: 123 };
+  const r2 = devolucionReenviadaDelEstado(est, delPool, 0.01);
+  eq(r2 ? r2.length : 0, 2, "también desde el objeto del pool del Paso 3");
+
+  // Y el Paso 3 completo: el crédito no sale como no registrado en el diario.
+  const diario = [{ fecha: "2026-09-05", debito: 0, credito: 184.26, descripcion: "SHOPPING MARKET S.A. - Pago:PAY0004549", referencia: "PAY0004549", fila: 41 }];
+  const c = conciliarBancoEstado(diario, est, 7, 0.01, null);
+  eq(c.faltanEnDiario.filter(x => Math.abs(x.monto - 184.26) < 0.01 && x.fila === 123).length, 1,
+     "el crédito queda huérfano en el cotejo (las salidas no se cotean)");
+  eq(!!devolucionReenviadaDelEstado(est, c.faltanEnDiario.filter(x => x.fila === 123)[0], 0.01), true,
+     "y el paso lo reconoce desde ahí");
+});
+
 test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
   const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
   const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];
