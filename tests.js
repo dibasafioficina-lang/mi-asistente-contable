@@ -327,6 +327,62 @@ test("el rebote de una devolución mandada dos veces es informativo, no diferenc
      "y el paso lo reconoce desde ahí");
 });
 
+/* ---- El navegador declara el desglose DEBAJO del movimiento ----
+   Caja General agrupa en una linea lo que el diario del banco trae separado, y el rotulo de esa linea es el
+   de la PRIMERA parte, no el del total: el 30-sep-2026, "DEPOSITO POR TARJETA CLAVE BANISTMO" por 676.70
+   son CLAVE 258.25 + VISA 418.45, y el corte esta en las sub-lineas. Sin leerlas, yaCubiertoEnTransito solo
+   podia descontar la parte CLAVE del Paso 3 y la VISA de 418.45 entraba al resumen: contada dos veces. */
+test("el desglose de las sub-líneas del navegador arma las partes del movimiento", () => {
+  const mov = { descripcion:"DEPOSITO POR TARJETA CLAVE BANISTMO DEL 30/9/2026", debito:0, credito:676.70,
+                _sub:[258.25, "DEPOSITO POR TARJETA VISA BANISTMO DEL 30/9/2026", 418.45] };
+  const p = partesDeSubLineas(mov);
+  eq(p ? p.length : 0, 2, "dos partes");
+  eq(p[0].metodo, "CLAVE", "la primera hereda el rótulo del encabezado");
+  eq(p[0].monto, 258.25, "y su importe");
+  eq(p[1].metodo, "VISA", "la sub-línea de texto re-rotula la que viene después");
+  eq(p[1].monto, 418.45, "y su importe");
+
+  // Sin suma exacta no se toca: lo que hay debajo no es su desglose y adivinar movería plata de lugar.
+  eq(partesDeSubLineas({ descripcion:"X", debito:0, credito:676.70, _sub:[258.25, 400.00] }), null,
+     "con la suma distinta al total no hay desglose");
+  // Una sola parte no agrega nada sobre lo que ya se deduce del encabezado.
+  eq(partesDeSubLineas({ descripcion:"X", debito:0, credito:11, _sub:[11] }), null, "una sola parte no cuenta");
+  // El efectivo del mismo comprobante trae el patrón igual: BRINKS 152.04 = 150.00 + ventanilla 2.04.
+  const ef = partesDeSubLineas({ descripcion:"DEPOSITO BRINKS DEL 30/9/2026", debito:0, credito:152.04,
+                                 _sub:[150, "DEPOSITO DEL 30/9/2026", 2.04] });
+  eq(ef ? ef.length : 0, 2, "el efectivo también declara sus partes");
+  eq(ef[1].monto, 2.04, "la ventanilla es la segunda");
+});
+
+/* ---- El espejo de achDelCamionConResto: el redondeo entro y el camion no ----
+   El redondeo se deposita el dia del RETIRO y el ACH se acredita dos o tres dias despues, asi que a fin de
+   mes el redondeo entra y el ACH se va al mes siguiente. El 29-sep-2026: 338.12 = 335.00 + 3.12, el 3.12
+   entro el 30-sep y el ACH de 335.00 el 1-oct. La partida viajaba por los 338.12 completos. */
+test("el redondeo que ya entró se descuenta y viaja solo el camión", () => {
+  const d = { fecha:"2026-09-29", monto:338.12, descripcion:"DEPOSITO BRINKS DEL 29/9/2026", usado:false,
+              src:{ referencia:"ME-00000002069",
+                    partesSub:[{metodo:"", monto:335.00}, {metodo:"", monto:3.12}] } };
+  const pool = [{ fecha:"2026-09-30", monto:3.12, descripcion:"Descripción", usado:false }];
+  const r = redondeoDelCamionSinACH(pool, d, 10, 0.01);
+  eq(r ? r.resto : 0, 335, "arrastra el camión, no el total");
+  eq(r ? r.redondeo : 0, 3.12, "y nombra el redondeo que ya entró");
+
+  // Con DOS líneas sin descripción del mismo importe no se adivina cuál: con céntimos de cualquier fecha
+  // se arma cualquier importe (el falso positivo del 5.85 de enero).
+  const dos = pool.concat([{ fecha:"2026-09-30", monto:3.12, descripcion:"Descripción", usado:false }]);
+  eq(redondeoDelCamionSinACH(dos, d, 10, 0.01), null, "con dos candidatas no se toca");
+  // Sin el desglose declarado no hay corte que seguir.
+  const sinDesg = { fecha:d.fecha, monto:d.monto, descripcion:d.descripcion, usado:false, src:{ referencia:"X" } };
+  eq(redondeoDelCamionSinACH(pool, sinDesg, 10, 0.01), null, "sin desglose no se parte nada");
+  // Dos partes chicas no son camión + ventanilla.
+  const chicas = { fecha:d.fecha, monto:6.24, descripcion:d.descripcion, usado:false,
+                   src:{ referencia:"X", partesSub:[{metodo:"",monto:3.12},{metodo:"",monto:3.12}] } };
+  eq(redondeoDelCamionSinACH(pool, chicas, 10, 0.01), null, "dos redondeos no son camión más ventanilla");
+  // La línea tiene que ser posterior o del mismo día que el asiento.
+  const antes = [{ fecha:"2026-09-28", monto:3.12, descripcion:"Descripción", usado:false }];
+  eq(redondeoDelCamionSinACH(antes, d, 10, 0.01), null, "el banco no acredita antes del depósito");
+});
+
 test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
   const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
   const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];

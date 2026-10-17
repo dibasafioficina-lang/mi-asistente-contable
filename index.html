@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.39";
+var APP_VERSION = "2026.10.40";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1384,14 +1384,70 @@ function parseDiario(rows, accountFilter){
     if(acc) lastAccount = acc;
     var fechaRaw = cFecha>=0 ? row[cFecha] : null;
     var iso = toISODate(fechaRaw, false);
-    if(!iso) continue; // fila secundaria (glosa de detalle), no es movimiento
+    /* ---- La fila secundaria declara el DESGLOSE del movimiento ----
+       El navegador pone debajo de cada movimiento sus partes, en la columna Descripcion: un importe por
+       parte, y una fila de TEXTO cuando la parte siguiente es de otro metodo. Se descartaban como "glosa"
+       y con eso se perdia el unico lugar donde el desglose esta declarado. Ver partesDeSubLineas. */
+    if(!iso){
+      if(out.length && cDesc>=0){
+        var cel = row[cDesc];
+        if(cel!==null && cel!==undefined && String(cel).trim()!==""){
+          var ult = out[out.length-1];
+          (ult._sub = ult._sub || []).push(cel);
+        }
+      }
+      continue;
+    }
     var desc = cDesc>=0 ? String(row[cDesc]||"") : "";
     var deb = money(row[cDeb]);
     var cred = money(row[cCred]);
     if(accountFilter && lastAccount && normTxt(lastAccount).indexOf(normTxt(accountFilter))===-1) continue;
     out.push({fecha:iso, cuenta:lastAccount, referencia: cRef>=0?row[cRef]:"", descripcion:desc, debito:deb, credito:cred, fila:r+1});
   }
+  out.forEach(function(m){ m.partesSub = partesDeSubLineas(m); delete m._sub; });
   return out;
+}
+/* ---- El desglose que el navegador declara debajo del movimiento ----
+   Caja General agrupa en UNA linea lo que el diario del banco trae separado, y el rotulo de esa linea es
+   el de la PRIMERA parte, no el del total. El 30-sep-2026:
+
+     DEPOSITO POR TARJETA CLAVE BANISTMO DEL 30/9/2026   credito 676.70
+       258.25                                              <- la CLAVE
+       DEPOSITO POR TARJETA VISA BANISTMO DEL 30/9/2026    <- rotulo de la parte siguiente
+       418.45                                              <- la VISA
+
+   Sin leer esas filas, `partes` quedaba en [{CLAVE, 676.70}] y yaCubiertoEnTransito solo podia descontar
+   la parte CLAVE del Paso 3 (258.25): la VISA de 418.45 no encontraba parte de su metodo, caia a
+   buscarSubsetSuma, no cuadraba contra el 676.70, y ENTRABA AL RESUMEN. 418.45 contados dos veces. Que se
+   salvara el 258.25 fue suerte del rotulo: con el encabezado al reves se habria duplicado el otro.
+
+   El mismo comprobante trae el patron en el efectivo: BRINKS 152.04 = 150.00 + "DEPOSITO DEL 30/9/2026"
+   2.04. Esas partes son las que necesita redondeoDelCamionSinACH.
+
+   Dos guards: la suma tiene que dar EXACTO el importe del movimiento —si no, lo que hay debajo no es su
+   desglose y adivinar moveria plata de lugar— y tiene que haber dos partes o mas, porque con una sola no
+   se gana nada sobre lo que ya se deduce del encabezado. */
+function partesDeSubLineas(mov){
+  var sub = mov && mov._sub;
+  if(!sub || !sub.length) return null;
+  var total = mov.debito > 0 ? mov.debito : mov.credito;
+  if(!(total > 0)) return null;
+  var partes = [], desc = mov.descripcion, suma = 0;
+  for(var i=0;i<sub.length;i++){
+    var c = sub[i];
+    // Numero o texto se decide ANTES de llamar a money(): un rotulo pasado por money() quedaria
+    // registrado como celda ilegible y el paso lo reportaria como un problema de lectura que no existe.
+    var txt = String(c).trim();
+    var esNum = (typeof c === "number") || /^-?[\d,]*\d(\.\d+)?$/.test(txt);
+    if(!esNum){ desc = txt; continue; }        // re-rotula las partes que vienen despues
+    var m = Math.round(Number(txt.replace(/,/g,""))*100)/100;
+    if(!(m > 0)) return null;
+    partes.push({ metodo: metodoDeposito(desc) || "", monto: m, desc: String(desc||"").trim() });
+    suma = Math.round((suma + m)*100)/100;
+  }
+  if(partes.length < 2) return null;
+  if(Math.abs(suma - total) > 0.01) return null;
+  return partes;
 }
 
 // Saldo del diario de Caja General: Balance Inicial (arrastre del mes anterior, dinero en tránsito),
@@ -2591,6 +2647,48 @@ function esChequeTransito(concepto){ return /CHEQUE|CK|CIRCULACION/.test(normTxt
 function reservadoParaEfectivo(desc, monto){
   return esBrinks(desc);
 }
+/* ---- Los redondeos que el efectivo PUEDE PROBAR que necesita ----
+   reservadoParaEfectivo esconde del cotejo general los ACH de Brinks pero NO los redondeos, y eso es a
+   proposito: reservarlos TODOS le quita al general lineas que usa para armar los acumulados de fin de mes
+   y el Yappy de 4,198.23 de mayo dejaba de cuadrar (5 rojas en el Paso 3).
+   Sin ninguna reserva, igual se los lleva. En agosto de 2026 el cotejo general se llevo los CATORCE
+   redondeos del mes y el efectivo de catorce dias salio como "el camion entro, falta el redondeo" con su
+   plata completa en el banco: 0.06, 0.53, 0.67, 0.72, 0.75, 1.62, 1.90, 2.09, 2.55, 2.85, 2.92, 3.57,
+   10.50 y el de 153.48. Los catorce estan en el estado como linea "Descripcion"; se verificaron uno por
+   uno. El resumen pasaba de 18 partidas a 32.
+
+   El medio es reservar SOLO el redondeo que una linea de efectivo puede NOMBRAR: el resto exacto entre su
+   importe y UN ACH con retiro compatible, y una sola linea sin descripcion que lo cubra. Lo que no se
+   puede probar no se reserva, asi que el general conserva las lineas sueltas con las que arma los
+   acumulados. Es el mismo par (ACH unico + resto de tamano de redondeo) que ya usa achDelCamionConResto;
+   aca solo sirve para APARTAR la linea, no para compensar.
+   Marca los objetos del pool, que son compartidos: apartar no duplica. */
+function marcarRedondeosDelEfectivo(diarioCaja, bancoCred, banco, ventanaDias, tolerancia){
+  var efH = STATE.decisiones && STATE.decisiones.efectivo;
+  if(!efH || efH.banco !== banco) return;
+  if(efH.firmaCaja !== firmaDiario(diarioCaja)) return;
+  var pool = bancoCred[banco] || [];
+  var vent = Math.max(ventanaDias, 10);
+  (diarioCaja||[]).forEach(function(d){
+    if(!(d.credito > 0) || !efH.filas[d.fila]) return;
+    var achs = pool.filter(function(e){
+      if(!esBrinks(e.desc)) return false;
+      if(e.fecha < d.fecha || distanciaBancaria(d.fecha, e.fecha) > vent) return false;
+      if(!retiroCompatible(e.desc, d.fecha)) return false;
+      var r = Math.round((d.credito - e.monto)*100)/100;
+      return r > tolerancia && r <= TOPE_REDONDEO;
+    });
+    if(achs.length !== 1) return;                       // con dos ACH no se adivina cual es
+    var resto = Math.round((d.credito - achs[0].monto)*100)/100;
+    var cands = pool.filter(function(e){
+      if(!sinDescripcion(e.desc)) return false;
+      if(e.fecha < d.fecha || distanciaBancaria(d.fecha, e.fecha) > vent) return false;
+      return Math.abs(e.monto - resto) <= tolerancia;
+    });
+    if(cands.length !== 1) return;                      // con dos candidatas tampoco
+    cands[0]._resEfectivo = true;
+  });
+}
 /* El ACH del camion de un asiento de efectivo al que solo le falta el redondeo.
    Devuelve el ACH unico cuyo retiro es compatible con el asiento y cuyo resto tiene tamano de redondeo;
    null si no hay ninguno o si hay mas de uno. Con dos ACH posibles no se toca: elegir uno manda el
@@ -2606,6 +2704,40 @@ function achDelCamionConResto(pool, d, ventana, tolerancia){
     return r > tolerancia && r <= TOPE_REDONDEO;
   });
   return achs.length === 1 ? achs[0] : null;
+}
+/* ---- El espejo: el REDONDEO entro y el camion no ----
+   achDelCamionConResto cubre el caso en que el ACH ya compenso y falta el redondeo (el 1.92 del 20-mar-2026,
+   acreditado el 3 de junio). Al reves pasa igual de seguido y no habia nada que lo reconociera: el redondeo
+   se deposita el dia del RETIRO y el ACH se acredita dos o tres dias despues, asi que a fin de mes el
+   redondeo entra y el ACH se va al mes siguiente.
+
+     Caja General  29-sep  DEPOSITO BRINKS DEL 29/9/2026   338.12 = 335.00 + 3.12  (sub-lineas)
+     Estado STG    30-sep  "Descripcion"                   credito  3.12   <- el redondeo YA entro
+     Estado STG            el ACH de 335.00 no esta: se acredito el 1-oct
+
+   La partida viajaba por los 338.12 completos, asi que en octubre iba a buscar 338.12 y encontrar 335.00 —
+   no cuadra, y vuelve a viajar. Es el 1.92 del 20-mar otra vez, del otro lado.
+
+   Se apoya en el desglose DECLARADO (partesDeSubLineas), no en adivinar el corte: exactamente dos partes,
+   una de tamano de redondeo y la otra no, y UNA sola linea sin descripcion libre que coincida con la chica
+   por el importe exacto. Con dos candidatas no se toca — con centavos de cualquier fecha se arma cualquier
+   importe, que es el falso positivo del 5.85 de enero.
+   Corre DESPUES del cotejo normal y de achDelCamionConResto, asi que llegar aca ya significa que ni el
+   total ni el ACH-con-resto cuadraron. */
+function redondeoDelCamionSinACH(pool, d, ventana, tolerancia){
+  var partes = d && d.src && d.src.partesSub;
+  if(!partes || partes.length !== 2) return null;
+  var a = partes[0], b = partes[1];
+  var chica = a.monto <= b.monto ? a : b, grande = a.monto <= b.monto ? b : a;
+  if(!(chica.monto > 0) || chica.monto > TOPE_REDONDEO) return null;
+  if(!(grande.monto > TOPE_REDONDEO)) return null;     // dos redondeos no son camion + ventanilla
+  var cands = (pool||[]).filter(function(e){
+    if(e.usado || !sinDescripcion(e.descripcion)) return false;
+    if(e.fecha < d.fecha || distanciaBancaria(d.fecha, e.fecha) > ventana) return false;
+    return Math.abs(e.monto - chica.monto) <= tolerancia;
+  });
+  if(cands.length !== 1) return null;
+  return { linea:cands[0], redondeo:chica.monto, resto:grande.monto };
 }
 /* El efectivo SE NOMBRA, aunque no diga un metodo de tarjeta: el camion dice Brinks y la ventanilla es
    "DEPOSITO DEL <fecha>" y nada mas. Queda fuera de la pasada 4 de conciliarBancoEstado — si no, un Brinks
@@ -3766,7 +3898,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       .forEach(function(x){
         hallazgos.push({
           fecha:x.fecha, banco:banco, monto:x.credito, clase:"en_transito",
-          partes: x._partesReingreso || null,
+          // El desglose DECLARADO por el navegador gana sobre el deducido de los debitos: el 676.70 del
+          // 30-sep-2026 tiene un solo debito (rotulado CLAVE) pero sus sub-lineas dicen 258.25 + 418.45.
+          partes: x.partesSub || x._partesReingreso || null,
           concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
           motivo:"reingresado en el mismo comprobante",
           texto: banco + " " + x.fecha + ": B/ " + fmt(x.credito) + " (\"" + String(x.descripcion||"").trim() +
@@ -3824,13 +3958,14 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
           "Resumen en transito del mes anterior / Diario Caja General", g.lineas));
       });
     }
+    marcarRedondeosDelEfectivo(diarioCaja, bancoCred, banco, ventanaDias, tolerancia);
     cajaDep.forEach(function(dep){
       if(dep._descargo) return;
       // Si usamos el desglose individual, los cheques de Caja General se ignoran acá (se cuadran uno a uno abajo).
       if(usarDetalleCheques && (esChequeDesc(dep.descripcion) || chequeSegunInforme(dep.fecha, dep.credito))) return;
       // Comparte los objetos con bancoCred, asi que `usado` sigue siendo global: solo esconde del cotejo
       // general las lineas que son del efectivo (ver reservadoParaEfectivo).
-      var pool = bancoCred[banco].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto); });
+      var pool = bancoCred[banco].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto) && !o._resEfectivo; });
       var objetivo = dep.credito;
       // 0) El asiento que DESCARGA el transito del mes anterior no es un deposito nuevo: no tiene
       // contrapartida propia en el estado, porque las lineas que le corresponden ya las consumio el Paso 0
@@ -4136,7 +4271,7 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         var otro = null, comboOtro = null;
         Object.keys(bancoCred).forEach(function(b2){
           if(b2===banco || otro) return;
-          var pool2 = bancoCred[b2].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto); });
+          var pool2 = bancoCred[b2].filter(function(o){ return !reservadoParaEfectivo(o.desc, o.monto) && !o._resEfectivo; });
           var c = buscarCombinacion(pool2, dep.fecha, objetivo, ventanaDias, tolerancia);
           if(c){ comboOtro = {banco:b2, idxs:c, pool:pool2}; otro = b2; }
         });
@@ -4469,6 +4604,27 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
                    ". Falta el redondeo del depósito, B/ " + fmt(resto) + ", que el banco todavía no acreditó — puede " +
                    "tardar meses. Al resumen viaja ese resto, no el total, para que el mes siguiente lo busque por " +
                    "B/ " + fmt(resto) + "." + refComprobante(d.src.referencia),
+            fuente: "Diario Caja General / Estado de cuenta " + bancoEf
+          });
+        });
+        // El espejo: el redondeo ya entro y el camion se acredita el mes que viene (ver redondeoDelCamionSinACH).
+        poolDiaEf.forEach(function(d){
+          if(d.usado) return;
+          var rd = redondeoDelCamionSinACH(candEf, d, Math.max(ventanaDias, 10), tolerancia);
+          if(!rd) return;
+          rd.linea.usado = true; d.usado = true;
+          var dsc2 = String(d.descripcion||"").trim();
+          hallazgos.push({
+            fecha:d.fecha, banco:bancoEf, monto:rd.resto, clase:"en_transito",
+            concepto:dsc2, comprobante:refME(d.src.referencia),
+            partes:[{ metodo:"EFECTIVO", monto:rd.resto }],
+            motivo:"el redondeo entró, falta el camión",
+            texto: bancoEf + " " + d.fecha + ": del efectivo de B/ " + fmt(d.monto) + " (\"" + dsc2 + "\") el " +
+                   "redondeo del depósito YA entró: B/ " + fmt(rd.redondeo) + " el " + rd.linea.fecha +
+                   ". Falta el ACH del camión, B/ " + fmt(rd.resto) + ", que se retira al día siguiente del " +
+                   "asiento y el banco acredita dos o tres días después — cae en el mes que viene. Al resumen " +
+                   "viaja ese resto, no el total, para que el mes siguiente lo busque por B/ " + fmt(rd.resto) +
+                   "." + refComprobante(d.src.referencia),
             fuente: "Diario Caja General / Estado de cuenta " + bancoEf
           });
         });

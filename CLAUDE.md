@@ -257,6 +257,55 @@ Es la misma **forma** que la reversa duplicada de agosto (dos débitos, un créd
 - Con **un solo** débito el crédito es plata que vuelve de verdad: **esa sí es una diferencia** y tiene que salir. Es el 11.70 del 27-may de arriba, que sigue rojo.
 - **La descripción viene cortada y eso decidía la regla.** El estado corta a unos 30 caracteres: el débito del 4-sep queda en `"…Ref Dep Mal Env"` y el del 5-sep alcanza a decir `"Mal Enviado"`. `esDevolucionEstado` buscaba la frase entera, así que reconocía **uno solo** de los dos y el guard de "dos o más" no disparaba nunca. Ahora busca `MAL ENV`. Es el mismo problema del `Rev.` que se comía cinco caracteres en la reversa de agosto — **al tocar una, revisar la otra**.
 
+### El navegador declara el desglose debajo del movimiento
+
+Caja General agrupa en **una** línea lo que el diario del banco trae separado, y el rótulo de esa línea es el de la **primera parte**, no el del total. El `ME-00000002070` del 30-sep-2026:
+
+```
+DEPOSITO POR TARJETA CLAVE BANISTMO DEL 30/9/2026   crédito 676.70
+  258.25                                             ← la CLAVE
+  DEPOSITO POR TARJETA VISA BANISTMO DEL 30/9/2026   ← rótulo de la parte siguiente
+  418.45                                             ← la VISA
+```
+
+El mismo comprobante trae el patrón en el efectivo: `BRINKS 152.04` = `150.00` + `DEPOSITO DEL 29/9/2026` `2.04`.
+
+`parseDiario` las descartaba (`if(!iso) continue; // fila secundaria (glosa de detalle)`), así que `partes` quedaba en `[{CLAVE, 676.70}]`. `yaCubiertoEnTransito` podía descontar la parte CLAVE del Paso 3 (258.25) pero la VISA de 418.45 no encontraba parte de su método, caía a `buscarSubsetSuma`, no cuadraba contra el 676.70 y **entraba al resumen**: 418.45 contados dos veces. Que se salvara el 258.25 fue **suerte del rótulo** — con el encabezado al revés se duplicaba el otro.
+
+- `partesDeSubLineas()` las lee. Dos guards: la suma tiene que dar **exacto** el importe del movimiento, y tiene que haber **dos partes o más** (con una sola no se gana nada sobre lo que ya se deduce del encabezado).
+- Número o texto se decide **antes** de llamar a `money()`: un rótulo pasado por `money()` quedaría registrado como celda ilegible y el paso reportaría un problema de lectura que no existe.
+- El desglose **declarado** gana sobre el deducido de los débitos (`partes: x.partesSub || x._partesReingreso`): el 676.70 tiene un solo débito, rotulado CLAVE.
+
+**El desglose cruza de mes por la columna `Desglose` del resumen**, y ahí hace trabajo de verdad: el `1,057.48` del 31-jul-2026 resultó ser `CLAVE 548.73 + VISA 508.75`, y con el corte declarado el Paso C del Paso 0 descargó la CLAVE (el banco la acreditó el 3-ago) y arrastró solo el resto.
+
+### El espejo: el redondeo entró y el camión no
+
+`achDelCamionConResto` cubre el caso en que el ACH ya compensó y falta el redondeo (el 1.92 del 20-mar-2026). Al revés pasa igual de seguido y no había nada que lo reconociera: el redondeo se deposita el día del **retiro** y el ACH se acredita dos o tres días después, así que **a fin de mes el redondeo entra y el ACH se va al mes siguiente**.
+
+```
+Caja General  29-sep  DEPOSITO BRINKS DEL 29/9/2026  338.12 = 335.00 + 3.12   (sub-líneas)
+Estado STG    30-sep  "Descripción"                  crédito  3.12   ← el redondeo YA entró
+Estado STG            el ACH de 335.00 no está: se acreditó el 1-oct
+```
+
+La partida viajaba por los **338.12 completos**, así que en octubre iba a buscar 338.12 y encontrar 335.00 — no cuadra, y vuelve a viajar.
+
+`redondeoDelCamionSinACH()` se apoya en el desglose **declarado**, no en adivinar el corte: exactamente dos partes, una de tamaño de redondeo y la otra no, y **una sola** línea sin descripción libre que coincida con la chica por el importe exacto. Corre **después** del cotejo normal y de `achDelCamionConResto`, así que llegar ahí ya significa que ni el total ni el ACH-con-resto cuadraron.
+
+**Cerró el 76.50 del 27-may** que estaba documentado arriba como "solo se cierra a mano": con el 1.50 descargado en mayo, los 75.00 compensaron solos en junio.
+
+### El cotejo general se lleva los redondeos si nadie los aparta
+
+`reservadoParaEfectivo` esconde del cotejo general los ACH de Brinks pero **no** los redondeos, y eso es a propósito (reservarlos todos rompía el Yappy de 4,198.23 de mayo). Pero sin ninguna reserva el general se los lleva igual.
+
+Agosto de 2026 lo mostró al partirse el `1,057.48`: el cotejo general se llevó los **catorce** redondeos del mes y el efectivo de catorce días salió como *"el camión entró, falta el redondeo"* **con su plata completa en el banco** — `0.06, 0.53, 0.67, 0.72, 0.75, 1.62, 1.90, 2.09, 2.55, 2.85, 2.92, 3.57, 10.50` y el de `153.48`. Se verificaron los catorce, uno por uno, en el estado de STG. El resumen pasaba de **18 partidas a 32**.
+
+El medio es reservar **solo el redondeo que una línea de efectivo puede nombrar**: el resto exacto entre su importe y **un** ACH con retiro compatible, y **una sola** línea sin descripción que lo cubra. Lo que no se puede probar no se reserva, así que el general conserva las líneas sueltas con las que arma los acumulados de fin de mes.
+
+- `marcarRedondeosDelEfectivo()` lo hace, con el mismo par (ACH único + resto de tamaño de redondeo) que usa `achDelCamionConResto` — pero acá solo sirve para **apartar** la línea, no para compensar.
+- Marca los objetos del pool, que son compartidos: apartar no duplica.
+- **Al tocar `reservadoParaEfectivo`, revisar esta**: son las dos mitades de la misma decisión.
+
 ### No todo pendiente es un depósito que falta
 
 El asiento de venta puede estar **digitado por más de lo que se cobró**, y entonces el pendiente no tiene contrapartida en ningún banco: esa plata nunca existió. El `ME-00000001915` del 11-abr-2026:
