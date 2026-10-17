@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.42";
+var APP_VERSION = "2026.10.43";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2822,6 +2822,40 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
 // no usados, dentro de la ventana de días respecto a 'fecha', que sumen 'objetivo' (± tolerancia).
 // El banco a veces refleja un depósito combinado de Caja General partido en varias líneas
 // (ej. 429.74 aparece como 314.55 + 115.19). Devuelve los índices usados o null.
+/* ---- El acumulado del mes, acreditado dia por dia ----
+   Un asiento que declara un RANGO ("DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL 2026") lo acredita el
+   banco en decenas de depositos diarios. buscarSubsetSuma no llega a tantas lineas, asi que sin esto el
+   acumulado se da por pendiente y cada deposito del estado queda huerfano: la misma plata contada dos
+   veces, y por los dos lados.
+   Lo que lo hace seguro es que se exige que TODOS los creditos de ese metodo dentro del rango sumen
+   EXACTO el importe del asiento. Si hubiera otro asiento del mismo metodo adentro, el total ya no daria.
+   El rango que declara el asiento es de VENTA y el banco acredita el ultimo dia al dia siguiente (mayo
+   2026: "DEL 1 AL 30" y el Yappy del 30 cayo el 31), asi que se prueba el rango literal y, si no cuadra,
+   se estira el cierre hasta fin de mes. Estirar no afloja el guard.
+   Se miran las lineas esten usadas o no: la del 1-may-2026 por 209.62 es el descargo del Yappy del 30-abr
+   que el Paso 0 ya consumio, y el acumulado de mayo la incluye con razon — las dos cosas son ciertas, es
+   el mismo credito del banco respaldando la partida vieja y su descargo. */
+function lineasDelAcumuladoEnRango(estado, desc, fecha, objetivo, tolerancia){
+  var rg = rangoDeposito(desc, fecha), mt = metodoDeposito(desc);
+  if(!rg || !mt) return null;
+  var lineasHasta = function(diaFin){
+    return (estado||[]).filter(function(x){
+      if(!(x.credito > 0) || normTxt(x.descripcion).indexOf("ABORTED") !== -1) return false;
+      if(String(x.fecha||"").slice(0,7) !== rg.ym) return false;
+      var dia = parseInt(String(x.fecha).slice(8,10), 10);
+      return dia >= rg.diaIni && dia <= diaFin && mismoMetodoParte(x.descripcion, mt);
+    });
+  };
+  var diasFin = [rg.diaFin];
+  if(rg.diaFin < 31) diasFin.push(31);
+  for(var di = 0; di < diasFin.length; di++){
+    var cand = lineasHasta(diasFin[di]);
+    if(cand.length < 2) continue;        // con una sola linea el matching normal ya la encuentra
+    var sc = Math.round(cand.reduce(function(a,x){ return a + x.credito; }, 0)*100)/100;
+    if(Math.abs(sc - objetivo) <= tolerancia) return { lineas:cand, suma:sc, diaUsado:diasFin[di], rg:rg };
+  }
+  return null;
+}
 // Importe con el que se concilia una linea: el neto cuando se conoce (VISA), si no el propio monto.
 function montoConc(x){ return x.montoConc!=null ? x.montoConc : x.monto; }
 /* ---- La VISA se acredita NETA, y una parte del reingresado puede compensar en el MISMO mes ----
@@ -4271,30 +4305,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
          del 30-abr que el Paso 0 ya consumio, y el acumulado de mayo la incluye con razon —las dos cosas
          son ciertas, es el mismo credito del banco respaldando la partida vieja y su descargo—. */
       var acreditadoEnRango = (function(){
-        var rg = rangoDeposito(dep.descripcion, dep.fecha), mt = metodoDeposito(dep.descripcion);
-        if(!rg || !mt) return false;
-        var lineasHasta = function(diaFin){
-          return (estados[banco]||[]).filter(function(x){
-            if(!(x.credito > 0) || normTxt(x.descripcion).indexOf("ABORTED") !== -1) return false;
-            if(String(x.fecha||"").slice(0,7) !== rg.ym) return false;
-            var dia = parseInt(String(x.fecha).slice(8,10), 10);
-            return dia >= rg.diaIni && dia <= diaFin && mismoMetodoParte(x.descripcion, mt);
-          });
-        };
-        /* El rango que declara el asiento es de VENTA; el banco acredita el ultimo dia al dia siguiente
-           (mayo 2026: "DEL 1 AL 30" y el Yappy del 30 cayo el 31, 41.70 de 973.96). Por eso se prueba
-           primero el rango literal y, si no cuadra, se estira el cierre hasta fin de mes. Estirar no
-           afloja el guard: sigue exigiendo que TODOS los creditos del metodo en el rango sumen exacto,
-           asi que si hubiera otro asiento del mismo metodo adentro, el total ya no daria. */
-        var enRango = null, suma = 0, diaUsado = 0, diasFin = [rg.diaFin];
-        if(rg.diaFin < 31) diasFin.push(31);
-        for(var di = 0; di < diasFin.length; di++){
-          var cand = lineasHasta(diasFin[di]);
-          if(cand.length < 2) continue;        // con una sola linea el matching normal ya la encuentra
-          var sc = Math.round(cand.reduce(function(a,x){ return a + x.credito; }, 0)*100)/100;
-          if(Math.abs(sc - objetivo) <= tolerancia){ enRango = cand; suma = sc; diaUsado = diasFin[di]; break; }
-        }
-        if(!enRango) return false;
+        var ar = lineasDelAcumuladoEnRango(estados[banco], dep.descripcion, dep.fecha, objetivo, tolerancia);
+        if(!ar) return false;
+        var rg = ar.rg, enRango = ar.lineas, suma = ar.suma, diaUsado = ar.diaUsado;
         // Consumir las que todavia estaban libres, para que no las tome otro asiento.
         bancoCred[banco].forEach(function(cv){
           if(cv.usado) return;
@@ -4940,7 +4953,34 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     // como depósito y el banco todavía no reflejó → EN TRÁNSITO (pendiente por compensar en banco). No es
     // diferencia: o clarea con rezago (Brinks/tarjeta), o es de fin de mes, o simplemente el banco aún no
     // lo procesó. Se distingue el motivo (fin de mes vs pendiente) solo para el texto; la clase es la misma.
+    /* ---- El acumulado tambien lo ve el Paso 3, y tiene que contar lo mismo ----
+       El Paso 2 ya reconoce el asiento de rango acreditado dia por dia (ver lineasDelAcumuladoEnRango),
+       pero su decision no cruzaba al Paso 3, que cotea el diario del BANCO contra el estado. En enero de
+       2026 de BOUTI el ME-00000001877 por 27,648.46 ("DEPOSITOS POR YAPPY DEL 1 AL 31") esta en el diario
+       de Banco General como UN debito y el banco lo acredito en 169 depositos: el Paso 2 lo daba por
+       completo y el Paso 3 sacaba 160 huerfanos por 25,997.96 mas el asiento como pendiente. La misma
+       plata, dos relatos, por los dos lados.
+       Se marcan las lineas del estado para que faltanEnDiario no las reporte, y el asiento sale como
+       informativo en vez de pendiente. Los guards son los del helper: mismo metodo, dentro del rango y
+       suma EXACTA. */
     conc.faltanEnBanco.forEach(function(f){
+      var arP3 = lineasDelAcumuladoEnRango(cfg.estado, f.descripcion, f.fecha, f.monto, tolerancia);
+      if(arP3){
+        arP3.lineas.forEach(function(x){ x._acumRango = true; });
+        hallazgos.push({
+          fecha:f.fecha, banco:cfg.nombre, monto:f.monto, clase:"informativo",
+          concepto:String(f.descripcion||"").trim(), comprobante:refME(f.referencia),
+          motivo:"el banco lo acreditó día por día en el rango",
+          texto: cfg.nombre + " " + f.fecha + ": el acumulado de B/ " + fmt(f.monto) + " (\"" +
+                 String(f.descripcion||"").trim() + "\") declara el rango del " + arP3.rg.diaIni + " al " +
+                 arP3.rg.diaFin + ", y el banco lo acreditó en " + arP3.lineas.length + " depósitos del " +
+                 arP3.rg.diaIni + " al " + arP3.diaUsado + " que suman exactamente B/ " + fmt(arP3.suma) +
+                 (arP3.diaUsado > arP3.rg.diaFin ? " (el cierre del rango lo acreditó el banco al día siguiente)" : "") +
+                 ". Ya está completo en el estado de cuenta: no es una diferencia." + refComprobante(f.referencia),
+          fuente: "Diario " + cfg.nombre + " / Estado de cuenta " + cfg.nombre
+        });
+        return;
+      }
       var desc = (f.descripcion||"").trim();
       var n = normTxt(desc);
       // Descargo del transito previo: antes que el motivo de fin de mes (suele fecharse el ultimo dia).
@@ -4983,6 +5023,9 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
     });
     // En el estado de cuenta pero no registrado en el diario.
     conc.faltanEnDiario.forEach(function(f){
+      // Linea que ya quedo explicada por el acumulado del rango, arriba: no es una diferencia.
+      if(f.src && f.src._acumRango) return;
+      if(f.fila != null && (cfg.estado||[]).some(function(x){ return x.fila === f.fila && x._acumRango; })) return;
       var desc = (f.descripcion||"").trim();
       // Depósitos "Ach De Brinks Panama" = efectivo brinks del reporte (no es diferencia).
       if(esBrinks(desc)){

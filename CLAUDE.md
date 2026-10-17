@@ -472,6 +472,34 @@ El 280.21 viajaba entero, en julio el Paso 0 descargaba la CLAVE y los **91.26 q
 
 Tres consolidados cayeron con la misma regla: el `280.21` del 30-jun, el `1,057.48` del 31-jul (VISA 508.75 neta en julio, CLAVE 548.73 el 3-ago → cerrada) y el `397.00` del 31-ago (VISA 227.11 neta, queda la CLAVE de 169.89).
 
+### El acumulado del mes lo cuentan los dos pasos, o lo cuentan dos veces
+
+Un asiento que declara un **rango** lo acredita el banco en decenas de depósitos diarios. El Paso 2 ya lo reconocía (`acreditadoEnRango`), pero esa decisión **no cruzaba al Paso 3**, que cotea el diario del **banco** contra el estado. Enero de 2026 de BOUTI:
+
+```
+Caja General       31-ene  ME-00000001877  "DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO"  27,648.46
+Diario Banco Gral  31-ene  ME-00000001877  un solo débito                              27,648.46
+Estado Banco Gral   1 al 31  169 depósitos                                             27,648.46   ← exacto
+```
+
+El Paso 2 decía *"ya está completo en el estado de cuenta"* y el Paso 3, en el mismo mes, sacaba **160 huérfanos por 25,997.96** más el asiento como pendiente. La misma plata, dos relatos, y por los dos lados: **162 rojas donde había cero diferencias**.
+
+- `lineasDelAcumuladoEnRango()` es ahora la **única** definición, usada por los dos pasos. El Paso 3 marca las líneas con `_acumRango` para que `faltanEnDiario` no las reporte, y saca el asiento como **informativo** en vez de pendiente.
+- Los guards no cambiaron: el asiento tiene que declarar **rango y método**, y **todos** los créditos de ese método dentro del rango tienen que sumar **exacto**. Si hubiera otro asiento del mismo método adentro, el total ya no daría.
+- Con **una sola** línea no entra: el cotejo normal ya la encuentra.
+- El rango que declara el asiento es de **venta** y el banco acredita el último día al siguiente, así que se prueba el rango literal y, si no cuadra, se estira el cierre a fin de mes. Estirar no afloja nada — la suma exacta sigue mandando.
+
+**Lo que esto no arregla, a propósito**: el Paso 1 sigue sacando la diferencia contra el **reporte de cajeras** (en BOUTI, **−25,908.88**), y tiene razón. El banco y el asiento cuadran al centavo entre sí; el que no participa es el reporte. Eso es un dato del negocio —plata que no pasa por la caja— y la app no lo puede resolver sola.
+
+### El primer mes de otra empresa
+
+El dominio de arriba se validó sobre Petty, pero **transfiere casi entero**: el reporte de cajeras y los navegadores de BOUTI usan el mismo formato y el mismo vocabulario (`DEPOSITO BRINKS`, `DEPOSITO POR TARJETA CLAVE STG`), y el Paso 1 rutea sus tres bancos sin tocar nada. Lo que no transfiere es la **lectura del Paso 0**, porque ese archivo lo arma cada quien:
+
+- **El resumen puede no estar en la primera hoja.** El que exporta la app sí lo está; el de un mes armado a mano no. BOUTI trae la conciliación bancaria del sistema en `Hoja1` y `Hoja2` y la tabla que la app lee en **`Hoja3`**. `parseTransitoPrevio` busca el encabezado en **todas** las hojas y toma la primera que lo traiga.
+- **Una fecha puede llegar como serial de Excel.** Una celda con formato de fecha llega como `Date`, pero una columna escrita a mano puede quedar en número crudo: `45789` en vez de `05/12/2025`, y esa partida **se perdía sin avisar**. `toISODate` lo convierte con el origen `1899-12-30`, exigiendo rango razonable para no confundir un importe con una fecha.
+
+Y un recordatorio que costó dos vueltas: **el estado de cuenta puede ser de otro mes**. BOUTI mandó dos veces el de julio llamándolo enero, y eso solo generaba **159 rojas falsas**. El archivo lo declara en su fila 3 (*"Movimientos desde 01-jul-2026 hasta 31-jul-2026"*) — mirarla antes de interpretar nada.
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

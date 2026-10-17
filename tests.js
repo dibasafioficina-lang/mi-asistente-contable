@@ -432,6 +432,41 @@ test("el desglose de una sola parte viaja y decide el pool", () => {
   eq(leerDesglose("CLAVE 188.95", 200.00), null, "si no suma el total, no es su desglose");
 });
 
+/* ---- El acumulado del mes lo acredita el banco dia por dia, y los DOS pasos tienen que contar igual ----
+   Enero de 2026 de BOUTI: el ME-00000001877 por 27,648.46 ("DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL
+   2026") esta en el diario de Banco General como UN debito y el banco lo acredito en 169 depositos
+   diarios. El Paso 2 ya lo daba por completo, pero su decision no cruzaba al Paso 3, que cotea el diario
+   del BANCO contra el estado: sacaba 160 huerfanos por 25,997.96 MAS el asiento como pendiente. La misma
+   plata, dos relatos, por los dos lados. */
+test("el acumulado acreditado día por día lo reconocen los dos pasos", () => {
+  const estado = [
+    { fecha:"2026-01-05", debito:0, credito:100, descripcion:"DEPOSITO YAPPY - CLUB", fila:10 },
+    { fecha:"2026-01-12", debito:0, credito:250, descripcion:"DEPOSITO YAPPY - CLUB", fila:11 },
+    { fecha:"2026-01-20", debito:0, credito:150, descripcion:"DEPOSITO YAPPY - CLUB", fila:12 }
+  ];
+  const r = lineasDelAcumuladoEnRango(estado, "DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL 2026", "2026-01-31", 500, 0.01);
+  eq(r ? r.lineas.length : 0, 3, "junta los tres depósitos del rango");
+  eq(r ? r.suma : 0, 500, "y suman exacto el acumulado");
+
+  // Suma EXACTA: si hubiera otro asiento del mismo método adentro, el total ya no daría y no se toca.
+  eq(lineasDelAcumuladoEnRango(estado, "DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL 2026", "2026-01-31", 480, 0.01),
+     null, "sin suma exacta no se reconoce");
+  // Con UNA sola línea el matching normal ya la encuentra: esta regla no hace falta.
+  eq(lineasDelAcumuladoEnRango([estado[0]], "DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL 2026", "2026-01-31", 100, 0.01),
+     null, "con una sola línea no entra");
+  // Y el asiento tiene que declarar un rango y un método.
+  eq(lineasDelAcumuladoEnRango(estado, "DEPOSITO POR YAPPY DEL 05/01/2026", "2026-01-05", 500, 0.01),
+     null, "sin rango declarado no se reconoce");
+
+  // El Paso 3 completo: el asiento del diario del banco no sale como pendiente ni sus líneas como huérfanas.
+  const diario = [{ fecha:"2026-01-31", debito:500, credito:0, descripcion:"DEPOSITOS POR YAPPY DEL 1 AL 31 DE ENERO DEL 2026", referencia:"ME-00000001877", fila:1 }];
+  const c = conciliarBancoEstado(diario, estado, 7, 0.01, null);
+  eq(c.faltanEnBanco.length, 1, "el cotejo normal no llega a tres líneas: el asiento queda pendiente");
+  eq(c.faltanEnDiario.length, 3, "y las tres líneas quedan huérfanas");
+  eq(!!lineasDelAcumuladoEnRango(estado, diario[0].descripcion, diario[0].fecha, diario[0].debito, 0.01), true,
+     "pero la regla las explica, y el paso las reporta como informativo");
+});
+
 test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
   const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
   const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];
