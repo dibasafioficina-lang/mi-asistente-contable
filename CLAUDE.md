@@ -448,6 +448,30 @@ Con `visaDia["2026-03-10"]` vacío, los 210.12 salían como *"la venta entró a 
 - Si la VISA no llegara de verdad, no se silencia: el **Paso 2** cotea el acumulado de fin de mes contra las remisiones del estado y el **Paso 4** valida las retenciones.
 - Los **0.03** entre 210.15 y 210.12 son los centavos del faltante/sobrante del día, el mismo patrón del 157.91 de arriba.
 
+### La VISA se acredita NETA, y el reingresado puede compensar en su propio mes
+
+Un `reingresado en el mismo comprobante` no se comparaba contra el estado, porque *"el banco lo acredita el mes siguiente"*. Para la CLAVE es cierto; para la VISA **no**. El `ME-00000001986` del 30-jun-2026:
+
+```
+Caja General  30-jun  "DEPOSITO POR TARJETA VISA STG"   280.21 = VISA 91.26 + CLAVE 188.95
+Informe VISA  30-jun  bruto 91.26 − retenciones 4.47  =  neto 86.79
+Estado STG    30-jun  "Remisión V/Mc … Liq. No. 3914827"  crédito  86.79   ← la VISA, NETA, el mismo día
+Estado STG    01-jul  "Remision Clave"                    crédito 188.95   ← la CLAVE, el mes siguiente
+```
+
+El 280.21 viajaba entero, en julio el Paso 0 descargaba la CLAVE y los **91.26 quedaban pendientes para siempre**: su crédito vivía en el estado de **junio** y ningún mes posterior lo trae. En agosto, septiembre y octubre seguía pidiéndole al banco plata que ya había pagado.
+
+`parteReingresoCompensada()` lo cierra, y lo que lo hace seguro es que no se adivina nada — el informe declara el bruto y su neto, y el estado tiene **una sola** remisión libre de ese neto:
+
+- La parte tiene que decir su **método** (VISA o CLAVE) y la línea tiene que ser la remisión **de ese método**.
+- Para la VISA el objetivo es el **neto**, y solo cuando el informe trae **una** entrada de ese bruto exacto. Sin informe, o con dos entradas del mismo bruto, se busca por el bruto como siempre.
+- **1:1 por el importe exacto** y candidata **única**.
+- La línea no puede ser **anterior** al asiento.
+
+**El desglose de una sola parte también se escribe y se lee**, y eso no es cosmética: cuando una parte ya compensó, lo que viaja es el **resto**, y su método puede no ser el del concepto. El 280.21 se llama *"DEPOSITO POR TARJETA VISA STG"* y lo que queda es la **CLAVE** de 188.95 — `poolDe()` la buscaba entre las remisiones de la VISA, donde nunca iba a aparecer. Ahora el desglose declarado elige el pool (`desgloseTexto` y `leerDesglose` aceptan una sola parte; la suma exacta sigue siendo el guard). Con el pool correcto, la CLAVE compensó sola en julio y la partida del 30-jun quedó **cerrada por completo**.
+
+Tres consolidados cayeron con la misma regla: el `280.21` del 30-jun, el `1,057.48` del 31-jul (VISA 508.75 neta en julio, CLAVE 548.73 el 3-ago → cerrada) y el `397.00` del 31-ago (VISA 227.11 neta, queda la CLAVE de 169.89).
+
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.

@@ -383,6 +383,55 @@ test("el redondeo que ya entró se descuenta y viaja solo el camión", () => {
   eq(redondeoDelCamionSinACH(antes, d, 10, 0.01), null, "el banco no acredita antes del depósito");
 });
 
+/* ---- La VISA se acredita NETA, y puede compensar en el MISMO mes ----
+   El 30-jun-2026 el consolidado reingresado de 280.21 es VISA 91.26 + CLAVE 188.95. El informe declara
+   bruto 91.26 - retenciones 4.47 = neto 86.79, y el estado trae "Remision V/Mc" por 86.79 el MISMO 30-jun;
+   la CLAVE de 188.95 entra el 1-jul. Como los reingresados no se comparaban contra el estado ("el banco lo
+   acredita el mes siguiente"), el 280.21 viajaba entero, en julio se descargaba la CLAVE y los 91.26
+   quedaban pendientes para siempre: su credito vivia en el estado de JUNIO. */
+test("la VISA de un reingresado compensa por su NETO en el mismo mes", () => {
+  const prev = STATE.retVisaDetalle;
+  STATE.retVisaDetalle = [{ fecha:"2026-06-30", bruto:91.26, retenciones:-4.47, neto:86.79 }];
+  const pool = [
+    { fecha:"2026-06-30", monto:86.79, desc:"Remisión V/Mc 016005605 Liq. No. 3914827", usado:false },
+    { fecha:"2026-06-30", monto:188.95, desc:"Remision Clave 016005605", usado:false }
+  ];
+  const r = parteReingresoCompensada({ metodo:"VISA", monto:91.26 }, "2026-06-30", pool, 0.01);
+  eq(r ? r.objetivo : 0, 86.79, "busca el NETO, no el bruto");
+  eq(r ? r.linea.monto : 0, 86.79, "y encuentra la remisión V/Mc");
+
+  // La CLAVE no lleva retención en el informe: se busca por su importe y en SU pool.
+  const c = parteReingresoCompensada({ metodo:"CLAVE", monto:188.95 }, "2026-06-30", pool, 0.01);
+  eq(c ? c.linea.monto : 0, 188.95, "la CLAVE va contra la remisión Clave");
+
+  // Con dos remisiones del mismo importe no se elige.
+  const dos = pool.concat([{ fecha:"2026-06-30", monto:86.79, desc:"Remisión V/Mc 016005605 Liq. No. 9", usado:false }]);
+  eq(parteReingresoCompensada({ metodo:"VISA", monto:91.26 }, "2026-06-30", dos, 0.01), null, "candidata única");
+  // Sin informe que declare ese bruto se busca por el bruto, que no está: queda pendiente.
+  STATE.retVisaDetalle = [];
+  eq(parteReingresoCompensada({ metodo:"VISA", monto:91.26 }, "2026-06-30", pool, 0.01), null, "sin informe no se inventa el neto");
+  // El banco no acredita antes del depósito.
+  STATE.retVisaDetalle = [{ fecha:"2026-06-30", bruto:91.26, retenciones:-4.47, neto:86.79 }];
+  const antesV = [{ fecha:"2026-06-29", monto:86.79, desc:"Remisión V/Mc 016005605", usado:false }];
+  eq(parteReingresoCompensada({ metodo:"VISA", monto:91.26 }, "2026-06-30", antesV, 0.01), null, "la línea no puede ser anterior");
+  STATE.retVisaDetalle = prev;
+});
+
+/* ---- El desglose de UNA sola parte tambien se lee ----
+   Cuando del consolidado ya compenso una parte, lo que viaja es el RESTO y su metodo puede no ser el del
+   concepto: el 280.21 se llama "DEPOSITO POR TARJETA VISA STG" y lo que queda es la CLAVE de 188.95.
+   desgloseTexto lo escribe y leerDesglose lo lee, para que poolDe() la busque entre las remisiones Clave
+   y no entre las de la VISA, donde no iba a aparecer nunca. */
+test("el desglose de una sola parte viaja y decide el pool", () => {
+  eq(desgloseTexto([{ metodo:"CLAVE", monto:188.95 }]), "CLAVE 188.95", "se escribe aunque sea una sola");
+  eq(desgloseTexto([{ metodo:"", monto:188.95 }]), "", "sin método no dice nada");
+  const leido = leerDesglose("CLAVE 188.95", 188.95);
+  eq(leido ? leido.length : 0, 1, "y se vuelve a leer");
+  eq(leido ? leido[0].metodo : "", "CLAVE", "con su método");
+  // La suma exacta sigue siendo el guard.
+  eq(leerDesglose("CLAVE 188.95", 200.00), null, "si no suma el total, no es su desglose");
+});
+
 test("el ajuste de retención del banco cuadra con su asiento del cierre de mes", () => {
   const diario = [{ fecha: "2026-08-31", debito: 0.42, credito: 0, descripcion: "AJUSTE DE RET ITBMS JULIO 0.42", referencia: "ME-00000002041", fila: 1 }];
   const estado = [{ fecha: "2026-08-10", debito: 0, credito: 0.42, descripcion: "Ajuste De Ret. Itbms Julio 202", fila: 10 }];

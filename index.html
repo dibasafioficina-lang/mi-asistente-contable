@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.40";
+var APP_VERSION = "2026.10.41";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -2816,6 +2816,46 @@ function consolidarEfectivoDelDia(poolDiario, poolEstado, ventanaDias, toleranci
 // (ej. 429.74 aparece como 314.55 + 115.19). Devuelve los índices usados o null.
 // Importe con el que se concilia una linea: el neto cuando se conoce (VISA), si no el propio monto.
 function montoConc(x){ return x.montoConc!=null ? x.montoConc : x.monto; }
+/* ---- La VISA se acredita NETA, y una parte del reingresado puede compensar en el MISMO mes ----
+   El asiento registra la venta BRUTA y el banco paga el neto de retenciones, asi que una partida de VISA
+   nunca cuadra por su importe contra la "Remision V/Mc" que la compensa. El 30-jun-2026:
+
+     Caja General  30-jun  ME-00000001986  "DEPOSITO POR TARJETA VISA STG"  280.21 = VISA 91.26 + CLAVE 188.95
+     Informe VISA  30-jun  bruto 91.26 - retenciones 4.47 = neto 86.79
+     Estado STG    30-jun  "Remision V/Mc 016005605 Liq. No. 3914827"  credito 86.79   <- la VISA, NETA
+     Estado STG    01-jul  la CLAVE de 188.95                                          <- el mes siguiente
+
+   El consolidado es un `reingresado en el mismo comprobante`, y esos no se comparan contra el estado
+   porque "el banco lo acredita el mes siguiente". Para la CLAVE es cierto; para la VISA no — entro el
+   mismo dia. Asi que el 280.21 viajaba entero, en julio el Paso 0 descargaba la CLAVE y los 91.26
+   quedaban pendientes PARA SIEMPRE: su credito vivia en el estado de JUNIO y ningun mes posterior lo
+   trae. En agosto, septiembre y octubre seguia pidiendole al banco plata que ya habia pagado.
+
+   Lo que lo hace seguro es que no se adivina nada: el informe declara el bruto y su neto, y el estado
+   tiene UNA sola remision libre de ese neto.
+   - La parte tiene que decir su metodo (VISA o CLAVE) y la linea tiene que ser la remision DE ESE metodo.
+   - Para la VISA el objetivo es el NETO, y solo cuando el informe trae UNA entrada de ese bruto exacto.
+     Sin informe, o con dos entradas del mismo bruto, se busca por el bruto como siempre.
+   - 1:1 por el importe exacto y candidata UNICA. Con dos remisiones del mismo importe no se elige.
+   - La linea no puede ser anterior al asiento: el banco no acredita antes del deposito. */
+function parteReingresoCompensada(parte, fecha, pool, tolerancia){
+  if(!parte || !(parte.monto > 0)) return null;
+  var m = parte.metodo;
+  if(m !== "VISA" && m !== "CLAVE") return null;
+  var objetivo = parte.monto, det = null;
+  if(m === "VISA"){
+    var rv = (STATE.retVisaDetalle || []).filter(function(d){ return Math.abs(d.bruto - parte.monto) <= tolerancia; });
+    if(rv.length === 1){ objetivo = Math.round(rv[0].neto*100)/100; det = rv[0]; }
+  }
+  var cands = (pool||[]).filter(function(e){
+    if(e.usado) return false;
+    if(m === "VISA" ? !esRemisionVisa(e.desc) : !esRemisionClave(e.desc)) return false;
+    if(e.fecha < fecha) return false;
+    return Math.abs(e.monto - objetivo) <= tolerancia;
+  });
+  if(cands.length !== 1) return null;
+  return { linea:cands[0], objetivo:objetivo, ret:det };
+}
 // Depósito de TARJETA en el diario (VISA, CLAVE, o genérico "por tarjeta").
 function esDepositoTarjeta(desc){
   var n = normTxt(desc);
@@ -3896,11 +3936,56 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
     // Los reingresados en el mismo comprobante se reportan aparte, para que la exclusion quede a la vista.
     diarioCaja.filter(function(x){ return clasificarBancoPorTexto(x.descripcion)===banco && x.credito>0 && x._reingresadoEnElMes; })
       .forEach(function(x){
+        // El desglose DECLARADO por el navegador gana sobre el deducido de los debitos: el 676.70 del
+        // 30-sep-2026 tiene un solo debito (rotulado CLAVE) pero sus sub-lineas dicen 258.25 + 418.45.
+        var partesR = x.partesSub || x._partesReingreso || null;
+        // Alguna parte puede haber compensado en el MISMO mes (ver parteReingresoCompensada): la VISA
+        // entra NETA y el mismo dia, mientras la CLAVE se va al mes siguiente.
+        var yaEntro = [], restoR = x.credito;
+        if(partesR && partesR.length > 1){
+          partesR.forEach(function(p){
+            var c = parteReingresoCompensada(p, x.fecha, bancoCred[banco], tolerancia);
+            if(!c) return;
+            c.linea.usado = true;
+            yaEntro.push({ metodo:p.metodo, bruto:p.monto, acreditado:c.objetivo, fecha:c.linea.fecha, ret:c.ret });
+            restoR = Math.round((restoR - p.monto)*100)/100;
+          });
+        }
+        if(yaEntro.length){
+          var detalle = yaEntro.map(function(y){
+            return y.metodo + " B/ " + fmt(y.bruto) +
+                   (Math.abs(y.acreditado - y.bruto) > 0.005
+                      ? " (el banco acreditó B/ " + fmt(y.acreditado) + ", neto de B/ " + fmt(Math.round((y.bruto - y.acreditado)*100)/100) + " de retenciones)"
+                      : "") + " el " + y.fecha;
+          }).join(" · ");
+          if(restoR <= tolerancia){
+            hallazgos.push({
+              fecha:x.fecha, banco:banco, monto:x.credito, clase:"informativo",
+              concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
+              motivo:"reingresado, pero ya compensó este mes",
+              texto: banco + " " + x.fecha + ": B/ " + fmt(x.credito) + " (\"" + String(x.descripcion||"").trim() +
+                     "\") salió de Caja General y volvió a entrar en el MISMO comprobante, pero el banco ya lo " +
+                     "acreditó este mes: " + detalle + ". No queda nada en tránsito." + refComprobante(x.referencia),
+              fuente: "Diario Caja General / Estado de cuenta " + banco
+            });
+            return;
+          }
+          hallazgos.push({
+            fecha:x.fecha, banco:banco, monto:restoR, clase:"en_transito",
+            partes: partesR.filter(function(p){ return !yaEntro.some(function(y){ return y.metodo===p.metodo && Math.abs(y.bruto-p.monto)<0.005; }); }),
+            concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
+            motivo:"reingresado — una parte ya compensó, viaja el resto",
+            texto: banco + " " + x.fecha + ": del consolidado de B/ " + fmt(x.credito) + " (\"" +
+                   String(x.descripcion||"").trim() + "\") el banco ya acreditó este mes " + detalle +
+                   ". Quedan B/ " + fmt(restoR) + " que viajan al mes siguiente — al resumen va el resto, no el " +
+                   "total, para que lo ya acreditado no se le vuelva a pedir al banco." + refComprobante(x.referencia),
+            fuente: "Diario Caja General / Estado de cuenta " + banco
+          });
+          return;
+        }
         hallazgos.push({
           fecha:x.fecha, banco:banco, monto:x.credito, clase:"en_transito",
-          // El desglose DECLARADO por el navegador gana sobre el deducido de los debitos: el 676.70 del
-          // 30-sep-2026 tiene un solo debito (rotulado CLAVE) pero sus sub-lineas dicen 258.25 + 418.45.
-          partes: x.partesSub || x._partesReingreso || null,
+          partes: partesR,
           concepto:String(x.descripcion||"").trim(), comprobante:refME(x.referencia),
           motivo:"reingresado en el mismo comprobante",
           texto: banco + " " + x.fecha + ": B/ " + fmt(x.credito) + " (\"" + String(x.descripcion||"").trim() +
@@ -8992,12 +9077,22 @@ function leerDesglose(v, monto){
     var met = m[1].replace(/[+\s]+$/, "").trim(), mo = parseFloat(m[2]);
     if(met && !isNaN(mo)) out.push({ metodo:met, monto:mo });
   }
-  if(out.length < 2) return null;
+  /* UNA sola parte tambien vale, y no es redundante: cuando del consolidado ya compenso una parte, lo que
+     viaja es el resto y su metodo puede NO ser el del concepto. El 280.21 del 30-jun-2026 se llama
+     "DEPOSITO POR TARJETA VISA STG" y lo que queda es "CLAVE 188.95"; sin leerlo, poolDe() la buscaba
+     entre las remisiones de la VISA y no aparecia nunca. La suma exacta sigue siendo el guard. */
+  if(!out.length) return null;
   var suma = Math.round(out.reduce(function(a, p){ return a + p.monto; }, 0)*100)/100;
   return Math.abs(suma - monto) <= 0.02 ? out : null;
 }
 function desgloseTexto(partes){
-  if(!Array.isArray(partes) || partes.length < 2) return "";
+  if(!Array.isArray(partes) || !partes.length) return "";
+  /* Una sola parte tambien se escribe. Normalmente no agrega nada sobre el encabezado, pero cuando del
+     consolidado ya compenso una parte lo que viaja es el RESTO, y su metodo puede no ser el del rotulo:
+     el 280.21 del 30-jun-2026 se llama "DEPOSITO POR TARJETA VISA STG" y despues de que la VISA entrara
+     en junio lo que queda es la CLAVE de 188.95. Sin escribirlo, poolDe() la buscaba entre las remisiones
+     de la VISA y no aparecia nunca. */
+  if(partes.length < 2 && !String(partes[0] && partes[0].metodo || "").trim()) return "";
   return partes.map(function(p){ return String(p.metodo||"").trim() + " " + Number(p.monto||0).toFixed(2); }).join(" + ");
 }
 // "ya hecho" / "pendiente" -> "hecho" / "pendiente". Vacio o irreconocible -> null (se trata como hasta ahora).
@@ -9139,6 +9234,18 @@ function consumirTransitoPrevio(transitoPrevio, estados, tolerancia){
     // Clasifica cada partida y le asigna su pool de compensación (según concepto y sentido).
     function poolDe(item){
       if(item.sentido==="debito") return poolDeb;                          // cheque emitido (pago) → débito del estado
+      /* El desglose DECLARADO gana sobre el rotulo, igual que en partesDeSubLineas: cuando una parte del
+         consolidado ya compenso, lo que viaja es el resto y su metodo puede NO ser el del encabezado.
+         El 280.21 del 30-jun-2026 dice "VISA" y lo que queda es la CLAVE de 188.95: buscada entre las
+         remisiones de la VISA no aparecia nunca y la partida viajaba para siempre. Solo cuando el
+         desglose nombra UN metodo: con dos no decide nada y manda el rotulo, como siempre. */
+      var mets = {};
+      (item.partes||[]).forEach(function(p){ if(p && p.metodo) mets[normTxt(p.metodo)] = true; });
+      var ms = Object.keys(mets);
+      if(ms.length === 1){
+        if(ms[0] === "CLAVE") return poolClave;
+        if(ms[0] === "VISA" || ms[0] === "V/MC") return poolVisa;
+      }
       var c = normTxt(item.concepto);
       if(c.indexOf("CLAVE")!==-1) return poolClave;                        // clave en tránsito → remisión clave
       if(c.indexOf("VISA")!==-1 || c.indexOf("V/MC")!==-1) return poolVisa;// visa en tránsito → remisión V/Mc
