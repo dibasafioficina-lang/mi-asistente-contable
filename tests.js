@@ -5955,6 +5955,40 @@ test("el informe de cajeras rutea las columnas de las cuentas extra", () => {
   eq(r.filter(x => x.banco === "STG").length, 1, "una sola columna es de la cuenta principal");
 });
 
+/* ---- Una columna que nombra DOS metodos no se adivina ----
+   El bucle de metodos tomaba el PRIMERO de su lista que apareciera en el texto, asi que la columna
+   "VISA CLAVE / SUPER" que mando Shopping —que es la columna de CLAVE— se leia como VISA: su venta se
+   iba al metodo equivocado SIN AVISAR, el Paso 1 le pedia al banco una VISA que no existe y dejaba sin
+   cotejar la CLAVE que si. Es el criterio de corregirErrata, que no corrige una palabra que esta igual
+   de cerca de COMISION y de REMISION. */
+test("una columna que nombra dos métodos no se adivina", () => {
+  const rows = [[null, null, null, "TARJETA", null],
+                ["Fecha", "Empresa", "Cajera", "Visa\nSr.George", "VISA CLAVE\nSr.George"],
+                ["2026-01-05", "SHOPPING", "NORIS", 100, 250]];
+  const r = parseReporteConsolidado(rows);
+  eq(r.filter(x => x.metodo === "VISA").length, 1, "solo la columna que dice un metodo");
+  cerca(r.filter(x => x.metodo === "VISA")[0].monto, 100, "los 250 NO se suman a la VISA");
+  eq(r.filter(x => x.metodo === "CLAVE").length, 0, "y tampoco se adivina que son CLAVE");
+  // Pero no desaparecen: la columna queda reportada, con los dos metodos que nombra.
+  const amb = (r.sinMapear || []).filter(x => x.ambiguo);
+  eq(amb.length, 1, "la columna se reporta");
+  cerca(amb[0].total, 250);
+  eq(amb[0].ambiguo.indexOf("VISA") >= 0 && amb[0].ambiguo.indexOf("CLAVE") >= 0, true, "y dice cuales son");
+});
+
+// Y el Paso 1 la saca como DIFERENCIA, no como informativo: esa venta si tiene que llegar al banco.
+test("el Paso 1 reporta la columna ambigua como diferencia", () => {
+  const rows = [[null, null, null, "TARJETA"],
+                ["Fecha", "Empresa", "Cajera", "VISA CLAVE\nSr.George"],
+                ["2026-01-05", "SHOPPING", "NORIS", 250]];
+  const h = paso1(parseReporteConsolidado(rows), [], null, 0.01, null, null, null, {});
+  const amb = h.filter(x => x.motivo === "columna ambigua");
+  eq(amb.length, 1);
+  eq(esNoRojo(amb[0]), false, "es roja: la venta queda sin cotear");
+  cerca(amb[0].monto, 250);
+  eq(/VISA y CLAVE/.test(amb[0].texto), true, "y el texto nombra los dos metodos");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

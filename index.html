@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.46";
+var APP_VERSION = "2026.10.47";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1100,9 +1100,21 @@ function parseReporteConsolidado(rows){
     // El método puede estar en la fila de grupo (ej. "VISA") o en el sub-encabezado (ej. "Visa\nSr.George").
     // Algunos reportes agrupan Visa+Clave bajo "TARJETA", así que combinamos ambos textos para detectarlo.
     var textoCol = filledGroup[i] + " " + sub;
-    var metodo = null;
+    /* ---- Una columna que nombra DOS métodos no se adivina ----
+       El bucle tomaba el PRIMERO de la lista que apareciera en el texto, así que una columna
+       "VISA CLAVE / SUPER" —que es la columna de CLAVE— se leía como VISA y su venta se iba al método
+       equivocado SIN AVISAR: el Paso 1 le pedía al banco una VISA que no existe y dejaba sin cotejar la
+       CLAVE que sí. Con dos métodos en el mismo rótulo no hay forma de saber cuál es, así que la columna
+       queda fuera del cotejo y se REPORTA — es el mismo criterio de corregirErrata, que no corrige una
+       palabra que está igual de cerca de COMISION y de REMISION. */
+    var metodo = null, metodosVistos = [];
     for(var m=0;m<metodosValidos.length;m++){
-      if(textoCol.indexOf(metodosValidos[m])!==-1){ metodo = metodosValidos[m]; break; }
+      if(textoCol.indexOf(metodosValidos[m])!==-1) metodosVistos.push(metodosValidos[m]);
+    }
+    if(metodosVistos.length === 1) metodo = metodosVistos[0];
+    else if(metodosVistos.length > 1){
+      colsFuera.push({col:i, etiqueta:etiquetaCol(subRow[i]), ambiguo:metodosVistos.slice()});
+      continue;
     }
     if(!metodo){
       // Sin método reconocido tampoco se descarta en silencio: Caja General es la cuenta puente de TODA
@@ -2569,13 +2581,30 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
      Caja General acá NO es solo efectivo: es la cuenta puente de TODA la venta. Si una columna del
      informe trae monto y ningún paso la mira, es un hueco — así se perdieron el Yappy y el ACH de Banco
      General hasta que se mapearon. Lo que queda fuera se informa con su total para que se vea completo. */
-  if(reporte && reporte.sinMapear && reporte.sinMapear.length){
-    var totFuera = Math.round(reporte.sinMapear.reduce(function(a,c){ return a + (c.total||0); },0)*100)/100;
+  /* Una columna que nombra DOS métodos va aparte y como DIFERENCIA, no como informativo: esa venta SÍ
+     tiene que llegar al banco, lo que falta es poder decir por cuál método. Mezclarla con los vales y los
+     certificados —que de verdad no entran al banco— la daría por explicada. */
+  var ambiguas = (reporte && reporte.sinMapear || []).filter(function(c){ return c.ambiguo && c.ambiguo.length > 1; });
+  if(ambiguas.length){
+    var totAmb = Math.round(ambiguas.reduce(function(a,c){ return a + (c.total||0); },0)*100)/100;
+    hallazgos.push({
+      fecha:"", banco:"", monto:totAmb, clase:"diff",
+      concepto:"Columna del informe con dos métodos", comprobante:"", motivo:"columna ambigua",
+      texto: "El informe de caja trae B/ " + fmt(totAmb) + " en columna(s) cuyo encabezado nombra DOS métodos " +
+             "de pago, así que no se puede saber cuál es y esa venta queda sin cotear: " +
+             ambiguas.map(function(c){ return "\"" + c.etiqueta + "\" (" + c.ambiguo.join(" y ") + ") B/ " + fmt(c.total); }).join(" · ") +
+             ". Dejale un solo método en el encabezado y volvé a correr.",
+      fuente:"Reporte consolidado de caja"
+    });
+  }
+  var restoFuera = (reporte && reporte.sinMapear || []).filter(function(c){ return !(c.ambiguo && c.ambiguo.length > 1); });
+  if(restoFuera.length){
+    var totFuera = Math.round(restoFuera.reduce(function(a,c){ return a + (c.total||0); },0)*100)/100;
     hallazgos.push({
       fecha:"", banco:"", monto:totFuera, clase:"informativo",
       concepto:"Métodos sin cotejar por banco", comprobante:"",
       texto: "El informe de caja trae B/ " + fmt(totFuera) + " en columnas que no se cotejan banco por banco: " +
-             reporte.sinMapear.map(function(c){ return c.etiqueta + " B/ " + fmt(c.total); }).join(" · ") +
+             restoFuera.map(function(c){ return c.etiqueta + " B/ " + fmt(c.total); }).join(" · ") +
              ". El efectivo sí se rastrea, pero por el diario del banco en el Paso 3; lo demás (crédito, vales, certificados) no entra al banco.",
       fuente:"Reporte consolidado de caja"
     });

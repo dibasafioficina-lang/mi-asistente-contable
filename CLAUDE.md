@@ -582,3 +582,29 @@ Se mira el texto **completo** de la columna (grupo + sub-encabezado), así que f
 ### Cuánto tarda una corrida grande
 
 **220 segundos** la cadena de los 4 pasos con los 14 archivos de Shopping de enero de 2026 (34,090 movimientos de Caja General). En el navegador la página parece trabada casi 4 minutos. No es un error — es el volumen — pero conviene tenerlo medido antes de salir a buscar un cuelgue que no existe.
+
+### Una columna del informe que nombra dos métodos no se adivina
+
+El bucle de métodos (`metodosValidos = ["VISA","CLAVE","ACH","CHEQUE","YAPPY"]`) tomaba el **primero de su lista** que apareciera en el texto de la columna. Shopping mandó en enero de 2026 una columna `VISA CLAVE / SUPER` por **B/ 30,958.04** —que es la columna de CLAVE— y se leía como **VISA**:
+
+- su venta se iba al método equivocado **sin avisar**,
+- el Paso 1 le pedía al banco una VISA que no existe,
+- y dejaba sin cotejar la CLAVE que sí.
+
+Con dos métodos en el mismo rótulo no hay forma de saber cuál es, así que la columna queda **fuera del cotejo y se reporta**. Es el criterio de `corregirErrata`, que no corrige una palabra que está igual de cerca de `COMISION` y de `REMISION`: ante el empate, no se elige.
+
+- Va como **diferencia roja**, no como informativo, y **aparte** de `sinMapear`: esa venta sí tiene que llegar al banco, lo que falta es poder decir por cuál método. Mezclarla con los vales y los certificados —que de verdad no entran al banco— la daría por explicada.
+- El texto nombra los dos métodos que encontró y dice qué hacer: dejar un solo método en el encabezado.
+
+### El informe de cajeras de una empresa con varias cuentas del mismo banco
+
+Agregar las cuentas al informe no es agregar columnas: es **repartir** lo que ya estaba. Shopping lo intentó dos veces y las dos fallaron del mismo modo, y conviene reconocer el síntoma:
+
+| Intento | Qué hizo | Qué pasó |
+|---|---|---|
+| 1º | sumó Super y Bordados **dentro** de `Visa/Clave Sr.George` | STG pasó de 46,710.00 a 86,671.91 contra 45,736.40 de Caja General |
+| 2º | agregó columnas de Super **sin sacarlas** de `Sr.George` | la misma venta contada dos veces: STG 86,671.91 **más** STG Super 18,749.91 |
+
+El contraste que lo delata está en el propio archivo: antes de tocarlo, el informe declaraba STG 46,710.00 contra 45,736.40 de Caja General —menos de mil de diferencia— y después de "corregirlo" quedó 40,935.51 arriba. **Si al separar las cuentas el total de la principal no baja, no se separó nada: se duplicó.**
+
+Un detalle de forma que no estorba: el archivo puede traer bloques de otra tabla pegados al costado (`SHOPPING SUPER` por 349,176.28 y `SHOPPING BORDADOS` por 27,096.00, antes de la columna `Cajera`). La app los ignora porque no nombran ningún método, y eso es lo correcto — pero conviene confirmar con quien lo armó que son referencia y no venta.
