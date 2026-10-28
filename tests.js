@@ -6071,6 +6071,80 @@ test("sin comprobantes DP- el ruteo no cambia", () => {
   COMPROBANTE_BANCO = null;
 });
 
+/* ---- El informe de VISA viene por AFILIADO ----
+   VISA liquida por comercio afiliado, y una empresa con varias cuentas de St. Georges tiene un afiliado
+   por cuenta. El informe consolidado suma los tres, asi que su neto diario no coincide con ninguna
+   remision individual: en enero de 2026 de Shopping ninguno de los 30 netos aparecia en ningun estado
+   (37 rojas por B/ 49,827.76 en el Paso 3) aunque la suma de las tres cuentas daba el total al centavo.
+   Lo que lo resuelve es que la remision del estado NOMBRA el afiliado, y no solo en Shopping: en Petty
+   tambien ("Remision V/Mc 016005605 Liq. No. 3992027"). Asi que el mapa afiliado -> cuenta lo declaran
+   los datos de los dos lados, no una configuracion. */
+function hojaVisa(afil, filas){
+  const r = [["Sucursal","ID Sucursal","Terminal","Fecha","Monto Bruto","Ret. Imp","Comision","ITBMS"]];
+  filas.forEach(f => r.push(["SHOPPING CENTER", afil, "T1", f[0], f[1], f[2], 0, 0]));
+  return r;
+}
+function estRemis(afil, filas){
+  const r = [["Fecha","Descripci\u00f3n","D\u00e9bitos(-)","Cr\u00e9ditos(+)","Balance"]];
+  filas.forEach(f => r.push([f[0], "Remisi\u00f3n V/Mc " + afil + " Liq. No. 1234567", 0, f[1], 0]));
+  return r;
+}
+test("el afiliado se lee de los dos lados", () => {
+  eq(afiliadoDeRemision("Remisión V/Mc 016005613 Liq. No. 3768763"), "016005613");
+  eq(afiliadoDeRemision("Remision Clave 123"), null, "sin 9 dígitos no hay afiliado");
+  eq(afiliadoDeHojaVisa(hojaVisa("016026729", [["01/05/2026", 100, -3]]), "SUPER 016026729"), "016026729");
+  // Y del encabezado del consolidado, que no trae columna ID Sucursal.
+  const cons = [[" Comercio: SHOPPING CENTER BUILDING (016000317)"], [],
+                ["Sucursal","Terminal","Fecha","Monto Bruto","Ret. Imp","Comision","ITBMS"]];
+  eq(afiliadoDeHojaVisa(cons, "016000317"), "016000317");
+});
+
+test("cada cuenta recibe el informe de SU afiliado", () => {
+  const visa = { hojas: {
+    "PRINCIPAL 016005613": hojaVisa("016005613", [["01/05/2026", 100, -3]]),
+    "SUPER 016026729":     hojaVisa("016026729", [["01/05/2026", 500, -11]])
+  }};
+  visa.hojas["PRINCIPAL 016005613"].hojas = visa.hojas;
+  const estados = {
+    "STG":        parseEstadoCuenta(estRemis("016005613", [["2026-01-05", 97]]), "stg"),
+    "STG Super":  parseEstadoCuenta(estRemis("016026729", [["2026-01-05", 489]]), "stg")
+  };
+  const r = retVisaPorCuenta(visa.hojas["PRINCIPAL 016005613"], estados);
+  eq(r.mapa["STG"], "016005613");
+  eq(r.mapa["STG Super"], "016026729");
+  cerca(r.porCuenta["STG"]["2026-01-05"], 3, "la retencion de la principal");
+  cerca(r.porCuenta["STG Super"]["2026-01-05"], 11, "y la de Super, que antes no recibia ninguna");
+});
+
+/* El consolidado NO entra: sumado a las otras hojas contaria todo dos veces. Ninguna cuenta lo reclama
+   -su afiliado no aparece en ninguna remision- asi que queda afuera, y se reporta. */
+test("la hoja que ninguna cuenta reclama queda afuera y se reporta", () => {
+  const visa = { hojas: {
+    "CONSOLIDADO 016000317": hojaVisa("016000317", [["01/05/2026", 600, -14]]),
+    "PRINCIPAL 016005613":   hojaVisa("016005613", [["01/05/2026", 100, -3]])
+  }};
+  visa.hojas["CONSOLIDADO 016000317"].hojas = visa.hojas;
+  const estados = { "STG": parseEstadoCuenta(estRemis("016005613", [["2026-01-05", 97]]), "stg") };
+  const r = retVisaPorCuenta(visa.hojas["CONSOLIDADO 016000317"], estados);
+  eq(Object.keys(r.porCuenta).length, 1, "solo la cuenta que se pudo identificar");
+  cerca(r.porCuenta["STG"]["2026-01-05"], 3);
+  eq(r.hojasFuera.length, 1, "y el consolidado se reporta, no se silencia");
+  eq(r.hojasFuera[0].afiliado, "016000317");
+});
+
+// El guard de siempre: si dos cuentas nombran el MISMO afiliado, no se sabe de cual es y no se mapea.
+test("un afiliado reclamado por dos cuentas no se mapea", () => {
+  const visa = { hojas: { "H": hojaVisa("016005613", [["01/05/2026", 100, -3]]) } };
+  visa.hojas["H"].hojas = visa.hojas;
+  const estados = {
+    "STG":       parseEstadoCuenta(estRemis("016005613", [["2026-01-05", 97]]), "stg"),
+    "STG Super": parseEstadoCuenta(estRemis("016005613", [["2026-01-06", 50]]), "stg")
+  };
+  const r = retVisaPorCuenta(visa.hojas["H"], estados);
+  eq(Object.keys(r.porCuenta).length, 0, "ninguna lo recibe");
+  eq(r.hojasFuera.length, 1);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

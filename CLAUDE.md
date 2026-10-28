@@ -740,3 +740,32 @@ Juntas, las líneas `DP-` salen de la sección de efectivo y caen al **cotejo ge
 - y que el **Paso 1 no comparara** contra el informe de cajeras el efectivo de una cuenta cuya venta no pasa por ahí (inflaba el lado de Caja General: 25 días por B/ 120,631.15).
 
 Todo eso se escribió, se midió y salió **peor** (ver la tabla de arriba), porque el problema no era el ruteo sino la forma del dato. Si se retoma, retomarlo entero y midiendo — y recordar que la propiedad a preservar es que **con una sola cuenta de efectivo el resultado no cambie en nada**, que es el caso de Petty y de BOUTI.
+
+### El informe de VISA viene por afiliado, y el estado dice de cuál es cada remisión
+
+VISA liquida por **comercio afiliado**, y una empresa con varias cuentas de St. Georges tiene un afiliado por cuenta. El informe **consolidado** suma los tres, así que su neto diario no coincide con ninguna remisión individual. Enero de 2026 de Shopping: de los 30 netos del informe `016000317`, **ninguno** aparecía en ningún estado — 37 rojas por B/ 49,827.76 en el Paso 3 — y sin embargo la suma de las tres cuentas daba el total **al centavo**:
+
+| Cuenta | Afiliado | Neto del informe | Remisiones del estado |
+|---|---|---|---|
+| STG principal | `016005613` | 25,364.66 | 25,364.66 |
+| STG Super | `016026729` | 18,333.84 | 18,333.84 |
+| STG Bordados | `016030653` | 2,618.24 | 2,618.24 |
+| *(consolidado)* | `016000317` | 46,316.74 | = la suma de los tres |
+
+Lo que lo resuelve es que **la remisión del estado nombra el afiliado**, y no solo en Shopping — en Petty también:
+
+```
+Remisión V/Mc 016005613 Liq. No. 3768763      STG principal de Shopping
+Remisión V/Mc 016026729 Liq. No. 3769613      STG Super
+Remisión V/Mc 016030653 Liq. No. 3769578      STG Bordados
+Remisión V/Mc 016005605 Liq. No. 3992027      STG de Petty
+```
+
+Así que el mapa `afiliado → cuenta` **lo declaran los datos**, no una configuración: se lee de los dos lados y tienen que coincidir.
+
+- `afiliadoDeRemision(desc)` lo saca de la línea del estado; `afiliadoDeHojaVisa(rows, nombre)` de la hoja del informe — por su columna `ID Sucursal`, por su encabezado `Comercio: … (016000317)` o, en último caso, por el nombre de la hoja. Las dos formas hacen falta: el consolidado **no trae** columna `ID Sucursal` y las hojas por cuenta sí.
+- `retVisaPorCuenta(rowsVisa, estados)` arma `{cuenta: {fecha: retención}}`. Los guards: la cuenta tiene que nombrar **un solo** afiliado en sus remisiones, el afiliado tiene que mapear a **una sola** cuenta, y **una hoja que ninguna cuenta reclama queda afuera y se reporta** — ese es el consolidado, que sumado a las otras contaría todo dos veces.
+- En el Paso 2 la retención ya no está atada a `banco==="STG"`: `retDeBanco(bk)` da la de **la cuenta que se está cotejando**. En el Paso 3 cada `cfg` recibe la suya, incluidas las cuentas adicionales — que antes no recibían ninguna a propósito, porque el informe era uno solo y era de la principal.
+- **Compatibilidad**: con una sola hoja reclamada por una sola cuenta, el resultado es el mismo dato en la misma cuenta que antes; y si no se puede mapear nada, se usa el camino viejo (la primera hoja para la principal de St. Georges).
+
+**Pedir el informe separado por afiliado es mejor que pedir el consolidado**, porque el consolidado no se puede repartir: su neto diario es la suma y no hay forma de saber qué parte es de cada cuenta sin inventar el corte.

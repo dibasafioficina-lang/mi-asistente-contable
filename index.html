@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.49";
+var APP_VERSION = "2026.10.50";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1718,6 +1718,96 @@ function parseEstadoCuenta(rows, tipo){
 }
 
 // 4) Retenciones VISA STG (detalle transaccional con subtotales)
+/* ---- El informe de VISA viene por AFILIADO, y el estado de cuenta dice de cuál es cada remisión ----
+   VISA liquida por comercio afiliado, y una empresa con varias cuentas de St. Georges tiene un afiliado
+   por cuenta. El informe consolidado (`016000317` en Shopping) suma los tres, así que su neto diario no
+   coincide con ninguna remisión individual: en enero de 2026 ninguno de los 30 netos aparecía en ningún
+   estado (37 rojas por B/ 49,827.76 en el Paso 3), aunque la suma de las tres cuentas daba el total al
+   centavo.
+   Lo que lo resuelve es que la remisión del estado **nombra el afiliado**, y no en Shopping nada más — en
+   Petty también:
+
+     Remisión V/Mc 016005613 Liq. No. 3768763      STG principal de Shopping
+     Remisión V/Mc 016026729 Liq. No. 3769613      STG Super
+     Remisión V/Mc 016030653 Liq. No. 3769578      STG Bordados
+     Remisión V/Mc 016005605 Liq. No. 3992027      STG de Petty
+
+   Así que el mapa afiliado → cuenta **lo declaran los datos**, no una configuración: se lee de los dos
+   lados y se exige que coincidan. */
+function afiliadoDeRemision(desc){
+  var m = String(desc||"").match(/(\d{9})/);
+  return m ? m[1] : null;
+}
+// El afiliado de una HOJA del informe: lo dice su columna "ID Sucursal", su encabezado
+// ("Comercio: X (016000317)") o, en último caso, el nombre de la hoja.
+function afiliadoDeHojaVisa(rows, nombreHoja){
+  var h = findHeaderRow(rows, ["Fecha","Monto Bruto"]);
+  if(h !== -1){
+    var cId = colIdx(rows[h], "ID Sucursal");
+    if(cId >= 0){
+      for(var r=h+1; r<rows.length; r++){
+        var v = rows[r] && rows[r][cId];
+        if(v===null || v===undefined) continue;
+        var m = String(v).match(/(\d{9})/);
+        if(m) return m[1];
+      }
+    }
+  }
+  // El encabezado del consolidado: " Comercio: SHOPPING CENTER BUILDING (016000317)"
+  for(var k=0; k<Math.min(rows.length, 12); k++){
+    var fila = rows[k] || [];
+    for(var c=0; c<fila.length; c++){
+      if(typeof fila[c] !== "string") continue;
+      if(normTxt(fila[c]).indexOf("COMERCIO") === -1) continue;
+      var mm = fila[c].match(/\((\d{9})\)/);
+      if(mm) return mm[1];
+    }
+  }
+  var mn = String(nombreHoja||"").match(/(\d{9})/);
+  return mn ? mn[1] : null;
+}
+/* El informe por cuenta: {nombre de cuenta: {fecha: retención}} y su detalle.
+   Guards, los de siempre:
+   - la cuenta tiene que nombrar UN solo afiliado en sus remisiones (con dos no se sabe cuál es);
+   - el afiliado tiene que mapear a UNA sola cuenta (con dos tampoco);
+   - una hoja cuyo afiliado no lo reclame ninguna cuenta se deja afuera y se reporta — es el caso del
+     consolidado, que sumado a las otras tres contaría todo dos veces. */
+function retVisaPorCuenta(rowsVisa, estados){
+  var res = { porCuenta:{}, detalle:{}, mapa:{}, hojasFuera:[] };
+  if(!rowsVisa) return res;
+  var hojas = rowsVisa.hojas || {"": rowsVisa};
+  // Qué afiliado nombra cada cuenta, según las remisiones de su estado.
+  var afilDeCuenta = {}, cuentaDeAfil = {};
+  Object.keys(estados||{}).forEach(function(b){
+    var vistos = {};
+    (estados[b]||[]).forEach(function(x){
+      if(!(x.credito > 0) || !esRemisionVisa(x.descripcion)) return;
+      var a = afiliadoDeRemision(x.descripcion);
+      if(a) vistos[a] = true;
+    });
+    var ks = Object.keys(vistos);
+    if(ks.length === 1) afilDeCuenta[b] = ks[0];
+  });
+  Object.keys(afilDeCuenta).forEach(function(b){
+    var a = afilDeCuenta[b];
+    cuentaDeAfil[a] = cuentaDeAfil[a] === undefined ? b : null;   // null = reclamado por dos cuentas
+  });
+  Object.keys(hojas).forEach(function(nom){
+    var rows = hojas[nom];
+    if(!rows || !rows.length) return;
+    var datos; try{ datos = parseRetencionesVisa(rows); }catch(e){ return; }
+    if(!datos.length) return;
+    var afil = afiliadoDeHojaVisa(rows, nom);
+    var cuenta = afil ? cuentaDeAfil[afil] : undefined;
+    if(!cuenta){ res.hojasFuera.push({hoja:nom, afiliado:afil||"(sin afiliado)", dias:datos.length}); return; }
+    var porDia = {};
+    datos.forEach(function(d){ porDia[d.fecha] = Math.abs(d.retenciones); });
+    res.porCuenta[cuenta] = porDia;
+    res.detalle[cuenta] = datos;
+    res.mapa[cuenta] = afil;
+  });
+  return res;
+}
 function parseRetencionesVisa(rows){
   var hIdx = findHeaderRow(rows, ["Fecha","Monto Bruto","Ret. Imp","Comision","ITBMS"]);
   if(hIdx===-1) throw new Error("No se encontró el encabezado esperado en el informe de retenciones VISA.");
@@ -4198,7 +4288,9 @@ function hallazgoDescargo(banco, fecha, monto, desc, dsc, comprobante, fuente, l
     fuente: fuente };
 }
 // estExtra: {nombre de la cuenta: estado de cuenta} de las cuentas adicionales (ver CUENTAS_EXTRA).
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio, diariosBanco, estExtra){
+/* retVisaCuenta: {nombre de cuenta: {fecha: retencion}} — ver retVisaPorCuenta. Cuando viene, manda; si
+   no, se usa retVisaPorDia para la cuenta principal de St. Georges, que es el comportamiento de siempre. */
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio, diariosBanco, estExtra, retVisaCuenta){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
@@ -4237,6 +4329,12 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       fuente: "Diario Caja General"
     });
   });
+  // La retencion VISA de LA cuenta que se esta cotejando. Sin mapa por cuenta, la de STG como siempre.
+  function retDeBanco(bk){
+    if(retVisaCuenta && retVisaCuenta[bk]) return retVisaCuenta[bk];
+    if(retVisaCuenta) return null;              // hay mapa y esta cuenta no esta en el: no tiene informe
+    return bk === "STG" ? retVisaPorDia : null;
+  }
   var usarDetalleCheques = !!(chequesDetalle && chequesDetalle.length);
 
   // Las líneas del estado que compensan partidas en tránsito del mes anterior (Paso 0) se apartan antes de
@@ -4412,22 +4510,23 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
       }
       var combo = comboEnPool(objetivo);
       // 2) STG con retenciones VISA: el banco muestra el neto → probar bruto − retención del día
-      if(!combo && banco==="STG" && retVisaPorDia && retVisaPorDia[dep.fecha]!=null){
-        combo = comboEnPool(Math.round((objetivo - retVisaPorDia[dep.fecha])*100)/100);
+      var retBk = retDeBanco(banco);
+      if(!combo && retBk && retBk[dep.fecha]!=null){
+        combo = comboEnPool(Math.round((objetivo - retBk[dep.fecha])*100)/100);
       }
       // 2b) DEPÓSITO ACUMULADO DEL PERÍODO: algunos meses el diario registra la VISA de todo el mes en un
       // solo asiento del último día ("DEPOSITOS POR TARJETA VISA STG DEL 1 AL 31 DE ENERO 2026") mientras el
       // banco la fue acreditando en remisiones diarias. El monto del diario es el BRUTO del período, así que
       // se le restan las retenciones de esos días y se busca el conjunto de créditos que sumen el neto.
       // Sin esto, el acumulado del mes queda como "en tránsito" aunque ya haya compensado completo.
-      if(!combo && retVisaPorDia && normTxt(dep.descripcion).indexOf("VISA")!==-1){
+      if(!combo && retBk && normTxt(dep.descripcion).indexOf("VISA")!==-1){
         var rg = rangoDeposito(dep.descripcion, dep.fecha);
         if(rg){
           var retPeriodo = 0;
-          Object.keys(retVisaPorDia).forEach(function(f){
+          Object.keys(retBk).forEach(function(f){
             if(f.slice(0,7)!==rg.ym) return;
             var dd = parseInt(f.slice(8,10),10);
-            if(dd>=rg.diaIni && dd<=rg.diaFin) retPeriodo += retVisaPorDia[f];
+            if(dd>=rg.diaIni && dd<=rg.diaFin) retPeriodo += retBk[f];
           });
           var netoPeriodo = Math.round((objetivo - retPeriodo)*100)/100;
           // Ventana sin límite práctico y varias partidas: el asiento es del último día pero cubre todo el mes.
@@ -4499,9 +4598,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
             // La VISA de STG compensa NETA: el banco acredita la remisión con la retención ya descontada
             // (esa misma venta de 243.61 entró al banco como 231.70). El match directo ya lo contemplaba;
             // el del desglose no, así que la partida VISA no se encontraba nunca.
-            if(!c && banco==="STG" && retVisaPorDia && retVisaPorDia[p.fecha]!=null &&
+            if(!c && retDeBanco(banco) && retDeBanco(banco)[p.fecha]!=null &&
                normTxt(p.metodo).indexOf("VISA")!==-1){
-              c = buscarCombinacion(poolP, dep.fecha, Math.round((p.monto - retVisaPorDia[p.fecha])*100)/100,
+              c = buscarCombinacion(poolP, dep.fecha, Math.round((p.monto - retDeBanco(banco)[p.fecha])*100)/100,
                                     ventDesglose, tolerancia);
             }
             // Ya la pago una remision agrupada que consumio el dia contiguo: cuenta como hallada y no
@@ -5142,7 +5241,8 @@ function resumenSalidas(diario, estado){
 
 // diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
 // cfgsExtra: [{nombre, diario, estado}] de las cuentas adicionales que tengan AMBOS archivos subidos.
-function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia, transitoPrevio, cfgsExtra){
+// retVisaCuenta: {cuenta: {fecha: retencion}}. Cuando viene, cada cuenta usa el informe de SU afiliado.
+function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia, transitoPrevio, cfgsExtra, retVisaCuenta){
   var hallazgos = [];
   var cfgs = [
     {nombre:"Banistmo", diario:diarioBanistmo, estado:estBanistmo},
@@ -5153,6 +5253,9 @@ function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGenera
      la que recibe las remisiones de VISA. Pasárselo a otra cuenta la haría buscar un neto que ahí no
      entra nunca. Solo entran las cuentas con los DOS archivos: con uno solo no hay nada que conciliar. */
   (cfgsExtra||[]).forEach(function(c){ if(c && c.diario && c.estado) cfgs.push(c); });
+  /* Con el informe por afiliado cada cuenta recibe el suyo — incluidas las adicionales, que antes no
+     recibian ninguno a proposito porque el informe era uno solo y era de la principal. */
+  if(retVisaCuenta) cfgs.forEach(function(c){ c.retVisa = retVisaCuenta[c.nombre] || null; });
   // PRIMERO: consumir las partidas en tránsito del mes anterior (Paso 0). Sus líneas del estado ya tienen
   // asiento —el del mes pasado— así que no deben salir como "no aparece registrado en el diario contable".
   // Lo que queda pendiente se le pasa a la pasada de cheques, que empareja de forma más permisiva.
@@ -5687,7 +5790,22 @@ function computaPaso(pasoKey, raws, opts){
     STATE.estados = { "Banistmo": estBanistmo, "STG": estStg };
     if(estBG) STATE.estados["Banco General"] = estBG;
     Object.keys(estExtra2).forEach(function(b){ STATE.estados[b] = estExtra2[b]; });
-    try{ STATE.retVisaDetalle = raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null; }catch(e){ STATE.retVisaDetalle = null; }
+    /* El informe de VISA por afiliado: el mapa sale de las propias remisiones de cada estado, asi que se
+       arma DESPUES de tenerlos todos. Si el informe trae una sola hoja y una sola cuenta la reclama, el
+       resultado es el mismo dato en la misma cuenta que antes. */
+    var rvCta = null;
+    try{
+      var rv = retVisaPorCuenta(raws.retVisa, STATE.estados);
+      if(Object.keys(rv.porCuenta).length){ rvCta = rv.porCuenta; STATE.retVisaMapa = rv; }
+    }catch(e){}
+    /* El detalle que usa parteReingresoCompensada es el de la cuenta cuyo reingreso se esta mirando, y
+       hoy esa funcion solo corre para la principal de St. Georges. Con el mapa por afiliado se le da el
+       de ESA cuenta; sin mapa, la primera hoja, como siempre. */
+    try{
+      var rvD = retVisaPorCuenta(raws.retVisa, STATE.estados || {});
+      STATE.retVisaDetalle = (rvD.detalle && rvD.detalle["STG"]) ||
+                             (raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null);
+    }catch(e){ try{ STATE.retVisaDetalle = raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null; }catch(e2){ STATE.retVisaDetalle = null; } }
     // Retención VISA por día (magnitud positiva) para cuadrar el neto en STG: bruto − retención = neto del banco.
     var retVisaDia = null;
     if(raws.retVisa){
@@ -5708,7 +5826,7 @@ function computaPaso(pasoKey, raws, opts){
       var dxP2 = diariosExtraDe(raws);
       Object.keys(dxP2).forEach(function(b){ diariosBanco[b] = dxP2[b]; });
     }catch(e){}
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2, diariosBanco, estExtra2);
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2, diariosBanco, estExtra2, rvCta);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -5729,7 +5847,15 @@ function computaPaso(pasoKey, raws, opts){
     if(transitoPrevio) STATE.transitoPrevio = transitoPrevio;
     var dxP3 = diariosExtraDe(raws), exP3 = estadosExtraDe(raws);
     var cfgsExtra = CUENTAS_EXTRA.map(function(c){ return {nombre:c.banco, diario:dxP3[c.banco], estado:exP3[c.banco]}; });
-    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio, cfgsExtra);
+    var estP3 = { "Banistmo": estBanistmo, "STG": estStg };
+    if(estBG) estP3["Banco General"] = estBG;
+    Object.keys(exP3).forEach(function(b){ estP3[b] = exP3[b]; });
+    var rvCta3 = null;
+    try{
+      var rv3 = retVisaPorCuenta(raws.retVisa, estP3);
+      if(Object.keys(rv3.porCuenta).length){ rvCta3 = rv3.porCuenta; STATE.retVisaMapa = rv3; }
+    }catch(e){}
+    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio, cfgsExtra, rvCta3);
     // Validación VISA (antes Paso 4): chequeo independiente de que el neto VISA del informe tiene su
     // 'Remisión V/Mc' en el estado de cuenta STG (además del cuadre diario↔estado de arriba).
     if(retVisaLista){
