@@ -694,7 +694,35 @@ Las dos respuestas conviven, y cada una decide algo distinto:
 
 Al preguntar por una cuenta nueva conviene preguntar las dos cosas por separado.
 
-### El efectivo se coteja cuenta por cuenta, y cada paso contesta su pregunta
+### El efectivo por cuenta se probó y se midió PEOR: no se implementó
+
+Queda acá para no volver a intentarlo sin leer esto. La idea era correr el bloque de efectivo del Paso 2 **cuenta por cuenta** en vez de contra el banco votado, para que los 175 depósitos `DP-` de Super se buscaran en el estado de Super. Se implementó entero (incluido separar `bancoSoloTexto` de `bancoDeComprobante`, el bucle por grupo, `marcarRedondeosDelEfectivo` por cuenta y la exclusión del efectivo ajeno en la comparación del Paso 1) y el resultado medido fue:
+
+| | Paso 1 | Paso 2 | Suma |
+|---|---|---|---|
+| v2026.10.48, antes del ruteo por comprobante | 123,115 | 118,849 | 241,964 |
+| **v2026.10.49, solo ruteo por comprobante** | **8,059** | 141,806 | **149,865** |
+| v2026.10.50, efectivo por cuenta | 8,059 | **203,244** | 211,303 |
+
+**La v49 es la mejor de las tres y la v50 se revirtió.**
+
+El motivo es la **forma del dato**, no el código. El efectivo de Super no es "un día → un ACH" como en Petty:
+
+```
+Depósitos DP- en Caja General    175 líneas    B/ 141,038.76     importes con centavos
+ACH de Brinks en el estado        22 líneas    B/ 128,946.00     importes REDONDOS (múltiplos de 5)
+Líneas "Descripción" (redondeos)  30 líneas    B/      298.58
+                                                ──────────────
+                                     sin explicar  B/  11,794.18
+```
+
+Y el corte no es por día: el ACH del retiro del 7-ene trae 3,890.00 contra 4,155.86 depositados ese día; el del 9-ene trae 3,945.00 contra 1,690.50. Los seis ACH acreditados el 30-ene corresponden a retiros del 22 al 28.
+
+Así que cuadrarlo exigiría **buscar un subconjunto de 175 depósitos que sume cada ACH** — con 175 candidatos eso encuentra *alguna* combinación para casi cualquier importe, que es exactamente el falso positivo contra el que todo el resto de este documento previene. No se hace.
+
+**Lo que sí vale**: el ruteo por comprobante de la v49 (el Paso 1 pasó de 123,115 a 8,059), y que el Paso 3 concilie esa cuenta contra su propio estado, donde ya le va mejor con los mismos datos (51 rojas por 28,849.04 contra las 157 por 129,230.11 del Paso 2). Si algún día hay que cuadrarlo de verdad, el camino es que el asiento **declare el desglose** —qué depósitos entraron en qué retiro—, igual que la columna `Desglose` del resumen resolvió la partida partida entre dos meses.
+
+### Las dos preguntas del efectivo (parte de lo de arriba, revertido)
 
 Juntar las dos preguntas en una sola función rompió el efectivo. Son distintas y ahora viven separadas:
 

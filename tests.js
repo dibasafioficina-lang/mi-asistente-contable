@@ -6071,54 +6071,6 @@ test("sin comprobantes DP- el ruteo no cambia", () => {
   COMPROBANTE_BANCO = null;
 });
 
-/* ---- El efectivo se coteja CUENTA POR CUENTA, y cada paso contesta su pregunta ----
-   Juntar "el asiento nombra un banco?" con "de que cuenta es?" saco las lineas DP- de la seccion de
-   efectivo del Paso 2 y las mando al cotejo general, que empareja 1:1 o por combinacion del mismo dia.
-   Pero el banco acredita el efectivo de varios dias CONSOLIDADO en un ACH de Brinks: de los 175 depositos
-   DP- de Shopping en enero de 2026 solo 11 tenian un credito del mismo importe en el estado, los otros
-   164 estaban dentro de 22 ACH. Son dos preguntas distintas y van en dos funciones distintas. */
-test("bancoSoloTexto no mira el comprobante y clasificarBancoPorTexto sí", () => {
-  fijarComprobantesDeBanco({ diarioStgSuper:
-    [["Account","Fecha","Referencia","Descripcion","Debito","Credito"],
-     ["[1.1.1.02] ST. GEORGE BANK (SUPER)","2026-01-05","DP-00005410","Deposito",2410,0]] });
-  const d = "Deposito Contable: DP-00005410 Realizado Con: CASH";
-  eq(bancoSoloTexto(d), null, "el asiento no nombra banco: la linea es efectivo");
-  eq(bancoDeComprobante(d), "STG Super", "pero el comprobante dice de que cuenta es");
-  eq(clasificarBancoPorTexto(d), "STG Super");
-  COMPROBANTE_BANCO = null;
-});
-
-/* El Paso 1 pregunta si el efectivo que REPORTO la cajera llego a Caja General. El efectivo de una cuenta
-   cuya venta no pasa por el informe si entra a Caja General pero nadie lo reporta ahi, asi que compararlo
-   infla el lado de Caja General y saca una diferencia por su importe completo (25 dias por B/ 120,631.15).
-   Se saca de la COMPARACION pero no del traspaso al Paso 2, que si tiene que buscarlo en el banco. */
-test("el depósito de otra cuenta no se compara contra el informe de cajeras", () => {
-  fijarComprobantesDeBanco({ diarioStgSuper:
-    [["Account","Fecha","Referencia","Descripcion","Debito","Credito"],
-     ["[1.1.1.02] ST. GEORGE BANK (SUPER)","2026-01-05","DP-00005410","Deposito",2410,0]] });
-  const rep = [["Fecha","Empresa","Cajera","Efectivo\nBrink","Efectivo\nVentanilla","Visa\nSr.George"],
-               ["2026-01-05","SHOPPING","NORIS",100,0,0]];
-  const reporte = parseReporteConsolidado(rep);
-  const caja = [
-    { fecha:"2026-01-05", debito:0, credito:100,  descripcion:"DEPOSITO BRINKS DEL 05/01/2026", referencia:"ME-1", fila:2 },
-    { fecha:"2026-01-05", debito:0, credito:2410, descripcion:"Deposito Contable: DP-00005410 Realizado Con: CASH", referencia:"DP-00005410", fila:3 }
-  ];
-  STATE.decisiones = {};
-  const h = paso1(reporte, caja, null, 0.01, null, null, null, {});
-  // El efectivo del dia cuadra: 100 reportado contra 100 de Caja General. Los 2,410 no participan.
-  eq(h.filter(x => !esNoRojo(x) && /Efectivo/.test(x.concepto||"")).length, 0, "ninguna diferencia de efectivo");
-  // Pero no desaparecen: se informan, con su cuenta.
-  const inf = h.filter(x => x.motivo === "efectivo de otra cuenta");
-  eq(inf.length, 1);
-  eq(inf[0].banco, "STG Super");
-  cerca(inf[0].monto, 2410);
-  // Y el Paso 2 los hereda: las DOS lineas quedan marcadas como efectivo.
-  eq(Object.keys(STATE.decisiones.efectivo.filas).length, 2, "el Paso 2 busca las dos en el banco");
-  eq(STATE.decisiones.efectivo.bancoPorFila[3], "STG Super", "y sabe de que cuenta es la segunda");
-  eq(STATE.decisiones.efectivo.bancoPorFila[2], undefined, "la otra va al banco votado");
-  STATE.decisiones = {}; COMPROBANTE_BANCO = null;
-});
-
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

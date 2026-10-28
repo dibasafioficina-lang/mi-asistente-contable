@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.50";
+var APP_VERSION = "2026.10.49";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1806,22 +1806,8 @@ function fijarComprobantesDeBanco(raws){
   });
   if(n) COMPROBANTE_BANCO = mapa;
 }
-/* La cuenta que dice el COMPROBANTE, sin mirar el texto. Se usa aparte porque son dos preguntas
-   distintas: "¿el asiento nombra un banco?" decide si la línea es efectivo sin banco (y entonces la
-   trabaja la sección de efectivo, que sabe del ciclo del camión), y "¿de qué cuenta es?" decide contra
-   qué estado se cotea. Juntarlas saca las líneas `DP-` de la sección de efectivo y las manda al cotejo
-   general, que empareja 1:1 o por combinación del mismo día — y el banco acredita el efectivo de varios
-   días consolidado en UN ACH de Brinks, así que ninguna cuadra. Medido en enero de 2026 de Shopping: de
-   175 depósitos `DP-` solo 11 tenían un crédito del mismo importe en el estado; los otros 164 estaban
-   dentro de 22 ACH. */
-function bancoDeComprobante(desc){
-  if(!COMPROBANTE_BANCO) return null;
-  var m = normTxt(desc).match(/DP-\d+/);
-  return (m && COMPROBANTE_BANCO[m[0]]) || null;
-}
 // Paso 1: Reporte consolidado (por banco/dia) vs Diario Caja General (por dia, clasificado por banco via texto)
-function clasificarBancoPorTexto(desc){ return bancoSoloTexto(desc) || bancoDeComprobante(desc); }
-function bancoSoloTexto(desc){
+function clasificarBancoPorTexto(desc){
   var n = normTxt(desc);
   /* Las cuentas adicionales van PRIMERO: "DEPOSITO ST GEORGES BORDADOS" contiene "GEORGE", así que sin
      esto la plata de Bordados se iría a la cuenta principal de St. Georges y las dos quedarían mal
@@ -1839,7 +1825,11 @@ function bancoSoloTexto(desc){
   /* ÚLTIMO recurso, y solo cuando el texto no nombró ningún banco: el comprobante del depósito. Ver
      fijarComprobantesDeBanco — el mapa sale de los navegadores de banco y deja afuera todo comprobante
      que aparezca en más de una cuenta. */
-  return null;   // el comprobante lo mira clasificarBancoPorTexto, no esta funcion
+  if(COMPROBANTE_BANCO){
+    var mref = n.match(/DP-\d+/);
+    if(mref && COMPROBANTE_BANCO[mref[0]]) return COMPROBANTE_BANCO[mref[0]];
+  }
+  return null;
 }
 // ¿La descripción es un depósito de ACH o cheque que el sistema a veces registra SIN banco?
 // (ej. "DEPOSITO ACH DEL...", "DEPOSITO POR CK DEL..."). Se usa para reconocer que la plata
@@ -2404,51 +2394,15 @@ function paso1(reporte, diarioCaja, chequesDetalle, tolerancia, faltSobrReporte,
     (transitoPrevio||[]).forEach(function(t){ var n = normTxt(t.concepto); if(t.banco && (esBrinks(n) || n.indexOf("EFECTIVO")!==-1)) votosEf[t.banco] = (votosEf[t.banco]||0) + 1; });
     var bancosEf = Object.keys(votosEf).sort(function(a, b){ return votosEf[b] - votosEf[a]; });
     efDec.banco = bancosEf.length ? bancosEf[0] : null;
-    /* Lo que hace a una línea "efectivo" es que el ASIENTO no nombre banco — por eso se mira solo el
-       texto. Que el comprobante sí diga de qué cuenta es no la saca de acá: la sigue acreditando el
-       camión, consolidada, y esa es la maquinaria que la cuadra. */
     var lineasEf = diarioCaja.filter(function(x){
-      return x.credito>0 && !bancoSoloTexto(x.descripcion) && esDepositoEfectivo(x.descripcion) && !fechaOrigenEnTexto(x.descripcion, x.fecha);
+      return x.credito>0 && !clasificarBancoPorTexto(x.descripcion) && esDepositoEfectivo(x.descripcion) && !fechaOrigenEnTexto(x.descripcion, x.fecha);
     });
-    // Y de qué cuenta es cada una, cuando el comprobante lo dice. Sin comprobante queda al banco votado.
-    efDec.bancoPorFila = {};
-    lineasEf.forEach(function(x){
-      var bc = bancoDeComprobante(x.descripcion);
-      if(bc) efDec.bancoPorFila[x.fila] = bc;
-    });
-    /* ---- El depósito de OTRA cuenta no se compara contra el informe de cajeras ----
-       El Paso 1 pregunta si el efectivo que REPORTÓ la cajera llegó a Caja General. El efectivo de una
-       cuenta cuya venta no pasa por el informe —Super en Shopping: 175 depósitos `DP-` por B/ 141,038.76—
-       sí entra a Caja General pero nadie lo reporta ahí, así que compararlo infla el lado de Caja General
-       y saca una diferencia por su importe completo: 25 días por B/ 120,631.15, todas falsas.
-       Se saca de la COMPARACIÓN pero NO de `efDec.filas`: el Paso 2 sí tiene que buscarlo en el banco —
-       es plata que Caja General acreditó y el banco tiene que haber recibido. Son dos preguntas distintas
-       y cada paso contesta la suya. */
-    var lineasEfCaja = lineasEf.filter(function(x){ return !efDec.bancoPorFila[x.fila]; });
-    var lineasEfOtra = lineasEf.filter(function(x){ return !!efDec.bancoPorFila[x.fila]; });
-    if(lineasEfOtra.length){
-      var porCtaEf = {};
-      lineasEfOtra.forEach(function(x){ var b = efDec.bancoPorFila[x.fila];
-        porCtaEf[b] = (porCtaEf[b] || {n:0, s:0}); porCtaEf[b].n++; porCtaEf[b].s += x.credito; });
-      Object.keys(porCtaEf).forEach(function(b){
-        var g = porCtaEf[b], tot = Math.round(g.s*100)/100;
-        hallazgos.push({
-          fecha:"", banco:b, monto:tot, clase:"informativo",
-          concepto:"Efectivo de otra cuenta", comprobante:"", motivo:"efectivo de otra cuenta",
-          texto: "Caja General acreditó " + g.n + " depósito(s) de efectivo por B/ " + fmt(tot) + " cuyo " +
-                 "comprobante los declara de " + b + ". No se comparan contra el informe de cajeras porque " +
-                 "esa venta no pasa por ahí; el Paso 2 los busca en el estado de cuenta de " + b + ".",
-          fuente:"Diario Caja General"
-        });
-      });
-    }
     var fechasEf = {};
     reporte.efectivo.forEach(function(e){ fechasEf[e.fecha] = true; });
-    lineasEf.forEach(function(x){ efDec.filas[x.fila] = true; });
-    lineasEfCaja.forEach(function(x){ fechasEf[x.fecha] = true; });
+    lineasEf.forEach(function(x){ fechasEf[x.fecha] = true; efDec.filas[x.fila] = true; });
     Object.keys(fechasEf).sort().forEach(function(f){
       var delDia = reporte.efectivo.filter(function(e){ return e.fecha === f; });
-      var ls = lineasEfCaja.filter(function(x){ return x.fecha === f; });
+      var ls = lineasEf.filter(function(x){ return x.fecha === f; });
       var brink = Math.round(delDia.filter(function(e){ return e.tipo === "BRINK"; }).reduce(function(a, e){ return a + e.monto; }, 0)*100)/100;
       var vent = Math.round(delDia.filter(function(e){ return e.tipo === "VENTANILLA"; }).reduce(function(a, e){ return a + e.monto; }, 0)*100)/100;
       var a = Math.round((brink + vent)*100)/100;
@@ -2967,21 +2921,12 @@ function reservadoParaEfectivo(desc, monto){
    Marca los objetos del pool, que son compartidos: apartar no duplica. */
 function marcarRedondeosDelEfectivo(diarioCaja, bancoCred, banco, ventanaDias, tolerancia){
   var efH = STATE.decisiones && STATE.decisiones.efectivo;
-  if(!efH) return;
+  if(!efH || efH.banco !== banco) return;
   if(efH.firmaCaja !== firmaDiario(diarioCaja)) return;
-  /* El banco votado ya no es el único que tiene efectivo: una cuenta cuyo comprobante lo declara también
-     recibe sus ACH del camión, así que también hay que apartarle su redondeo. */
-  var bpf = efH.bancoPorFila || {};
-  var esVotado = (efH.banco === banco);
-  var hayPropias = Object.keys(bpf).some(function(f){ return bpf[f] === banco; });
-  if(!esVotado && !hayPropias) return;
   var pool = bancoCred[banco] || [];
   var vent = Math.max(ventanaDias, 10);
   (diarioCaja||[]).forEach(function(d){
     if(!(d.credito > 0) || !efH.filas[d.fila]) return;
-    // Cada linea se aparta SOLO contra su propia cuenta.
-    var suyo = bpf[d.fila] || efH.banco;
-    if(suyo !== banco) return;
     var achs = pool.filter(function(e){
       if(!esBrinks(e.desc)) return false;
       if(e.fecha < d.fecha || distanciaBancaria(d.fecha, e.fecha) > vent) return false;
@@ -4842,24 +4787,9 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
      con la decision del Paso 1: sin ella no hay forma de saber que lineas son el efectivo del dia. */
   var efH = STATE.decisiones && STATE.decisiones.efectivo;
   if(efH && efH.firmaCaja === firmaDiario(diarioCaja)){
-    var lineasEfTodas = diarioCaja.filter(function(x){ return x.credito>0 && efH.filas[x.fila]; });
-    /* ---- El efectivo se coteja CUENTA POR CUENTA ----
-       Antes este bloque corria una sola vez, contra el banco VOTADO. Con una empresa que deposita el
-       efectivo de dos cuentas por Caja General eso manda el de una a buscar en el estado de la otra: en
-       enero de 2026 de Shopping los 175 depositos de Super (B/ 141,038.76) se buscaban en St. Georges.
-       Se agrupa por la cuenta que declara el comprobante; las lineas que no la declaran van al banco
-       votado, como siempre. Con UNA sola cuenta el bucle corre una vez y con los mismos datos que antes:
-       esa es la propiedad que protege a las empresas de una sola cuenta de efectivo. */
-    var gruposEf = {};
-    lineasEfTodas.forEach(function(x){
-      var bc = (efH.bancoPorFila && efH.bancoPorFila[x.fila]) || "";
-      (gruposEf[bc] = gruposEf[bc] || []).push(x);
-    });
-    Object.keys(gruposEf).forEach(function(claveGrupoEf){
-    var lineasEfP2 = gruposEf[claveGrupoEf];
+    var lineasEfP2 = diarioCaja.filter(function(x){ return x.credito>0 && efH.filas[x.fila]; });
     if(lineasEfP2.length){
-      var bancoEf = (claveGrupoEf && bancoCred[claveGrupoEf]) ? claveGrupoEf
-                  : ((efH.banco && bancoCred[efH.banco]) ? efH.banco : null);
+      var bancoEf = (efH.banco && bancoCred[efH.banco]) ? efH.banco : null;
       if(!bancoEf){
         var conBrinks = Object.keys(bancoCred).filter(function(b){ return bancoCred[b].some(function(e){ return esBrinks(e.desc); }); });
         bancoEf = conBrinks.length === 1 ? conBrinks[0] : null;
@@ -5111,7 +5041,6 @@ function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, 
         });
       }
     }
-    });
   }
 
   // Remisiones VISA de STG y la venta a la que quedaron asignadas: el Paso 4 controla contra esto.
