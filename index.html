@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.48";
+var APP_VERSION = "2026.10.49";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1763,6 +1763,49 @@ function sumBy(arr, keyFn, valFn){
   return m;
 }
 
+/* ---- El comprobante dice de qué cuenta es cuando el texto no lo dice ----
+   Caja General registra los depósitos de una cuenta como "Deposito Contable: DP-00005410 Realizado Con:
+   CASH": no nombra el banco ni la cuenta, así que el ruteo por texto devuelve null y esas líneas caen al
+   balón del efectivo, que se le atribuye al banco VOTADO. En enero de 2026 de Shopping eran 175 líneas
+   por B/ 141,038.76 — el 96% de las rojas del Paso 2 y el 70% de las del Paso 1, todas contra la cuenta
+   equivocada.
+   El comprobante `DP-` es el documento del depósito, así que identifica la cuenta sin ambigüedad: el
+   navegador de STG Super tenía las 175, con el MISMO comprobante y el MISMO importe (175 de 175), y
+   ningún otro navegador tenía una sola línea `DP-`. Es el mismo criterio que ya decide en el Paso 3,
+   donde la REFERENCIA (`ME-` de caja, `PAY` de pagos, `RCP` de recibos) manda sobre el texto.
+   El mapa se arma de los navegadores de banco, no se adivina:
+   - solo comprobantes `DP-`;
+   - un comprobante que aparezca en DOS cuentas no se mapea (no se elige);
+   - y el texto SIEMPRE gana: esto solo actúa cuando el texto no nombra ningún banco.
+   Vive en un global por corrida, como CAL_BANCARIO y MES_TRABAJO, porque clasificarBancoPorTexto se
+   llama desde una veintena de lugares y pasarle los navegadores a cada uno dejaría alguno afuera. */
+var COMPROBANTE_BANCO = null;
+function fijarComprobantesDeBanco(raws){
+  COMPROBANTE_BANCO = null;
+  if(!raws) return;
+  var pares = [["diarioBanistmo","Banistmo"],["diarioStg","STG"],["diarioBancoGeneral","Banco General"]];
+  CUENTAS_EXTRA.forEach(function(c){ pares.push([c.keyDiario, c.banco]); });
+  var porRef = {};
+  pares.forEach(function(par){
+    if(!raws[par[0]]) return;
+    var movs; try{ movs = parseDiario(raws[par[0]], null); }catch(e){ return; }
+    movs.forEach(function(m){
+      var ref = String(m.referencia||"").trim().toUpperCase();
+      if(!/^DP-\d+$/.test(ref)) return;
+      var monto = Math.round((Math.abs(m.debito||0) + Math.abs(m.credito||0))*100)/100;
+      if(!(monto > 0)) return;
+      if(!porRef[ref]) porRef[ref] = {};
+      porRef[ref][par[1]] = Math.round(((porRef[ref][par[1]]||0) + monto)*100)/100;
+    });
+  });
+  var mapa = {}, n = 0;
+  Object.keys(porRef).forEach(function(ref){
+    var cuentas = Object.keys(porRef[ref]);
+    if(cuentas.length !== 1) return;   // el mismo comprobante en dos cuentas: no se adivina
+    mapa[ref] = cuentas[0]; n++;
+  });
+  if(n) COMPROBANTE_BANCO = mapa;
+}
 // Paso 1: Reporte consolidado (por banco/dia) vs Diario Caja General (por dia, clasificado por banco via texto)
 function clasificarBancoPorTexto(desc){
   var n = normTxt(desc);
@@ -1779,6 +1822,13 @@ function clasificarBancoPorTexto(desc){
   // Yappy compensa en Banco General (todo lo que diga YAPPY va a Banco General),
   // más menciones explícitas del banco ("BANCO GENERAL" / "B. GENERAL").
   if(n.indexOf("YAPPY")!==-1 || n.indexOf("BANCO GENERAL")!==-1 || n.indexOf("B. GENERAL")!==-1 || n.indexOf("B.GENERAL")!==-1) return "Banco General";
+  /* ÚLTIMO recurso, y solo cuando el texto no nombró ningún banco: el comprobante del depósito. Ver
+     fijarComprobantesDeBanco — el mapa sale de los navegadores de banco y deja afuera todo comprobante
+     que aparezca en más de una cuenta. */
+  if(COMPROBANTE_BANCO){
+    var mref = n.match(/DP-\d+/);
+    if(mref && COMPROBANTE_BANCO[mref[0]]) return COMPROBANTE_BANCO[mref[0]];
+  }
   return null;
 }
 // ¿La descripción es un depósito de ACH o cheque que el sistema a veces registra SIN banco?
@@ -5587,6 +5637,8 @@ function computaPaso(pasoKey, raws, opts){
      hoja dependen el calendario bancario y todo el cotejo. Acá pasan los dos caminos — "ejecutar los 3
      pasos" y "ejecutar solo este paso" — así que ninguno se queda sin él. */
   fijarMesTrabajo(raws);
+  // De qué cuenta es cada comprobante de depósito: lo usa el ruteo cuando el texto no nombra el banco.
+  fijarComprobantesDeBanco(raws);
   // La ventana de días se mide sobre los días con movimiento bancario, no sobre el calendario.
   fijarCalendarioBancario(raws);
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para

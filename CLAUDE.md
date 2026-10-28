@@ -647,3 +647,49 @@ Y dos cosas que se aprendieron en el camino:
 
 - **Una cuenta cuya venta no pasa por Caja General no va en este informe.** Super declara 349,176.28 de venta (280,000 de efectivo del camión) y Caja General no tiene **una sola línea** suya. Meter ese efectivo al cotejo general llevaba las 25 diferencias del Paso 1 de 127,000 a más de 400,000, todas falsas. Super **sí** se concilia en el Paso 3, contra su propio navegador y su propio estado, que no dependen de Caja General.
 - **Separar por método puede no tener contra qué cuadrar.** De las 23 líneas de Bordados en Caja General, 20 dicen solo `"POR TARJETA"` sin método (4,972.96 de 5,366.77). Se temía que el reparto `Visa Bordados` / `Clave Bordados` dejara 20 diferencias; medido, dio **cero** — el cotejo cuadra el total del día. La corrección de verdad sería que el asiento diga el método, pero eso es el sistema, no el informe.
+
+### El comprobante dice de qué cuenta es cuando el texto no lo dice
+
+Caja General registra los depósitos de una cuenta así:
+
+```
+Deposito Contable: DP-00005410 Realizado Con: CASH
+Deposito Web: DP-00005348 Realizado Con: CASH
+```
+
+No nombra el banco ni la cuenta, así que `clasificarBancoPorTexto` devolvía **null** y esas líneas caían al balón del efectivo, que se le atribuye al banco **votado** (`bancoDelEfectivo`). En enero de 2026 de Shopping eran **175 líneas por B/ 141,038.76** contra la cuenta equivocada: el 96% de las rojas del Paso 2 y el 70% de las del Paso 1.
+
+La prueba de a quién pertenecen no se adivinó, se midió:
+
+| | Líneas | B/ |
+|---|---|---|
+| Caja General, créditos con comprobante `DP-` | 175 | 141,038.76 |
+| Navegador de **STG Super**, líneas `DP-` | 178 | 141,038.76 |
+| **Coinciden comprobante Y importe** | **175 de 175** | 141,038.76 |
+
+Y ningún otro navegador tenía **una sola** línea `DP-`: ni STG, ni Banistmo, ni Banco General, ni Bordados. El propio resumen del Paso 0 ya lo decía: sus 21 partidas de Super vienen rotuladas `"Deposito Contable - St. George Deposito / Super"` con comprobantes `DP-00004923` a `DP-00005338`, y los de enero siguen la serie.
+
+Es el mismo criterio que ya decide en el Paso 3, donde la **referencia** (`ME-` de caja, `PAY` de pagos, `RCP` de recibos) manda sobre el texto.
+
+- `fijarComprobantesDeBanco(raws)` arma el mapa `comprobante → cuenta` leyendo los **navegadores de banco**. Solo comprobantes `DP-`, y **un comprobante que aparezca en dos cuentas no se mapea** — ante el empate no se elige, como en todo el resto.
+- **El texto siempre gana**: el comprobante es el último recurso y solo actúa cuando el texto no nombró ningún banco. Una línea que diga `BANISTMO` va a Banistmo aunque su `DP-` esté mapeado a otra cuenta.
+- Vive en un global por corrida, como `CAL_BANCARIO` y `MES_TRABAJO`, y se fija en `computaPaso`. `clasificarBancoPorTexto` se llama desde **una veintena de lugares** y pasarle los navegadores a cada uno dejaría alguno afuera — el mismo motivo por el que `hojaDelMes` vive dentro de `parseEstadoCuenta`.
+- El comprobante se lee **del texto de la descripción**, donde ya viene (`DP-00005410`), así que no hace falta cambiar ninguna firma.
+
+**Lo que protege a las demás empresas**: sin navegadores con comprobantes `DP-` el mapa queda **vacío** y el ruteo es exactamente el de antes. Petty usa `ME-` y `PDN-`; BOUTI, `ME-`. Hay una prueba que congela ese caso.
+
+### Dos preguntas distintas: ¿pasa por la caja, o por Caja General?
+
+Costó una vuelta entera confundirlas, y el error fue mío al leer la respuesta de Diba. Para una cuenta como Super son dos cosas independientes:
+
+| | Super |
+|---|---|
+| Su **venta** pasa por el informe de cajeras | **No** → sus columnas no van en ese archivo |
+| Sus **depósitos** pasan por Caja General | **Sí** → como `DP-… CASH`, B/ 141,038.76 en enero |
+
+Las dos respuestas conviven, y cada una decide algo distinto:
+
+- Por la primera, las 8 columnas de Super salieron del informe (meter sus 280,000 de efectivo al cotejo general llevaba las 25 diferencias del Paso 1 de 127,000 a más de 400,000, todas falsas).
+- Por la segunda, el **navegador y el estado de Super sí hacen falta**, y en los tres lados: el Paso 0 los necesita para que sus 21 partidas en tránsito (13,419.58) tengan contra qué compensar —con el estado subido el Paso 0 pasó de 12 a 20 partidas compensadas—, el Paso 2 para cotejar los `DP-`, y el Paso 3 para conciliar la cuenta contra su propio estado.
+
+Al preguntar por una cuenta nueva conviene preguntar las dos cosas por separado.

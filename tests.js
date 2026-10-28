@@ -6022,6 +6022,55 @@ test("una hoja escrita en MM/DD enseña su orientación", () => {
   eq(fechaReporteConsolidado(hoja[3][0], []), "2026-02-01");
 });
 
+/* ---- El comprobante dice de que cuenta es cuando el texto no lo dice ----
+   Caja General registra los depositos de una cuenta como "Deposito Contable: DP-00005410 Realizado Con:
+   CASH": no nombra el banco ni la cuenta, asi que el ruteo por texto devolvia null y esas lineas caian
+   al balon del efectivo, atribuido al banco VOTADO. En enero de 2026 de Shopping eran 175 lineas por
+   B/ 141,038.76 contra la cuenta equivocada: el 96% de las rojas del Paso 2 y el 70% de las del Paso 1.
+   El navegador de STG Super tenia las 175 con el MISMO comprobante y el MISMO importe, y ningun otro
+   navegador tenia una sola linea DP-. */
+function navDP(ref, monto, cuenta){
+  return [["Account","Fecha","Referencia","Descripcion","Debito","Credito"],
+          [cuenta, "2026-01-05", ref, "Deposito", monto, 0]];
+}
+test("el comprobante rutea el depósito a su cuenta", () => {
+  const raws = { diarioStgSuper: navDP("DP-00005410", 2410, "[1.1.1.02] ST. GEORGE BANK (SUPER)") };
+  fijarComprobantesDeBanco(raws);
+  eq(clasificarBancoPorTexto("Deposito Contable: DP-00005410 Realizado Con: CASH"), "STG Super");
+  // Un comprobante que no esta en ningun navegador sigue sin banco: no se inventa.
+  eq(clasificarBancoPorTexto("Deposito Contable: DP-00009999 Realizado Con: CASH"), null);
+  COMPROBANTE_BANCO = null;
+});
+
+test("el texto siempre gana sobre el comprobante", () => {
+  const raws = { diarioStgSuper: navDP("DP-00005410", 2410, "[1.1.1.02] ST. GEORGE BANK (SUPER)") };
+  fijarComprobantesDeBanco(raws);
+  // La linea nombra Banistmo: ese es el banco, aunque el comprobante este mapeado a Super.
+  eq(clasificarBancoPorTexto("DEPOSITO DE BANISTMO CK DP-00005410"), "Banistmo");
+  COMPROBANTE_BANCO = null;
+});
+
+// Y el guard de siempre: un comprobante en DOS cuentas no se mapea.
+test("un comprobante en dos cuentas no se adivina", () => {
+  const raws = { diarioStgSuper:   navDP("DP-00005410", 2410, "[1.1.1.02] ST. GEORGE BANK (SUPER)"),
+                 diarioStgBordados: navDP("DP-00005410", 2410, "[1.1.1.24] ST GEORGES - BORDADOS") };
+  fijarComprobantesDeBanco(raws);
+  eq(clasificarBancoPorTexto("Deposito Contable: DP-00005410 Realizado Con: CASH"), null);
+  COMPROBANTE_BANCO = null;
+});
+
+/* Sin navegadores con comprobantes DP- el mapa queda VACIO y el ruteo es exactamente el de antes. Eso es
+   lo que protege a las empresas cuyos asientos no usan esa serie (Petty usa ME- y PDN-). */
+test("sin comprobantes DP- el ruteo no cambia", () => {
+  fijarComprobantesDeBanco({ diarioStg: [["Account","Fecha","Referencia","Descripcion","Debito","Credito"],
+                                         ["[1.1.1.10] ST. GEORGES BANK","2026-01-05","ME-00000001877","Deposito",100,0]] });
+  eq(COMPROBANTE_BANCO, null, "el mapa no se arma");
+  eq(clasificarBancoPorTexto("Deposito Contable: DP-00005410 Realizado Con: CASH"), null);
+  eq(clasificarBancoPorTexto("DEPOSITO BRINKS DEL 29/9/2026"), null, "y lo de siempre sigue igual");
+  eq(clasificarBancoPorTexto("DEPOSITO POR TARJETA CLAVE ST. GEORGES BANK"), "STG");
+  COMPROBANTE_BANCO = null;
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
