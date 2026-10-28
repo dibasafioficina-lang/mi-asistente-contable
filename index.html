@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.45";
+var APP_VERSION = "2026.10.46";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -829,9 +829,14 @@ function cuentaExtraDeTexto(n){
   }
   return null;
 }
-// Para el NOMBRE DE CUENTA de un navegador: la seña sola (no hay texto de tercero que pueda colarse).
-function cuentaExtraDeCuenta(cta){
-  for(var i=0;i<CUENTAS_EXTRA.length;i++){ if(CUENTAS_EXTRA[i].sena.test(cta)) return CUENTAS_EXTRA[i]; }
+/* Para un RÓTULO que escribe contabilidad — el nombre de cuenta de un navegador o el encabezado de una
+   columna del informe de cajeras — la seña sola alcanza: ahí no hay texto de un tercero que pueda
+   colarse, al contrario de la descripción de un asiento (ver cuentaExtraDeTexto).
+   UNA sola definición para los dos usos a propósito: el ruteo por banco ya estaba copiado en tres
+   lugares y cada copia olvidada manda plata a la cuenta equivocada. */
+function cuentaExtraDeRotulo(txt){
+  var n = normTxt(txt);
+  for(var i=0;i<CUENTAS_EXTRA.length;i++){ if(CUENTAS_EXTRA[i].sena.test(n)) return CUENTAS_EXTRA[i]; }
   return null;
 }
 // Cuenta contable de un navegador ("[1.1.8] Caja General" → "1.1.8 CAJA GENERAL"). null si no es uno.
@@ -855,7 +860,7 @@ function identificarArchivo(rows){
     /* Las cuentas adicionales, ANTES del banco base: el nombre de cuenta de "ST GEORGES BORDADOS"
        contiene "GEORGE" y sin esto el archivo se identificaría como el navegador de la cuenta
        principal — la casilla correcta lo rechazaría por "no corresponde". */
-    var ctaEx = cuentaExtraDeCuenta(cta);
+    var ctaEx = cuentaExtraDeRotulo(cta);
     if(ctaEx) return ctaEx.keyDiario;
     if(cta.indexOf("BANISTMO")!==-1) return "diarioBanistmo";
     if(cta.indexOf("GEORGE")!==-1) return "diarioStg";
@@ -1113,7 +1118,15 @@ function parseReporteConsolidado(rows){
     // "clb(+)" y "clb(-)" son columnas de ajuste entre efectivo y Yappy, no venta cobrada: se saltan.
     if(sub.indexOf("CLB")!==-1) continue;
     var banco = null;
-    if(sub.indexOf("GEORGE")!==-1) banco="STG";
+    /* ---- El informe de cajeras tenía SU PROPIA copia del ruteo por banco ----
+       Una columna "Visa Sr.George Super" contiene "GEORGE", así que iba a la cuenta principal de St.
+       Georges; y una que dijera solo "Visa Super" no nombraba ningún banco y caía en colsFuera, o sea
+       quedaba fuera del cotejo. En las dos formas la venta de la cuenta extra terminaba mal contada.
+       Se mira el texto COMPLETO de la columna (grupo + sub-encabezado), así que funciona escriba quien
+       exporta "Visa Super", "Visa Sr.George Super" o "Visa STG Super". */
+    var colEx = cuentaExtraDeRotulo(textoCol);
+    if(colEx) banco = colEx.banco;
+    else if(sub.indexOf("GEORGE")!==-1) banco="STG";
     else if(sub.indexOf("BANISTMO")!==-1) banco="Banistmo";
     // Yappy compensa siempre en Banco General, igual que lo resuelve clasificarBancoPorTexto para el
     // diario; y "ACH B. GENERAL" nombra el banco sin decir "Banistmo" ni "George".

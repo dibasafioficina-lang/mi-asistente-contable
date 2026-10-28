@@ -559,3 +559,26 @@ El navegador de Caja General de Shopping trae **34,090 movimientos** (Petty tra�
 - **B/ 135,481.23 en 167 líneas `Deposito Contable: DP-… CASH`** que el reporte de cajeras no declara. Eso es el 73% de las rojas del Paso 1 (25 diferencias de Efectivo por B/ 127,034.75) y vuelve a salir en el Paso 2. No es un error de la app: es plata que entra a Caja General sin pasar por la caja registradora, el mismo patrón del Yappy de BOUTI pero mucho más grande.
 - **El saldo de Caja General es negativo** (apertura −3,374.56, cierre −149.08). En Petty siempre fue positivo.
 - Los 83 cheques pendientes por cambiar del Paso 2 suman **B/ 22,413.82**, que coincide exacto con el total que declara la hoja `DESGOLCE DE CK` del propio reporte: ningún cheque de enero se cambió, y el reporte y la app están de acuerdo.
+
+### El ruteo por banco estaba copiado en tres lugares
+
+La misma decisión —"¿de qué cuenta es esto?"— vivía en tres funciones distintas, y cada copia olvidada manda plata a la cuenta equivocada:
+
+| Dónde | Qué mira |
+|---|---|
+| `clasificarBancoPorTexto` | la descripción de un asiento del diario |
+| `identificarArchivo` | el nombre de cuenta de un navegador |
+| `parseReporteConsolidado` | el encabezado de columna del informe de cajeras |
+
+Al agregar STG Super y STG Bordados se arreglaron las dos primeras y **la tercera se pasó**. Shopping iba a agregarle columnas de esas cuentas al informe, y pasaba una de dos cosas, las dos malas:
+
+- Columna `Visa / Sr.George Super` → contiene `GEORGE`, así que la venta se sumaba a la **cuenta principal** (medido: 300 en vez de 100).
+- Columna `Visa / Super` → no nombra ningún banco, caía en `colsFuera` y quedaba **fuera del cotejo**, en silencio.
+
+Ahora hay **una sola** función para los rótulos que escribe contabilidad, `cuentaExtraDeRotulo()`, usada por el navegador y por el informe. La seña sola alcanza ahí porque un rótulo no trae texto de terceros; la descripción de un asiento sí, y por eso `cuentaExtraDeTexto()` sigue exigiendo además el banco base. Son dos reglas distintas a propósito, pero una sola por caso.
+
+Se mira el texto **completo** de la columna (grupo + sub-encabezado), así que funciona escriba quien exporta `Visa Super`, `Visa Sr.George Super` o `Visa STG Super`.
+
+### Cuánto tarda una corrida grande
+
+**220 segundos** la cadena de los 4 pasos con los 14 archivos de Shopping de enero de 2026 (34,090 movimientos de Caja General). En el navegador la página parece trabada casi 4 minutos. No es un error — es el volumen — pero conviene tenerlo medido antes de salir a buscar un cuelgue que no existe.

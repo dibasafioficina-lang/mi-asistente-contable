@@ -5929,6 +5929,32 @@ test("el mes de trabajo lo votan los archivos, no el que viene mezclado", () => 
   MES_TRABAJO = null; HOJAS_ELEGIDAS = [];
 });
 
+/* ---- El informe de cajeras tenia SU PROPIA copia del ruteo por banco ----
+   Shopping va a agregarle columnas de Super y Bordados. Una que diga "Visa Sr.George Super" contiene
+   "GEORGE", asi que iba a la cuenta PRINCIPAL de St. Georges; y una que diga solo "Visa Super" no nombra
+   ningun banco y caia en colsFuera, o sea quedaba fuera del cotejo. En las dos formas la venta de la
+   cuenta extra terminaba mal contada. Era la tercera copia del mismo ruteo — al tocar una, revisar las
+   otras. */
+test("el informe de cajeras rutea las columnas de las cuentas extra", () => {
+  // Dos filas de encabezado, como el informe real: grupo arriba, banco/metodo abajo.
+  const grupo = [null, null, null, "TARJETA", null, null, null];
+  const sub   = ["Fecha", "Empresa", "Cajera", "Visa\nSr.George", "Visa\nSr.George Super",
+                 "Clave\nSuper", "Visa\nBordados"];
+  const rows = [grupo, sub,
+                ["2026-01-05", "SHOPPING", "NORIS", 100, 200, 300, 400]];
+  const r = parseReporteConsolidado(rows);
+  function monto(banco, metodo){
+    const f = r.filter(x => x.banco === banco && x.metodo === metodo);
+    return f.reduce((a, x) => a + x.monto, 0);
+  }
+  cerca(monto("STG", "VISA"), 100, "la principal se queda solo con lo suyo");
+  cerca(monto("STG Super", "VISA"), 200, "aunque la columna diga Sr.George Super");
+  cerca(monto("STG Super", "CLAVE"), 300, "y aunque no nombre el banco");
+  cerca(monto("STG Bordados", "VISA"), 400);
+  // Ninguna de las tres puede quedar fuera del cotejo.
+  eq(r.filter(x => x.banco === "STG").length, 1, "una sola columna es de la cuenta principal");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
