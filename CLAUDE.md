@@ -503,3 +503,29 @@ Y un recordatorio que costó dos vueltas: **el estado de cuenta puede ser de otr
 ### Dónde nace un descuadre de apertura
 
 Siempre en el cierre del mes anterior o antes, nunca en el mes que se está corriendo. Si el mismo importe aparece todos los meses es **un solo asiento sin registrar que se arrastra**, no un hallazgo nuevo de cada mes: el descargo del tránsito de enero de 2026 (2,679.15) reapareció idéntico en marzo, abril y mayo.
+
+### Una cuenta más del mismo banco no es "otro banco"
+
+`STG Super` y `STG Bordados` son dos cuentas más de St. Georges, opcionales, con las mismas funciones en los Pasos 2 y 3. Lo que cuesta no es el cotejo —ese es el mismo— sino el **ruteo**, porque el nombre de las dos contiene `GEORGE`:
+
+```
+DEPOSITO POR TARJETA CLAVE ST. GEORGES BORDADOS DEL 5/10/2026
+```
+
+`clasificarBancoPorTexto` probaba `STG|GEORGE` y devolvía `"STG"`, así que toda la plata de Bordados se iba a la cuenta principal y **las tres quedaban mal**: la principal con depósitos que no son suyos y las otras dos sin los que sí. Las cuentas adicionales se prueban **antes** del banco base.
+
+- **La seña sola no alcanza en la descripción de un asiento.** `SUPER` puede ser un tercero —`SUPER 99` es un cliente— así que se exige además la mención del banco base. Sin base la línea queda **sin banco** y el paso la reporta, que es lo que se quiere: que salga, no que se adivine a qué cuenta va. Y la seña es palabra completa: `SUPERMERCADO` no es la cuenta Super.
+- **En el nombre de cuenta del navegador sí alcanza**, porque ahí no hay texto de tercero: lo escribe contabilidad. Sin eso, `identificarArchivo` daba `diarioStg` para el archivo de Bordados y la casilla correcta lo rechazaba por *"no corresponde"*.
+- **El encabezado no distingue una cuenta de otra.** Los estados de las tres cuentas de St. Georges exportan igual, así que `bancoDeEstado` devuelve `stg` para las tres y la validación de casilla **no puede** avisar si se subió el estado equivocado. Protege de meter ahí un Banistmo, no de confundir entre cuentas del mismo banco — eso lo mira quien sube el archivo, y la ayuda de la casilla lo dice.
+- `CUENTAS_EXTRA` es la **única** declaración: casillas, ayudas, opcionales por paso, calendario bancario, control de períodos, integridad y los cuatro pasos se derivan de ahí. Cablearlas una por una como Banistmo/STG/Banco General significaba repetir el cableado en una veintena de lugares, y olvidar uno no revienta: el paso corre y deja la cuenta fuera del cotejo sin avisar.
+- Al Paso 3 las cuentas extra entran **sin** `retVisa`: el informe de retenciones es de la cuenta principal, que es la que recibe las remisiones de VISA. Pasárselo a otra la haría buscar un neto que ahí no entra nunca.
+- Entran también al **Paso 0** (para que una partida en tránsito suya pueda compensar) y al **Paso 1** (solo para `depositoDelEfectivo`, que exige banco único: sumar cuentas ahí hace la regla más exigente, nunca más suelta).
+
+### El depósito ruteado a un banco sin estado de cuenta desaparecía
+
+El cotejo del Paso 2 recorre los bancos que **tienen estado**, así que un crédito de Caja General que el ruteo manda a un banco ausente de ese mapa **no lo miraba nadie**: no cuadraba, no quedaba pendiente, no salía en ninguna parte. El paso podía terminar en **cero diferencias con esa plata afuera** — el mismo silencio de `money()` devolviendo 0 ante una celda ilegible.
+
+Ya pasaba con **Banco General** (todo lo que dice `YAPPY` se rutea ahí) y no se había notado porque su estado siempre se sube. Las cuentas adicionales, que son opcionales de verdad, abren el hueco en cuanto alguien sube el navegador de Caja General y no el estado de la cuenta.
+
+- El Paso 2 agrupa esas líneas por banco y las reporta como **diferencia roja**, diciendo cuántas son, por cuánto, y que el resultado del paso está incompleto en ese importe.
+- El Paso 0 ya tenía su guard (`banco no reconocido`), pero su mensaje mandaba a **corregir la columna Banco** del archivo. Para una cuenta que la app **sí** conoce eso manda a corregir lo que está bien: ahora se reporta aparte (`cuenta sin estado de cuenta`) y el texto manda a subir el estado en el Paso 2. Si no hay **ningún** estado, de eso avisa el bloque general y el per-cuenta se calla — si no, repetiría el mismo mensaje tantas veces como bancos traiga el resumen.

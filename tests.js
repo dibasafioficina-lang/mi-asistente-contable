@@ -5685,6 +5685,132 @@ test("una línea sin descripción grande no hace de redondeo", () => {
   eq(r.pendientes.length, 1, "100.00 no es el redondeo de un depósito");
 });
 
+/* ---- Cuentas bancarias adicionales: STG Super y STG Bordados ----
+   Dos cuentas mas de St. Georges, con las mismas funciones que las demas en el Paso 2 y el Paso 3. Lo
+   que hay que congelar es el RUTEO, porque el nombre de las dos contiene "GEORGE": sin mirar la cuenta
+   antes del banco base, toda su plata se iria a la cuenta principal de St. Georges y las tres quedarian
+   mal — la principal con depositos que no son suyos y las otras dos sin los que si. */
+test("una cuenta extra se rutea a SU cuenta, no al banco base", () => {
+  eq(clasificarBancoPorTexto("DEPOSITO POR TARJETA CLAVE ST. GEORGES BORDADOS DEL 5/10/2026"), "STG Bordados");
+  eq(clasificarBancoPorTexto("DEPOSITO BRINKS STG SUPER DEL 5/10/2026"), "STG Super");
+  // Y la cuenta principal sigue siendo la principal: la extra no se lleva lo que no es suyo.
+  eq(clasificarBancoPorTexto("DEPOSITO POR TARJETA CLAVE ST. GEORGES BANK DEL 5/10/2026"), "STG");
+  eq(clasificarBancoPorTexto("DEPOSITO BTS DEL 5/10/2026"), "Banistmo");
+});
+
+/* El guard de la sena: "SUPER" puede ser un TERCERO ("SUPER 99" es un cliente), asi que sola no alcanza
+   — se exige la mencion del banco base. Sin base la linea queda SIN banco, que es lo que se quiere:
+   el paso la reporta en vez de mandar la plata a una cuenta adivinada. */
+test("la seña sola no manda plata a la cuenta extra", () => {
+  eq(clasificarBancoPorTexto("PAGO DE SUPER 99, S.A. RCP00251"), null, "sin banco base no se rutea");
+  eq(clasificarBancoPorTexto("COBRO A BORDADOS DEL ISTMO"), null);
+  // Y la sena es palabra completa: SUPERMERCADO no es la cuenta Super.
+  eq(clasificarBancoPorTexto("DEPOSITO STG SUPERMERCADO EL DORADO"), "STG", "SUPERMERCADO no es Super");
+});
+
+/* El navegador se identifica por su NOMBRE DE CUENTA, donde la sena sola si alcanza (lo escribe
+   contabilidad, no hay texto de tercero). Sin esto el archivo de Bordados se identificaba como el
+   navegador de St. Georges y la casilla correcta lo rechazaba por "no corresponde". */
+test("el navegador de una cuenta extra se identifica por su cuenta", () => {
+  const cab = ["Account", "Fecha", "Referencia", "Descripcion", "Debito", "Credito"];
+  eq(identificarArchivo([cab, ["[1.1.1.07] ST GEORGES BORDADOS", "05/10/2026", "ME-1", "x", 0, 10]]),
+     "diarioStgBordados");
+  eq(identificarArchivo([cab, ["[1.1.1.06] ST GEORGES SUPER", "05/10/2026", "ME-1", "x", 0, 10]]),
+     "diarioStgSuper");
+  // La cuenta principal no se confunde con las extra.
+  eq(identificarArchivo([cab, ["[1.1.1.05] ST GEORGE BANK", "05/10/2026", "ME-1", "x", 0, 10]]),
+     "diarioStg");
+});
+
+/* Paso 2: el deposito que Caja General manda a una cuenta extra se coteja contra EL ESTADO DE ESA
+   CUENTA. El estado de la cuenta principal tiene el mismo importe el mismo dia a proposito: si el
+   ruteo fallara, cuadraria contra el equivocado y las dos cuentas quedarian mal. */
+test("el Paso 2 coteja la cuenta extra contra su propio estado", () => {
+  const diario = [
+    { fecha: "2026-10-05", debito: 0, credito: 250.00, descripcion: "DEPOSITO POR TARJETA CLAVE ST. GEORGES SUPER DEL 05/10/2026", referencia: "ME-00000002100", fila: 2 }
+  ];
+  const estPrincipal = [{ fecha: "2026-10-05", debito: 0, credito: 250.00, descripcion: "Remision Clave", fila: 9 }];
+  const estSuper     = [{ fecha: "2026-10-05", debito: 0, credito: 250.00, descripcion: "Remision Clave", fila: 4 }];
+  const h = paso2(diario, [], estPrincipal, null, null, null, 7, 0.01, null, null, null,
+                  { "STG Super": estSuper });
+  eq(contarRojas(h), 0, "cuadra contra el estado de Super");
+  // Sin el estado de Super no hay contra que cotejar: la partida tiene que SALIR, no cuadrar de prestado.
+  const h2 = paso2(diario, [], estPrincipal, null, null, null, 7, 0.01, null, null, null, null);
+  if (h2.filter(x => !esNoRojo(x) || (x.clase || "") === "en_transito").length === 0)
+    throw new Error("sin el estado de la cuenta extra la partida no puede desaparecer");
+});
+
+/* Paso 3: la cuenta extra concilia diario vs estado igual que las demas, y solo si estan LOS DOS
+   archivos (con uno solo no hay nada que conciliar). */
+test("el Paso 3 concilia la cuenta extra con sus dos archivos", () => {
+  const diarioSuper = [
+    { fecha: "2026-10-06", debito: 0, credito: 80.00, descripcion: "DEPOSITO", referencia: "ME-00000002101", cuenta: "ST GEORGES SUPER", fila: 2 }
+  ];
+  const estSuper = [{ fecha: "2026-10-06", debito: 0, credito: 80.00, descripcion: "DEPOSITO", fila: 3 }];
+  const ok = paso3([], [], [], [], null, null, 7, 0.01, null, null,
+                   [{ nombre: "STG Super", diario: diarioSuper, estado: estSuper }]);
+  eq(contarRojas(ok), 0, "diario y estado cuadran");
+
+  // El credito del estado que el diario NO tiene sale como diferencia, con el nombre de SU cuenta.
+  const estSobra = estSuper.concat([{ fecha: "2026-10-07", debito: 0, credito: 41.25, descripcion: "DEPOSITO", fila: 4 }]);
+  const con = paso3([], [], [], [], null, null, 7, 0.01, null, null,
+                    [{ nombre: "STG Super", diario: diarioSuper, estado: estSobra }]);
+  const rojas = con.filter(x => !esNoRojo(x) && Math.abs(x.monto - 41.25) < 0.005);
+  eq(rojas.length, 1, "el credito huerfano de la cuenta extra se reporta");
+  eq(rojas[0].banco, "STG Super", "y dice de que cuenta es");
+
+  // Con un solo archivo la cuenta se omite: el estado suelto no genera 41.25 diferencias falsas.
+  const medio = paso3([], [], [], [], null, null, 7, 0.01, null, null,
+                      [{ nombre: "STG Super", diario: null, estado: estSobra }]);
+  eq(medio.filter(x => (x.banco || "") === "STG Super").length, 0, "sin navegador no se concilia");
+});
+
+/* Paso 0: una partida en transito de una cuenta extra tiene que poder COMPENSAR. Sin su estado de
+   cuenta en el mapa de estados, esa partida no tendria contra que cuadrar y viajaria mes tras mes sin
+   que nada lo delate — el mismo callejon sin salida que tuvo el efectivo antes de comboAchConRedondeo. */
+test("el Paso 0 descarga una partida en tránsito de la cuenta extra", () => {
+  const tr = [{ fecha: "2026-09-30", banco: "STG Bordados", monto: 133.40, sentido: "credito",
+                comprobante: "ME-00000002090", concepto: "DEPOSITO POR TARJETA CLAVE ST. GEORGES BORDADOS DEL 30/9/2026" }];
+  const est = [{ fecha: "2026-10-01", debito: 0, credito: 133.40, descripcion: "Remision Clave", fila: 3 }];
+  const con = paso0(tr, [], [], null, 7, 0.01, { "STG Bordados": est });
+  eq(recolectarEnTransito(con).filter(x => Math.abs(x.monto - 133.40) < 0.005).length, 0, "compensó");
+  /* Y el caso que de verdad pasa: los estados principales estan subidos y el de la cuenta extra no. La
+     partida no tiene contra que compensar, asi que NO puede desaparecer — el paso tiene que decir que
+     falta ese estado, no dejar el resultado en cero como si estuviera cuadrado. Y el mensaje tiene que
+     mandar a subir el estado, no a "corregir la columna Banco": la app si conoce esta cuenta. */
+  const otro = [{ fecha: "2026-10-01", debito: 0, credito: 9.99, descripcion: "DEPOSITO", fila: 2 }];
+  const sin = paso0(tr, otro, otro, null, 7, 0.01, null);
+  const av = sin.filter(x => x.motivo === "cuenta sin estado de cuenta");
+  eq(av.length, 1, "avisa que falta el estado de esa cuenta");
+  eq(av[0].banco, "STG Bordados");
+  cerca(av[0].monto, 133.40);
+  eq(/banco que no reconozco/.test(av[0].texto), false, "la cuenta se reconoce; lo que falta es el estado");
+  eq(sin.filter(x => x.motivo === "banco no reconocido").length, 0);
+});
+
+/* ---- El hueco silencioso que abrieron las cuentas opcionales ----
+   El cotejo del Paso 2 recorre los bancos que tienen estado de cuenta, asi que un credito de Caja
+   General ruteado a un banco que NO esta en ese mapa no lo miraba nadie: no cuadraba, no quedaba
+   pendiente y no salia en ninguna parte. El paso podia terminar en CERO DIFERENCIAS con esa plata
+   afuera. Ya pasaba con Banco General — todo lo que dice YAPPY se rutea ahi — y no se habia notado
+   porque su estado siempre se sube. */
+test("el Paso 2 no se come la plata de un banco sin estado de cuenta", () => {
+  const diario = [
+    { fecha: "2026-10-05", debito: 0, credito: 412.00, descripcion: "DEPOSITOS POR YAPPY DEL 05/10/2026", referencia: "ME-00000002102", fila: 2 }
+  ];
+  const h = paso2(diario, [], [], null, null, null, 7, 0.01, null, null, null, null);
+  const av = h.filter(x => x.motivo === "banco sin estado de cuenta");
+  eq(av.length, 1, "no puede desaparecer en silencio");
+  eq(av[0].banco, "Banco General", "el Yappy se rutea a Banco General");
+  cerca(av[0].monto, 412.00);
+  eq(esNoRojo(av[0]), false, "es una diferencia: el resultado del paso esta incompleto");
+  // Con el estado subido no hay aviso: el cotejo normal se encarga.
+  const est = [{ fecha: "2026-10-05", debito: 0, credito: 412.00, descripcion: "DEPOSITO YAPPY", fila: 3 }];
+  const h2 = paso2(diario, [], [], est, null, null, 7, 0.01, null, null, null, null);
+  eq(h2.filter(x => x.motivo === "banco sin estado de cuenta").length, 0);
+  eq(contarRojas(h2), 0);
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

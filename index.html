@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.43";
+var APP_VERSION = "2026.10.44";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -800,6 +800,40 @@ function readWorkbook(file, cb){
    confuso: unas veces reventaba al ejecutar y otras —peor— el parser devolvía vacío y el paso salía
    "sin diferencias" con media información faltando. Se identifica el archivo por su CONTENIDO (no por el
    nombre, que ya nos mintió más de una vez) y si no corresponde se rechaza diciendo qué fue lo que se subió. */
+/* ---- Cuentas bancarias adicionales (opcionales) ----
+   Banistmo, St. Georges y Banco General están cableados uno por uno en cada paso. Cada cuenta nueva
+   repetía ese cableado en una veintena de lugares, y olvidar uno no revienta: el paso corre y deja la
+   cuenta fuera del cotejo SIN AVISAR. Las adicionales se declaran acá una sola vez y los pasos las
+   recorren.
+   La SEÑA identifica la cuenta dentro de su banco. En el NOMBRE DE CUENTA del navegador alcanza sola:
+   es un nombre corto que escribe contabilidad. En la DESCRIPCIÓN de un asiento NO, porque ahí la misma
+   palabra puede ser de un tercero ("SUPER 99" es un cliente, no la cuenta) y la plata se iría a la
+   cuenta equivocada; así que ahí se exige además la mención del banco BASE. Si falta la base, la línea
+   queda sin banco y el paso la reporta — que es lo que se quiere: que salga, no que se adivine. */
+var CUENTAS_EXTRA = [
+  { banco:"STG Super",    keyDiario:"diarioStgSuper",    keyEst:"estStgSuper",
+    tipoEst:"stg", base:/STG|GEORGE/, sena:/(^|[^A-Z])SUPER([^A-Z]|$)/ },
+  { banco:"STG Bordados", keyDiario:"diarioStgBordados", keyEst:"estStgBordados",
+    tipoEst:"stg", base:/STG|GEORGE/, sena:/(^|[^A-Z])BORDADO/ }
+];
+CUENTAS_EXTRA.forEach(function(c){ STATE.files[c.keyDiario] = null; STATE.files[c.keyEst] = null; });
+function cuentaExtraPorKeyEst(key){
+  for(var i=0;i<CUENTAS_EXTRA.length;i++){ if(CUENTAS_EXTRA[i].keyEst===key) return CUENTAS_EXTRA[i]; }
+  return null;
+}
+// La cuenta extra a la que pertenece un texto YA NORMALIZADO, o null. Exige banco base + seña.
+function cuentaExtraDeTexto(n){
+  for(var i=0;i<CUENTAS_EXTRA.length;i++){
+    var c = CUENTAS_EXTRA[i];
+    if(c.sena.test(n) && (!c.base || c.base.test(n))) return c;
+  }
+  return null;
+}
+// Para el NOMBRE DE CUENTA de un navegador: la seña sola (no hay texto de tercero que pueda colarse).
+function cuentaExtraDeCuenta(cta){
+  for(var i=0;i<CUENTAS_EXTRA.length;i++){ if(CUENTAS_EXTRA[i].sena.test(cta)) return CUENTAS_EXTRA[i]; }
+  return null;
+}
 // Cuenta contable de un navegador ("[1.1.8] Caja General" → "1.1.8 CAJA GENERAL"). null si no es uno.
 function cuentaDeNavegador(rows){
   var h = findHeaderRow(rows, ["Account","Fecha","Referencia"]);
@@ -818,6 +852,11 @@ function identificarArchivo(rows){
   var cta = cuentaDeNavegador(rows);
   if(cta){
     if(cta.indexOf("CAJA GENERAL")!==-1) return "diarioCaja";
+    /* Las cuentas adicionales, ANTES del banco base: el nombre de cuenta de "ST GEORGES BORDADOS"
+       contiene "GEORGE" y sin esto el archivo se identificaría como el navegador de la cuenta
+       principal — la casilla correcta lo rechazaría por "no corresponde". */
+    var ctaEx = cuentaExtraDeCuenta(cta);
+    if(ctaEx) return ctaEx.keyDiario;
     if(cta.indexOf("BANISTMO")!==-1) return "diarioBanistmo";
     if(cta.indexOf("GEORGE")!==-1) return "diarioStg";
     if(cta.indexOf("RETENCION")!==-1) return "retenciones";      // el del Módulo 2
@@ -846,6 +885,14 @@ var CASILLA_ESPERA = {
   retVisa:            {acepta:["retVisa"],            nombre:"el informe de retenciones VISA"},
   retenciones:        {acepta:["retenciones"],        nombre:"el navegador de retenciones a empleados por pagar"}
 };
+CUENTAS_EXTRA.forEach(function(c){
+  CASILLA_ESPERA[c.keyDiario] = {acepta:[c.keyDiario], nombre:"el navegador del diario de "+c.banco};
+  /* El tipo que declara el encabezado es el del BANCO, no el de la cuenta: los estados de las tres
+     cuentas de St. Georges traen el mismo encabezado, así que esta validación no puede distinguir una
+     de otra. Protege de poner acá un estado de Banistmo o de Banco General, no de confundir entre las
+     cuentas del mismo banco — eso lo tiene que mirar quien sube el archivo. */
+  CASILLA_ESPERA[c.keyEst] = {acepta:["estado"], tipo:c.tipoEst, nombre:"el estado de cuenta de "+c.banco};
+});
 // Los tres estados de cuenta se parecen, pero su encabezado los delata:
 //   St. Georges  → Fecha | Descripción | Débitos(-) | Créditos(+) | Balance
 //   Banco General→ Fecha | Referencia | Transacción | Descripción | Débito | Crédito | Saldo total
@@ -872,6 +919,7 @@ var NOMBRE_TIPO = {
   retVisa:"el informe de retenciones VISA",
   retenciones:"el navegador de retenciones a empleados por pagar"
 };
+CUENTAS_EXTRA.forEach(function(c){ NOMBRE_TIPO[c.keyDiario] = "el navegador de "+c.banco; });
 // null si el archivo va en esa casilla; si no, el texto de la alerta.
 /* ---- Celdas de importe ilegibles: el archivo no entra ----
    Una celda con texto donde va un numero (el clasico "273.49-255.60-164.08-292.62", los cheques del dia
@@ -894,6 +942,7 @@ function ilegiblesDelArchivo(key, rows){
     else if(key==="estBanistmo") parseEstadoCuenta(rows, "banistmo");
     else if(key==="estStg") parseEstadoCuenta(rows, "stg");
     else if(key==="estBancoGeneral") parseEstadoCuenta(rows, "bancogeneral");
+    else if(cuentaExtraPorKeyEst(key)) parseEstadoCuenta(rows, cuentaExtraPorKeyEst(key).tipoEst);
     else { parseDiario(rows, null); try{ parseSaldoCajaGeneral(rows); }catch(e){} }
   }catch(e){}   // si el parser revienta, de eso se encarga la validacion de formato
   var res = { n: ilegiblesN, vals: ilegiblesVals.slice() };
@@ -1590,6 +1639,11 @@ function sumBy(arr, keyFn, valFn){
 // Paso 1: Reporte consolidado (por banco/dia) vs Diario Caja General (por dia, clasificado por banco via texto)
 function clasificarBancoPorTexto(desc){
   var n = normTxt(desc);
+  /* Las cuentas adicionales van PRIMERO: "DEPOSITO ST GEORGES BORDADOS" contiene "GEORGE", así que sin
+     esto la plata de Bordados se iría a la cuenta principal de St. Georges y las dos quedarían mal
+     — una con un depósito que no es suyo y la otra sin el que sí. */
+  var ex = cuentaExtraDeTexto(n);
+  if(ex) return ex.banco;
   if(n.indexOf("BTS")!==-1 || n.indexOf("BANISTMO")!==-1) return "Banistmo";
   // El banco se escribe de varias formas segun quien exporte: "STG", "ST GEORGES", "St. Georges".
   // Sin "GEORGE", el resumen en transito de junio de 2026 traia 1,972.60 con banco "ST GEORGES" y esas
@@ -2988,7 +3042,9 @@ function fijarCalendarioBancario(raws){
   CAL_BANCARIO = null;
   if(!raws) return;
   var dias = {}, n = 0;
-  [["estBanistmo","banistmo"],["estStg","stg"],["estBancoGeneral","bancogeneral"]].forEach(function(p){
+  var pares = [["estBanistmo","banistmo"],["estStg","stg"],["estBancoGeneral","bancogeneral"]];
+  CUENTAS_EXTRA.forEach(function(c){ pares.push([c.keyEst, c.tipoEst]); });
+  pares.forEach(function(p){
     if(!raws[p[0]]) return;
     try{
       parseEstadoCuenta(raws[p[0]], p[1]).forEach(function(x){
@@ -3947,10 +4003,46 @@ function hallazgoDescargo(banco, fecha, monto, desc, dsc, comprobante, fuente, l
            (comprobante ? " · Comprobante " + comprobante : ""),
     fuente: fuente };
 }
-function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio, diariosBanco){
+// estExtra: {nombre de la cuenta: estado de cuenta} de las cuentas adicionales (ver CUENTAS_EXTRA).
+function paso2(diarioCaja, estBanistmo, estStg, estBancoGeneral, retVisaPorDia, chequesDetalle, ventanaDias, tolerancia, reporte, transitoPrevio, diariosBanco, estExtra){
   var hallazgos = [];
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+  /* Las cuentas adicionales también entran acá, aunque se suban en el Paso 2: una partida en tránsito
+     cuyo banco sea una de ellas no tendría contra qué compensar y viajaría mes tras mes sin que nada lo
+     delate — el mismo callejón sin salida que tuvo el efectivo antes de comboAchConRedondeo. */
+  Object.keys(estExtra||{}).forEach(function(b){ if(estExtra[b]) estados[b] = estExtra[b]; });
+  /* ---- La linea ruteada a un banco cuyo estado no se subio DESAPARECIA ----
+     El cotejo recorre los bancos de `estados`, asi que un credito de Caja General que clasificarBancoPorTexto
+     manda a un banco que no esta en ese mapa no lo mira nadie: no cuadra, no queda pendiente, no sale en
+     ninguna parte. El paso puede terminar en CERO DIFERENCIAS con esa plata afuera.
+     Ya pasaba con Banco General (todo lo que dice YAPPY se rutea ahi) y no se habia notado porque su
+     estado siempre se sube; con las cuentas adicionales, que son opcionales de verdad, el hueco se abre
+     en cuanto alguien sube el navegador de Caja General y no el estado de la cuenta.
+     Es el mismo patron que money() devolviendo 0 ante una celda ilegible: el silencio es lo peligroso. */
+  var huerfanasBanco = {};
+  (diarioCaja||[]).forEach(function(x){
+    if(!(x.credito > 0)) return;
+    var b = clasificarBancoPorTexto(x.descripcion);
+    if(!b || estados[b]) return;
+    (huerfanasBanco[b] = huerfanasBanco[b] || []).push(x);
+  });
+  Object.keys(huerfanasBanco).forEach(function(b){
+    var ls = huerfanasBanco[b];
+    var tot = Math.round(ls.reduce(function(a,x){ return a+x.credito; },0)*100)/100;
+    hallazgos.push({
+      fecha: ls[0].fecha, banco: b, monto: tot, clase:"diff",
+      concepto:"Depósitos sin estado de cuenta", comprobante: ls[0].referencia || "",
+      motivo:"banco sin estado de cuenta",
+      texto: b + ": Caja General registra " + ls.length + " depósito(s) por B/ " + fmt(tot) +
+             " a esta cuenta, pero su estado de cuenta no está subido — esas líneas NO se cotearon contra " +
+             "nada. Subí el estado de cuenta de " + b + " en el Paso 2; mientras falte, el resultado de " +
+             "este paso está incompleto en ese importe." +
+             " · " + ls.slice(0,4).map(function(x){ return x.fecha + " B/ " + fmt(x.credito); }).join(", ") +
+             (ls.length > 4 ? ", …" : ""),
+      fuente: "Diario Caja General"
+    });
+  });
   var usarDetalleCheques = !!(chequesDetalle && chequesDetalle.length);
 
   // Las líneas del estado que compensan partidas en tránsito del mes anterior (Paso 0) se apartan antes de
@@ -4855,13 +4947,18 @@ function resumenSalidas(diario, estado){
 }
 
 // diarioBancoGeneral/estBancoGeneral son opcionales: si faltan, ese banco no se concilia.
-function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia, transitoPrevio){
+// cfgsExtra: [{nombre, diario, estado}] de las cuentas adicionales que tengan AMBOS archivos subidos.
+function paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBancoGeneral, estBancoGeneral, ventanaDias, tolerancia, retVisaPorDia, transitoPrevio, cfgsExtra){
   var hallazgos = [];
   var cfgs = [
     {nombre:"Banistmo", diario:diarioBanistmo, estado:estBanistmo},
     {nombre:"STG", diario:diarioStg, estado:estStg, retVisa:retVisaPorDia}
   ];
   if(diarioBancoGeneral && estBancoGeneral) cfgs.push({nombre:"Banco General", diario:diarioBancoGeneral, estado:estBancoGeneral});
+  /* Sin retVisa a propósito: el informe de retenciones es de la cuenta principal de St. Georges, que es
+     la que recibe las remisiones de VISA. Pasárselo a otra cuenta la haría buscar un neto que ahí no
+     entra nunca. Solo entran las cuentas con los DOS archivos: con uno solo no hay nada que conciliar. */
+  (cfgsExtra||[]).forEach(function(c){ if(c && c.diario && c.estado) cfgs.push(c); });
   // PRIMERO: consumir las partidas en tránsito del mes anterior (Paso 0). Sus líneas del estado ya tienen
   // asiento —el del mes pasado— así que no deben salir como "no aparece registrado en el diario contable".
   // Lo que queda pendiente se le pasa a la pasada de cheques, que empareja de forma más permisiva.
@@ -5213,6 +5310,33 @@ var PASO_OPCIONALES = {
   // transitoPrevio: cheques del Paso 0, para no marcar como diferencia lo que compensa cheques anteriores.
   paso3: ["diarioBancoGeneral","estBancoGeneral","retVisa","diarioCaja","transitoPrevio"]
 };
+/* Las cuentas adicionales son opcionales en TODOS los pasos que las usan: el Paso 2 y el Paso 3 las
+   concilian, el Paso 0 las necesita para poder descargar una partida en tránsito suya, y el Paso 1 solo
+   para deducir en qué banco entró el efectivo (ver depositoDelEfectivo, que exige banco ÚNICO: sumar
+   cuentas ahí hace la regla más exigente, nunca más suelta). */
+CUENTAS_EXTRA.forEach(function(c){
+  PASO_OPCIONALES.paso0.push(c.keyEst);
+  (PASO_OPCIONALES.paso1 = PASO_OPCIONALES.paso1 || []).push(c.keyEst);
+  PASO_OPCIONALES.paso2.push(c.keyEst, c.keyDiario);
+  PASO_OPCIONALES.paso3.push(c.keyDiario, c.keyEst);
+});
+// Estados de cuenta / diarios de las cuentas adicionales que estén subidos, por nombre de cuenta.
+function estadosExtraDe(raws){
+  var m = {};
+  CUENTAS_EXTRA.forEach(function(c){
+    if(!raws[c.keyEst]) return;
+    try{ m[c.banco] = parseEstadoCuenta(raws[c.keyEst], c.tipoEst); }catch(e){}
+  });
+  return m;
+}
+function diariosExtraDe(raws){
+  var m = {};
+  CUENTAS_EXTRA.forEach(function(c){
+    if(!raws[c.keyDiario]) return;
+    try{ m[c.banco] = parseDiario(raws[c.keyDiario], null); }catch(e){}
+  });
+  return m;
+}
 
 function pasoListo(pasoKey){
   return PASO_REQS[pasoKey].every(function(k){ return !!STATE.files[k]; });
@@ -5332,7 +5456,7 @@ function computaPaso(pasoKey, raws, opts){
     var eB = raws.estBanistmo ? parseEstadoCuenta(raws.estBanistmo,"banistmo") : [];
     var eS = raws.estStg ? parseEstadoCuenta(raws.estStg,"stg") : [];
     var eBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
-    return paso0(trPrev, eB, eS, eBG, opts.ventana, opts.tol);
+    return paso0(trPrev, eB, eS, eBG, opts.ventana, opts.tol, estadosExtraDe(raws));
   }
   if(pasoKey==="paso1"){
     if(!raws.reporte || !raws.diarioCaja) return null;
@@ -5345,6 +5469,8 @@ function computaPaso(pasoKey, raws, opts){
     if(raws.estBanistmo) estP1["Banistmo"] = parseEstadoCuenta(raws.estBanistmo,"banistmo");
     if(raws.estStg) estP1["STG"] = parseEstadoCuenta(raws.estStg,"stg");
     if(raws.estBancoGeneral) estP1["Banco General"] = parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral");
+    var exP1 = estadosExtraDe(raws);
+    Object.keys(exP1).forEach(function(b){ estP1[b] = exP1[b]; });
     return paso1(parseReporteConsolidado(raws.reporte), parseDiario(raws.diarioCaja,"Caja General"),
                  parseChequesDetalle(raws.reporte), opts.tol, parseFaltantesSobrantes(raws.reporte), apertura,
                  transitoPrevioDe(raws), estP1);
@@ -5357,8 +5483,10 @@ function computaPaso(pasoKey, raws, opts){
     var estBG = raws.estBancoGeneral ? parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral") : null;
     // Se guardan para el desglose de la diferencia entre el saldo de Caja General y el tránsito: sin
     // ellos ese panel solo podría mostrar totales, no de dónde sale cada cifra.
+    var estExtra2 = estadosExtraDe(raws);
     STATE.estados = { "Banistmo": estBanistmo, "STG": estStg };
     if(estBG) STATE.estados["Banco General"] = estBG;
+    Object.keys(estExtra2).forEach(function(b){ STATE.estados[b] = estExtra2[b]; });
     try{ STATE.retVisaDetalle = raws.retVisa ? parseRetencionesVisa(raws.retVisa) : null; }catch(e){ STATE.retVisaDetalle = null; }
     // Retención VISA por día (magnitud positiva) para cuadrar el neto en STG: bruto − retención = neto del banco.
     var retVisaDia = null;
@@ -5377,8 +5505,10 @@ function computaPaso(pasoKey, raws, opts){
       if(raws.diarioBanistmo) diariosBanco["Banistmo"] = parseDiario(raws.diarioBanistmo, "Banistmo");
       if(raws.diarioStg) diariosBanco["STG"] = parseDiario(raws.diarioStg, null).filter(function(x){ return normTxt(x.cuenta).indexOf("BANISTMO")===-1; });
       if(raws.diarioBancoGeneral) diariosBanco["Banco General"] = parseDiario(raws.diarioBancoGeneral, null);
+      var dxP2 = diariosExtraDe(raws);
+      Object.keys(dxP2).forEach(function(b){ diariosBanco[b] = dxP2[b]; });
     }catch(e){}
-    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2, diariosBanco);
+    return paso2(diarioCaja, estBanistmo, estStg, estBG, retVisaDia, chequesDet, opts.ventana, opts.tol, reporteCajas, trPrev2, diariosBanco, estExtra2);
   }
   if(pasoKey==="paso3"){
     if(!raws.diarioBanistmo || !raws.diarioStg || !raws.estBanistmo || !raws.estStg) return null;
@@ -5397,7 +5527,9 @@ function computaPaso(pasoKey, raws, opts){
     // los depósitos de junio que en realidad compensan cheques de meses anteriores.
     var transitoPrevio = transitoPrevioDe(raws);
     if(transitoPrevio) STATE.transitoPrevio = transitoPrevio;
-    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio);
+    var dxP3 = diariosExtraDe(raws), exP3 = estadosExtraDe(raws);
+    var cfgsExtra = CUENTAS_EXTRA.map(function(c){ return {nombre:c.banco, diario:dxP3[c.banco], estado:exP3[c.banco]}; });
+    var hallazgos = paso3(diarioBanistmo, diarioStg, estBanistmo, estStg, diarioBG, estBG, opts.ventana, opts.tol, retVisaDia, transitoPrevio, cfgsExtra);
     // Validación VISA (antes Paso 4): chequeo independiente de que el neto VISA del informe tiene su
     // 'Remisión V/Mc' en el estado de cuenta STG (además del cuadre diario↔estado de arriba).
     if(retVisaLista){
@@ -5603,6 +5735,10 @@ function diagnosticarPeriodos(raws){
   add("diarioBanistmo","Diario Banistmo", function(){ return parseDiario(raws.diarioBanistmo,"Banistmo"); });
   add("diarioStg","Diario STG", function(){ return parseDiario(raws.diarioStg,null); });
   add("diarioBancoGeneral","Diario Banco General", function(){ return parseDiario(raws.diarioBancoGeneral,null); });
+  CUENTAS_EXTRA.forEach(function(c){
+    add(c.keyEst, "Estado de cuenta "+c.banco, function(){ return parseEstadoCuenta(raws[c.keyEst], c.tipoEst); });
+    add(c.keyDiario, "Diario "+c.banco, function(){ return parseDiario(raws[c.keyDiario], null); });
+  });
   return validarPeriodos(fuentes);
 }
 // Compara los períodos de los archivos ENTRE SÍ. El mes de trabajo se decide por mayoría de archivos, no
@@ -5805,6 +5941,7 @@ function ejecutarConciliacion(){
   var note = document.getElementById("runNote");
   note.textContent = "Leyendo archivos...";
   var allKeys = ["transitoPrevio","reporte","diarioCaja","diarioBanistmo","diarioStg","estBanistmo","estStg","estBancoGeneral","diarioBancoGeneral","retVisa"]
+    .concat(CUENTAS_EXTRA.reduce(function(a,c){ return a.concat([c.keyDiario, c.keyEst]); }, []))
     .filter(function(k){ return STATE.files[k]; });
   readMany(allKeys, function(raws){
     try{
@@ -5820,12 +5957,16 @@ function ejecutarConciliacion(){
         if(raws.diarioBanistmo) dbk["Banistmo"] = parseDiario(raws.diarioBanistmo, null);
         if(raws.diarioStg) dbk["STG"] = parseDiario(raws.diarioStg, null);
         if(raws.diarioBancoGeneral) dbk["Banco General"] = parseDiario(raws.diarioBancoGeneral, null);
+        var dxI = diariosExtraDe(raws);
+        Object.keys(dxI).forEach(function(b){ dbk[b] = dxI[b]; });
         var cajaDiario = raws.diarioCaja ? parseDiario(raws.diarioCaja,"Caja General") : null;
         STATE.integridad = integridadComprobantes(cajaDiario, dbk);
         var estk = {};
         if(raws.estBanistmo) estk["Banistmo"] = parseEstadoCuenta(raws.estBanistmo,"banistmo");
         if(raws.estStg) estk["STG"] = parseEstadoCuenta(raws.estStg,"stg");
         if(raws.estBancoGeneral) estk["Banco General"] = parseEstadoCuenta(raws.estBancoGeneral,"bancogeneral");
+        var exI = estadosExtraDe(raws);
+        Object.keys(exI).forEach(function(b){ estk[b] = exI[b]; });
         STATE.integridadBanco = integridadDiariosBanco(cajaDiario, dbk, estk);
       }catch(e){ STATE.integridad = []; STATE.integridadBanco = []; }
       // Paso 0 OBLIGATORIO: se corre primero. Si falta o no cuadra, se bloquean las conciliaciones.
@@ -7052,7 +7193,11 @@ var DE_DONDE = {
   retVisa: "Del portal de VISA: el informe de retenciones del mes, con el detalle por transacción. Sirve para cuadrar lo que el banco acredita NETO (la venta menos la retención).",
   diarioBanistmo: "Del sistema contable: Navegador de Contabilidad → cuenta del banco Banistmo → el mes completo → Exportar a Excel.",
   diarioStg: "Del sistema contable: Navegador de Contabilidad → cuenta de St. Georges → el mes completo → Exportar a Excel.",
-  diarioBancoGeneral: "Del sistema contable: Navegador de Contabilidad → cuenta de Banco General → el mes completo → Exportar a Excel."
+  diarioBancoGeneral: "Del sistema contable: Navegador de Contabilidad → cuenta de Banco General → el mes completo → Exportar a Excel.",
+  estStgSuper: "De la banca en línea de St. Georges: estado de cuenta de la cuenta de <b>Super</b>, del día 1 al último día del mes. Ojo: las tres cuentas de St. Georges exportan con el mismo encabezado, así que la app no puede avisarte si te equivocaste de cuenta — confirmá el número antes de subirlo.",
+  diarioStgSuper: "Del sistema contable: Navegador de Contabilidad → cuenta de St. Georges <b>Super</b> → el mes completo → Exportar a Excel.",
+  estStgBordados: "De la banca en línea de St. Georges: estado de cuenta de la cuenta de <b>Bordados</b>, del día 1 al último día del mes. Mismo cuidado que con Super: el encabezado no distingue una cuenta de otra.",
+  diarioStgBordados: "Del sistema contable: Navegador de Contabilidad → cuenta de St. Georges <b>Bordados</b> → el mes completo → Exportar a Excel."
 };
 function dzHtml(key, label, esperado){
   var f = STATE.files[key];
@@ -7079,7 +7224,11 @@ var FILE_LABELS = {
   diarioBanistmo: "Diario Banistmo (Paso 3)",
   diarioStg: "Diario STG (Paso 3)",
   diarioBancoGeneral: "Diario Banco General (Paso 3)",
-  retVisa: "Informe de retenciones VISA (Paso 2)"
+  retVisa: "Informe de retenciones VISA (Paso 2)",
+  estStgSuper: "Estado de cuenta STG Super (Paso 2)",
+  diarioStgSuper: "Diario STG Super (Paso 3)",
+  estStgBordados: "Estado de cuenta STG Bordados (Paso 2)",
+  diarioStgBordados: "Diario STG Bordados (Paso 3)"
 };
 function faltantesDePaso(pasoKey){
   return (PASO_REQS[pasoKey]||[]).filter(function(k){ return !STATE.files[k]; })
@@ -7122,20 +7271,24 @@ function renderModulo1(){
     '</div>' + stageRunHtml("paso1") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 2</span> Reporte / Caja General → Estados de cuenta bancarios</h3>' +
-    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Empareja por monto dentro de la ventana de días (acepta depósitos partidos en varias líneas y la compensación al día siguiente, ej. Yappy). Los cheques se cuadran uno a uno con el desglose de la 2ª pestaña del reporte (no compensan en bloque); el que no aparezca se busca en los otros bancos o se marca en tránsito. Con el informe VISA, cuadra el neto (bruto − retenciones). Usa el Diario Caja General y el reporte del Paso 1.</p>' +
+    '<p class="desc">Coteja lo que el reporte de cajeras y el Diario Caja General (Paso 1) registraron como depósito a cada banco contra el estado de cuenta REAL del banco. Empareja por monto dentro de la ventana de días (acepta depósitos partidos en varias líneas y la compensación al día siguiente, ej. Yappy). Los cheques se cuadran uno a uno con el desglose de la 2ª pestaña del reporte (no compensan en bloque); el que no aparezca se busca en los otros bancos o se marca en tránsito. Con el informe VISA, cuadra el neto (bruto − retenciones). Usa el Diario Caja General y el reporte del Paso 1. <b>Las cuentas opcionales (Banco General, STG Super, STG Bordados) se concilian igual que las demás: si no subís el estado, esa cuenta simplemente queda fuera.</b></p>' +
     '<div class="dropzones grid2">' +
       dzHtml("estBanistmo","Estado de cuenta Banistmo","ESTADO_DE_CUENTA_..._BANISTMO_[MES].xlsx (movimientos_...)") +
       dzHtml("estStg","Estado de cuenta STG","estado_de_cta_stg_....xlsx (Fecha, Descripción, Débitos(-), Créditos(+))") +
       dzHtml("estBancoGeneral","Estado de cuenta Banco General (opcional)","Estado de cuenta de Banco General (donde compensa Yappy)") +
       dzHtml("retVisa","Informe de retenciones VISA STG (opcional)","retenciones_de_visa_....xlsx — para cuadrar el neto VISA en el banco") +
+      dzHtml("estStgSuper","Estado de cuenta STG Super (opcional)","estado de cuenta de la cuenta de St. Georges Super") +
+      dzHtml("estStgBordados","Estado de cuenta STG Bordados (opcional)","estado de cuenta de la cuenta de St. Georges Bordados") +
     '</div>' + stageRunHtml("paso2") + '</div>' +
 
     '<div class="stage"><h3><span class="tag">PASO 3</span> Diario bancario → Estado de cuenta real + validación VISA</h3>' +
-    '<p class="desc">Conciliación bancaria clásica: el diario contable de cada banco contra su estado de cuenta real (los que subiste en el Paso 2). Excluye partidas "ABORTED". Si subiste el informe de retenciones VISA (Paso 2), además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG.</p>' +
+    '<p class="desc">Conciliación bancaria clásica: el diario contable de cada banco contra su estado de cuenta real (los que subiste en el Paso 2). Excluye partidas "ABORTED". Si subiste el informe de retenciones VISA (Paso 2), además valida el neto (venta bruta − retención − comisión − ITBMS) contra el estado de cuenta STG — solo en la cuenta principal, que es la que recibe las remisiones de VISA. Cada cuenta opcional necesita sus <b>dos</b> archivos (navegador + estado): con uno solo no hay nada que conciliar y se omite.</p>' +
     '<div class="dropzones grid2">' +
       dzHtml("diarioBanistmo","Navegador diario Banistmo","Navegador_Contabilidad_Excel — cuenta [1.1.1.xx] Banistmo") +
       dzHtml("diarioStg","Navegador diario STG","Navegador_Contabilidad_Excel — cuenta St. George / STG") +
       dzHtml("diarioBancoGeneral","Navegador diario Banco General (opcional)","Navegador_Contabilidad_Excel — cuenta Banco General (donde compensa Yappy)") +
+      dzHtml("diarioStgSuper","Navegador diario STG Super (opcional)","Navegador_Contabilidad_Excel — cuenta St. Georges Super") +
+      dzHtml("diarioStgBordados","Navegador diario STG Bordados (opcional)","Navegador_Contabilidad_Excel — cuenta St. Georges Bordados") +
     '</div>' + stageRunHtml("paso3") + '</div>' +
 
     '<div class="opts">' +
@@ -9778,14 +9931,45 @@ function cuadreSaldoIniHtml(c){
 // Paso 0: valida que las partidas en tránsito de meses anteriores compensaron en los bancos de este mes.
 // Lo que compensó se reporta como tránsito ENTRANTE (no es diferencia: su asiento es del mes anterior);
 // lo que no compensó sigue en tránsito y se arrastra al resumen del mes siguiente.
-function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia){
+function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias, tolerancia, estExtra){
   var estados = { "Banistmo": estBanistmo, "STG": estStg };
   if(estBancoGeneral) estados["Banco General"] = estBancoGeneral;
+  /* Las cuentas adicionales también entran acá, aunque se suban en el Paso 2: una partida en tránsito
+     cuyo banco sea una de ellas no tendría contra qué compensar y viajaría mes tras mes sin que nada lo
+     delate — el mismo callejón sin salida que tuvo el efectivo antes de comboAchConRedondeo. */
+  Object.keys(estExtra||{}).forEach(function(b){ if(estExtra[b]) estados[b] = estExtra[b]; });
   var hallazgos = [];
   // Una partida cuyo banco no se reconoce no entra a ningun pool y desaparece en silencio del cotejo:
   // ni compensa ni queda pendiente. Antes de conciliar nada, se avisa.
   var BANCOS_OK = { "Banistmo":1, "STG":1, "Banco General":1 };
+  CUENTAS_EXTRA.forEach(function(c){ BANCOS_OK[c.banco] = 1; });
   var raros = (transitoPrevio||[]).filter(function(t){ return !BANCOS_OK[t.banco]; });
+  /* Una cuenta que SI se reconoce pero cuyo estado no se subio tampoco tiene contra que compensar, y el
+     sintoma es el mismo: la partida se pierde. Pero el arreglo es el opuesto — ahi no hay que corregir
+     el archivo, hay que subir el estado de esa cuenta en el Paso 2 — asi que se reporta aparte. Decirle
+     "banco que no reconozco" a una cuenta que la app si conoce manda a corregir lo que esta bien. */
+  var sinEstado = {};
+  // Si no hay NINGUN estado de cuenta, de eso avisa el bloque de mas abajo: repetirlo por cuenta solo
+  // llenaria el reporte con el mismo mensaje tantas veces como bancos traiga el resumen.
+  var hayAlgunEstado = Object.keys(estados).some(function(b){ return estados[b] && estados[b].length; });
+  (hayAlgunEstado ? (transitoPrevio||[]) : []).forEach(function(t){
+    if(!BANCOS_OK[t.banco]) return;
+    if(estados[t.banco] && estados[t.banco].length) return;
+    (sinEstado[t.banco] = sinEstado[t.banco] || []).push(t);
+  });
+  Object.keys(sinEstado).forEach(function(b){
+    var ps = sinEstado[b];
+    var tot = Math.round(ps.reduce(function(a,t){ return a+t.monto; },0)*100)/100;
+    hallazgos.push({
+      fecha:"", banco:b, monto:tot, clase:"aviso",
+      concepto:"Cuenta sin estado de cuenta", comprobante:"", motivo:"cuenta sin estado de cuenta",
+      texto: "El resumen en tránsito trae " + ps.length + " partida(s) por B/ " + fmt(tot) + " de " + b +
+             ", pero el estado de cuenta de esa cuenta no está subido, así que no hay contra qué cotejarlas: " +
+             "quedan en tránsito aunque el banco ya las haya acreditado. Subí el estado de cuenta de " + b +
+             " en el Paso 2 y volvé a correr.",
+      fuente: "Resumen en tránsito del mes anterior"
+    });
+  });
   if(raros.length){
     var totalRaro = Math.round(raros.reduce(function(a,t){ return a+t.monto; },0)*100)/100;
     var nombres = {};
@@ -9796,7 +9980,8 @@ function paso0(transitoPrevio, estBanistmo, estStg, estBancoGeneral, ventanaDias
       texto: "El resumen en tránsito trae " + raros.length + " partida(s) por B/ " + fmt(totalRaro) +
              " con un banco que no reconozco: " + Object.keys(nombres).map(function(x){ return "\"" + x + "\""; }).join(", ") +
              ". Esas partidas NO se cotejan: no compensan ni quedan pendientes, simplemente se pierden. " +
-             "Corregí la columna Banco del archivo (los valores válidos son Banistmo, STG y Banco General) y volvé a subirlo.",
+             "Corregí la columna Banco del archivo (los valores válidos son " +
+             Object.keys(BANCOS_OK).join(", ") + ") y volvé a subirlo.",
       fuente: "Resumen en tránsito del mes anterior"
     });
   }
