@@ -722,30 +722,21 @@ Así que cuadrarlo exigiría **buscar un subconjunto de 175 depósitos que sume 
 
 **Lo que sí vale**: el ruteo por comprobante de la v49 (el Paso 1 pasó de 123,115 a 8,059), y que el Paso 3 concilie esa cuenta contra su propio estado, donde ya le va mejor con los mismos datos (51 rojas por 28,849.04 contra las 157 por 129,230.11 del Paso 2). Si algún día hay que cuadrarlo de verdad, el camino es que el asiento **declare el desglose** —qué depósitos entraron en qué retiro—, igual que la columna `Desglose` del resumen resolvió la partida partida entre dos meses.
 
-### Las dos preguntas del efectivo (parte de lo de arriba, revertido)
+### Las dos preguntas del efectivo (lo que se intentó y NO está en el código)
 
-Juntar las dos preguntas en una sola función rompió el efectivo. Son distintas y ahora viven separadas:
+Esto es el detalle de lo que se revirtió, por si alguien lo vuelve a pensar. **`bancoSoloTexto()`, `bancoDeComprobante()` y `efDec.bancoPorFila` no existen en el código**: la v49 tiene el comprobante dentro de `clasificarBancoPorTexto` y nada más. Lo único que sobrevivió es `fijarComprobantesDeBanco()`.
 
-| Pregunta | Función | Para qué sirve |
-|---|---|---|
-| ¿El **asiento nombra** un banco? | `bancoSoloTexto()` | decide si la línea es *efectivo sin banco*, y entonces la trabaja la sección de efectivo, que sabe del ciclo del camión |
-| ¿De qué **cuenta** es? | `bancoDeComprobante()` | decide contra qué estado de cuenta se cotea |
+La idea era separar dos preguntas que hoy están juntas:
 
-`clasificarBancoPorTexto()` es la suma de las dos, y sigue siendo lo que usa el cotejo general.
+| Pregunta | Para qué serviría |
+|---|---|
+| ¿El **asiento nombra** un banco? | decidir si la línea es *efectivo sin banco*, y entonces la trabaja la sección de efectivo, que sabe del ciclo del camión |
+| ¿De qué **cuenta** es? | decidir contra qué estado de cuenta se cotea |
 
-Con las dos juntas, las líneas `DP-` salían de la sección de efectivo y caían al **cotejo general**, que empareja 1:1 o por combinación del **mismo día**. Pero el banco acredita el efectivo de varios días **consolidado en un ACH de Brinks**: de los 175 depósitos `DP-` de Shopping en enero de 2026, solo **11** tenían un crédito del mismo importe en el estado — los otros 164 estaban dentro de **22 ACH**. Resultado medido: el Paso 1 mejoró 115,000 y el Paso 2 empeoró 23,000.
+Juntas, las líneas `DP-` salen de la sección de efectivo y caen al **cotejo general**, que empareja 1:1 o por combinación del **mismo día** — y el banco acredita varios días consolidados en un ACH, así que no cuadran. Separarlas las devolvía a la maquinaria correcta, y además hacía falta:
 
-```
-Estado de STG Super, enero 2026     22 x  Ach De Brinks Panama, S.A.   128,946.00
-                                    30 x  "Descripción" (redondeos)         298.58
-```
+- correr el bloque de efectivo del Paso 2 **cuenta por cuenta** (hoy corre una sola vez, contra el banco votado);
+- soltar `marcarRedondeosDelEfectivo` del banco votado (`efH.banco !== banco`), para apartarle su redondeo a cada cuenta;
+- y que el **Paso 1 no comparara** contra el informe de cajeras el efectivo de una cuenta cuya venta no pasa por ahí (inflaba el lado de Caja General: 25 días por B/ 120,631.15).
 
-**El bloque de efectivo del Paso 2 corría una sola vez, contra el banco votado.** Con una empresa que deposita el efectivo de dos cuentas por Caja General, eso manda el de una a buscar en el estado de la otra. Ahora corre **cuenta por cuenta**: se agrupa por la cuenta que declara el comprobante y las líneas que no la declaran van al banco votado, como siempre.
-
-- **La propiedad que protege a las empresas de una sola cuenta de efectivo**: con un solo grupo el bucle corre una vez y con exactamente los mismos datos que antes. Petty y BOUTI no tienen comprobantes `DP-`, así que `bancoPorFila` queda vacío y hay un solo grupo.
-- `marcarRedondeosDelEfectivo` estaba atada al banco votado (`efH.banco !== banco`). Una cuenta que recibe sus propios ACH también necesita que se le aparte su redondeo, y **cada línea se aparta solo contra su propia cuenta**.
-
-**Y el Paso 1 no compara contra el informe de cajeras el efectivo de otra cuenta.** El Paso 1 pregunta si el efectivo que *reportó la cajera* llegó a Caja General; el de una cuenta cuya venta no pasa por el informe sí entra a Caja General pero nadie lo reporta ahí, así que compararlo infla el lado de Caja General y saca una diferencia por su importe completo — **25 días por B/ 120,631.15, todas falsas**.
-
-- Se saca de la **comparación** pero **no** de `efDec.filas`: el Paso 2 sí tiene que buscarlo en el banco, porque es plata que Caja General acreditó y el banco tiene que haber recibido.
-- No se silencia: se informa por cuenta, diciendo cuántos depósitos son, por cuánto y que el Paso 2 los busca.
+Todo eso se escribió, se midió y salió **peor** (ver la tabla de arriba), porque el problema no era el ruteo sino la forma del dato. Si se retoma, retomarlo entero y midiendo — y recordar que la propiedad a preservar es que **con una sola cuenta de efectivo el resultado no cambie en nada**, que es el caso de Petty y de BOUTI.
