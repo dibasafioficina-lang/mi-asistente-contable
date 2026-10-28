@@ -693,3 +693,31 @@ Las dos respuestas conviven, y cada una decide algo distinto:
 - Por la segunda, el **navegador y el estado de Super sí hacen falta**, y en los tres lados: el Paso 0 los necesita para que sus 21 partidas en tránsito (13,419.58) tengan contra qué compensar —con el estado subido el Paso 0 pasó de 12 a 20 partidas compensadas—, el Paso 2 para cotejar los `DP-`, y el Paso 3 para conciliar la cuenta contra su propio estado.
 
 Al preguntar por una cuenta nueva conviene preguntar las dos cosas por separado.
+
+### El efectivo se coteja cuenta por cuenta, y cada paso contesta su pregunta
+
+Juntar las dos preguntas en una sola función rompió el efectivo. Son distintas y ahora viven separadas:
+
+| Pregunta | Función | Para qué sirve |
+|---|---|---|
+| ¿El **asiento nombra** un banco? | `bancoSoloTexto()` | decide si la línea es *efectivo sin banco*, y entonces la trabaja la sección de efectivo, que sabe del ciclo del camión |
+| ¿De qué **cuenta** es? | `bancoDeComprobante()` | decide contra qué estado de cuenta se cotea |
+
+`clasificarBancoPorTexto()` es la suma de las dos, y sigue siendo lo que usa el cotejo general.
+
+Con las dos juntas, las líneas `DP-` salían de la sección de efectivo y caían al **cotejo general**, que empareja 1:1 o por combinación del **mismo día**. Pero el banco acredita el efectivo de varios días **consolidado en un ACH de Brinks**: de los 175 depósitos `DP-` de Shopping en enero de 2026, solo **11** tenían un crédito del mismo importe en el estado — los otros 164 estaban dentro de **22 ACH**. Resultado medido: el Paso 1 mejoró 115,000 y el Paso 2 empeoró 23,000.
+
+```
+Estado de STG Super, enero 2026     22 x  Ach De Brinks Panama, S.A.   128,946.00
+                                    30 x  "Descripción" (redondeos)         298.58
+```
+
+**El bloque de efectivo del Paso 2 corría una sola vez, contra el banco votado.** Con una empresa que deposita el efectivo de dos cuentas por Caja General, eso manda el de una a buscar en el estado de la otra. Ahora corre **cuenta por cuenta**: se agrupa por la cuenta que declara el comprobante y las líneas que no la declaran van al banco votado, como siempre.
+
+- **La propiedad que protege a las empresas de una sola cuenta de efectivo**: con un solo grupo el bucle corre una vez y con exactamente los mismos datos que antes. Petty y BOUTI no tienen comprobantes `DP-`, así que `bancoPorFila` queda vacío y hay un solo grupo.
+- `marcarRedondeosDelEfectivo` estaba atada al banco votado (`efH.banco !== banco`). Una cuenta que recibe sus propios ACH también necesita que se le aparte su redondeo, y **cada línea se aparta solo contra su propia cuenta**.
+
+**Y el Paso 1 no compara contra el informe de cajeras el efectivo de otra cuenta.** El Paso 1 pregunta si el efectivo que *reportó la cajera* llegó a Caja General; el de una cuenta cuya venta no pasa por el informe sí entra a Caja General pero nadie lo reporta ahí, así que compararlo infla el lado de Caja General y saca una diferencia por su importe completo — **25 días por B/ 120,631.15, todas falsas**.
+
+- Se saca de la **comparación** pero **no** de `efDec.filas`: el Paso 2 sí tiene que buscarlo en el banco, porque es plata que Caja General acreditó y el banco tiene que haber recibido.
+- No se silencia: se informa por cuenta, diciendo cuántos depósitos son, por cuánto y que el Paso 2 los busca.
