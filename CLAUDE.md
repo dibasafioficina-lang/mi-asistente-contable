@@ -608,3 +608,42 @@ Agregar las cuentas al informe no es agregar columnas: es **repartir** lo que ya
 El contraste que lo delata está en el propio archivo: antes de tocarlo, el informe declaraba STG 46,710.00 contra 45,736.40 de Caja General —menos de mil de diferencia— y después de "corregirlo" quedó 40,935.51 arriba. **Si al separar las cuentas el total de la principal no baja, no se separó nada: se duplicó.**
 
 Un detalle de forma que no estorba: el archivo puede traer bloques de otra tabla pegados al costado (`SHOPPING SUPER` por 349,176.28 y `SHOPPING BORDADOS` por 27,096.00, antes de la columna `Cajera`). La app los ignora porque no nombran ningún método, y eso es lo correcto — pero conviene confirmar con quien lo armó que son referencia y no venta.
+
+### Una fecha en texto MM/DD salía con mes 13, 14, 15…
+
+La fecha en **texto** del informe de cajeras pasaba derecho a `toISODate(raw,false)`, que asume DD/MM sin mirar nada. La 2ª pestaña del informe de Shopping de enero de 2026 (`DESGOLCE DE CK`) está escrita en MM/DD:
+
+```
+"01/13/2026"   →   "2026-13-01"     mes 13
+```
+
+Un mes 13 no es una fecha y **nadie se daba cuenta**: esas 19 filas quedaban en un día inexistente y, con sus pares del día correcto, sacaban **54 diferencias falsas** en el Paso 1 por B/ 45,692.26 en bruto — 27 pares de igual importe y signo opuesto, **neto cero**. El neto delata el patrón: la plata está toda, lo que está mal es la fecha.
+
+```
+2026-01-31   −1,878.97
+2026-31-01   +1,878.97
+```
+
+El arreglo tiene dos mitades, las dos por **aritmética** y no por adivinanza:
+
+- **Una fecha imposible no se emite.** Si una de las dos orientaciones da un mes que no existe, no hay nada que elegir: `"01/13/2026"` solo puede ser el 13 de enero. Cuando las dos son posibles se mira el mes dominante de la hoja, y si eso tampoco decide queda la lectura DD/MM, que es la de siempre — así que no hay regresión.
+- **Una hoja escrita en MM/DD ahora enseña su orientación.** `mesesDominantesReporte` solo contaba el caso `DD/MM` inequívoco (primer campo >12). Si el **segundo** campo pasa de 12 tampoco puede ser un mes, así que el mes es el primero. Sin eso, `meses` quedaba **vacío** en esa hoja y sus 10 celdas que llegan como `Date` se leían al revés también (sin mes dominante se cae a la lectura tal cual).
+
+Las dos hojas del mismo archivo pueden estar escritas distinto: `SHOPPING ENERO` daba `meses=[1]` y 0 fechas imposibles mientras `DESGOLCE DE CK` daba `meses=[]` y 19. **Cada hoja aprende su propia orientación** — son dos llamadas distintas a `mesesDominantesReporte`.
+
+### Repartir las cuentas en el informe de cajeras, paso por paso
+
+Shopping tardó cuatro intentos y los tres primeros fallaron del mismo modo. El síntoma es siempre el mismo y conviene reconocerlo: **si al separar las cuentas el total de la principal no baja, no se separó nada — se duplicó.**
+
+| Intento | Qué hizo | STG en el informe |
+|---|---|---|
+| — | antes de tocar nada | 46,710.00 (contra 45,736.40 de Caja General) |
+| 1º | sumó Super y Bordados **dentro** de `Visa/Clave Sr.George` | 86,671.91 |
+| 2º | agregó columnas de Super **sin sacarlas** de `Sr.George` | 86,671.91 + Super 18,749.91 aparte |
+| 3º | quitó Super | 52,442.98 |
+| 4º | agregó Bordados y lo restó de `Sr.George` | **47,076.22** ✓ |
+
+Y dos cosas que se aprendieron en el camino:
+
+- **Una cuenta cuya venta no pasa por Caja General no va en este informe.** Super declara 349,176.28 de venta (280,000 de efectivo del camión) y Caja General no tiene **una sola línea** suya. Meter ese efectivo al cotejo general llevaba las 25 diferencias del Paso 1 de 127,000 a más de 400,000, todas falsas. Super **sí** se concilia en el Paso 3, contra su propio navegador y su propio estado, que no dependen de Caja General.
+- **Separar por método puede no tener contra qué cuadrar.** De las 23 líneas de Bordados en Caja General, 20 dicen solo `"POR TARJETA"` sin método (4,972.96 de 5,366.77). Se temía que el reparto `Visa Bordados` / `Clave Bordados` dejara 20 diferencias; medido, dio **cero** — el cotejo cuadra el total del día. La corrección de verdad sería que el asiento diga el método, pero eso es el sistema, no el informe.

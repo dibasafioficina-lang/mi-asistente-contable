@@ -5989,6 +5989,39 @@ test("el Paso 1 reporta la columna ambigua como diferencia", () => {
   eq(/VISA y CLAVE/.test(amb[0].texto), true, "y el texto nombra los dos metodos");
 });
 
+/* ---- Una fecha en texto MM/DD salia con mes 13, 14, 15... ----
+   La fecha en TEXTO pasaba derecho a toISODate(raw,false), que asume DD/MM sin mirar nada. La 2a pestana
+   del informe de Shopping de enero de 2026 ("DESGOLCE DE CK") esta escrita en MM/DD, asi que
+   "01/13/2026" salia como "2026-13-01". Un mes 13 no es una fecha y nadie se daba cuenta: esas 19 filas
+   quedaban en un dia inexistente y, con sus pares del dia correcto, sacaban 54 diferencias falsas en el
+   Paso 1 — 27 pares de igual importe y signo opuesto, neto CERO. */
+test("una fecha imposible no se emite: el mes decide por aritmética", () => {
+  // "01/13/2026" leido DD/MM daria mes 13: imposible, asi que solo puede ser el 13 de enero.
+  eq(fechaReporteConsolidado("01/13/2026", []), "2026-01-13");
+  // Y al reves sigue funcionando: "13/01/2026" solo puede ser DD/MM.
+  eq(fechaReporteConsolidado("13/01/2026", []), "2026-01-13");
+  // Con las dos orientaciones posibles no se adivina: queda la lectura DD/MM de siempre.
+  eq(fechaReporteConsolidado("02/01/2026", []), "2026-01-02");
+  // ...salvo que el mes dominante de la hoja lo decida.
+  eq(fechaReporteConsolidado("02/01/2026", [2]), "2026-02-01");
+});
+
+/* La otra mitad: una hoja escrita en MM/DD no votaba NADA, asi que `meses` quedaba vacio y las celdas
+   que llegan como Date de esa misma hoja se leian al reves (sin mes dominante se cae a la lectura tal
+   cual). Si el SEGUNDO campo pasa de 12 no puede ser un mes, asi que el mes es el primero. */
+test("una hoja escrita en MM/DD enseña su orientación", () => {
+  const hoja = [["Fecha", "Monto"],
+                ["01/13/2026", 10],     // MM/DD inequivoco: el 13 no es mes
+                ["01/14/2026", 20],
+                [new Date(2026, 1, 1), 30]];   // 1-feb como Date = "02/01" en el archivo
+  const meses = mesesDominantesReporte(hoja, 0, 1);
+  eq(JSON.stringify(meses), "[1]", "la hoja declara que su mes es enero");
+  // Y con eso la celda Date se lee bien: es el 2 de enero, no el 1 de febrero.
+  eq(fechaReporteConsolidado(hoja[3][0], meses), "2026-01-02");
+  // Sin aprender la orientacion, `meses` quedaba vacio y esa misma celda daba el 1 de febrero.
+  eq(fechaReporteConsolidado(hoja[3][0], []), "2026-02-01");
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");

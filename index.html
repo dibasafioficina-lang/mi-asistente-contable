@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.47";
+var APP_VERSION = "2026.10.48";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1041,24 +1041,48 @@ function mesesDominantesReporte(rows, cFecha, startRow){
     var m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
     if(m){
       var d = parseInt(m[1],10), mo = parseInt(m[2],10);
-      if(d>12 && mo>=1 && mo<=12) cuenta[mo] = (cuenta[mo]||0)+1; // DD/MM inequívoco (día>12)
+      if(d>12 && mo>=1 && mo<=12) cuenta[mo] = (cuenta[mo]||0)+1;      // DD/MM inequívoco (1er campo >12)
+      /* Y el caso espejo: si el SEGUNDO campo pasa de 12 no puede ser un mes, así que el mes es el
+         primero. Sin esto, una hoja escrita en MM/DD no vota­a nada — `meses` quedaba vacío y las celdas
+         con Date de esa misma hoja se leían al revés. La 2ê pestaña del informe de Shopping de enero de
+         2026 ("DESGOLCE DE CK") está escrita así y su fecha salía con mes 13, 14, 15… */
+      else if(mo>12 && d>=1 && d<=12) cuenta[d] = (cuenta[d]||0)+1;    // MM/DD inequívoco (2do campo >12)
     }
   }
   return Object.keys(cuenta).map(Number);
 }
 function fechaReporteConsolidado(raw, meses){
-  if(raw instanceof Date && !isNaN(raw)){
-    var y=raw.getFullYear(), mo=raw.getMonth()+1, da=raw.getDate();
-    var opA={mes:mo, dia:da};          // tal cual
+  /* Elige entre las dos orientaciones posibles. Primero por ARITMÉTICA: si una de las dos da un mes que
+     no existe, no hay nada que elegir — "01/13/2026" solo puede ser el 13 de enero. Recién cuando las
+     dos son posibles se mira el mes dominante de la hoja, y si eso tampoco decide queda la lectura
+     DD/MM, que es la de siempre. */
+  function elegir(mo, da){
+    var opA={mes:mo, dia:da};          // tal cual (DD/MM en el texto)
     var opB={mes:da, dia:mo};          // mes/día invertidos
-    var aOk = meses.indexOf(opA.mes)!==-1;
-    var bOk = meses.indexOf(opB.mes)!==-1 && opB.dia<=12;
-    var pick = aOk ? opA : (bOk ? opB : opA); // preferir la orientación cuyo mes sea dominante
-    return y+"-"+String(pick.mes).padStart(2,"0")+"-"+String(pick.dia).padStart(2,"0");
+    function posible(o){ return o.mes>=1 && o.mes<=12 && o.dia>=1 && o.dia<=31; }
+    var aPos = posible(opA), bPos = posible(opB);
+    if(aPos && !bPos) return opA;
+    if(bPos && !aPos) return opB;
+    var aOk = (meses||[]).indexOf(opA.mes)!==-1;
+    var bOk = (meses||[]).indexOf(opB.mes)!==-1 && opB.dia<=12;
+    return aOk ? opA : (bOk ? opB : opA);
+  }
+  if(raw instanceof Date && !isNaN(raw)){
+    var y=raw.getFullYear(), p=elegir(raw.getMonth()+1, raw.getDate());
+    return y+"-"+String(p.mes).padStart(2,"0")+"-"+String(p.dia).padStart(2,"0");
   }
   var s=String(raw==null?"":raw).trim();
   var mm=s.match(/^(\d{1,2})-(\d)(\d{4})$/); // texto roto tipo "6-62026" => 6-6-2026
   if(mm) return mm[3]+"-"+String(parseInt(mm[2],10)).padStart(2,"0")+"-"+String(parseInt(mm[1],10)).padStart(2,"0");
+  /* La fecha en TEXTO pasaba derecho a toISODate(raw,false), que asume DD/MM sin mirar nada: "01/13/2026"
+     salía como "2026-13-01". Un mes 13 no es una fecha, y nadie se daba cuenta — esas 19 filas de la 2ê
+     pestaña de Shopping quedaban en un día inexistente y, con sus pares del día correcto, sacaban 54
+     diferencias falsas en el Paso 1 (27 pares de igual importe y signo opuesto, neto cero). */
+  var t=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if(t){
+    var p2=elegir(parseInt(t[2],10), parseInt(t[1],10));
+    return t[3]+"-"+String(p2.mes).padStart(2,"0")+"-"+String(p2.dia).padStart(2,"0");
+  }
   return toISODate(raw, false); // DD/MM/YYYY normal
 }
 
