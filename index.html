@@ -525,7 +525,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.44";
+var APP_VERSION = "2026.10.45";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -1546,7 +1546,85 @@ function parseSaldoCajaGeneral(rows){
 }
 
 // 3) Estado de cuenta bancario (Banistmo, STG o Banco General)
+/* ---- El estado de cuenta puede venir partido por mes, una hoja por mes ----
+   La banca en línea exporta el mes y nada más, pero un archivo armado a mano puede traer el año entero
+   con una hoja por mes y una PRIMERA hoja con todo junto. El de Bordados de Shopping trae 843 líneas de
+   enero a septiembre en la primera hoja y, al lado, "Ene 2026" con las 118 de enero.
+   La app lee la primera hoja, así que se le metían 725 líneas de otros meses al cotejo del mes. Para
+   enero no cambió ninguna cifra, pero en un mes con más movimiento una línea de agosto se engancha con
+   un depósito de enero por coincidencia de importe — el falso positivo de siempre, con ocho meses de
+   líneas para elegir.
+   El mes no se adivina: lo decide la MAYORÍA de los archivos cargados, con la misma votación que ya usa
+   el control de períodos (validarPeriodos). Y elegir no puede cambiar las cifras en silencio, así que la
+   hoja del mes tiene que traer EXACTAMENTE las mismas líneas de ese mes que la hoja mezclada — una de
+   más o una de menos y no se toca nada. */
+var MES_TRABAJO = null;
+var SIN_SELECCION_HOJA = false;   // corta la recursión: parseEstadoCuenta llama a hojaDelMes y al revés
+var HOJAS_ELEGIDAS = [];          // lo que se elija se REPORTA; cambiar la entrada en silencio no vale
+function fijarMesTrabajo(raws){
+  MES_TRABAJO = null; HOJAS_ELEGIDAS = [];
+  if(!raws) return;
+  var prev = SIN_SELECCION_HOJA;
+  SIN_SELECCION_HOJA = true;      // el mes se vota sobre los archivos TAL COMO vienen
+  try{
+    var d = diagnosticarPeriodos(raws);
+    if(d && d.mesTrabajo) MES_TRABAJO = d.mesTrabajo;
+  }catch(e){}
+  SIN_SELECCION_HOJA = prev;
+}
+function hojaDelMes(rows, tipo){
+  if(SIN_SELECCION_HOJA || !MES_TRABAJO) return rows;
+  if(!rows || !rows.hojas) return rows;
+  if(rows._selMes === MES_TRABAJO) return rows._selHoja || rows;   // ya resuelto para este mes
+  var nombres = Object.keys(rows.hojas);
+  if(nombres.length < 2){ rows._selMes = MES_TRABAJO; rows._selHoja = null; return rows; }
+  SIN_SELECCION_HOJA = true;
+  var elegida = null, motivo = "";
+  try{
+    var mesesBase = mesesDe(parseEstadoCuenta(rows, tipo));
+    var clavesBase = Object.keys(mesesBase), nBase = mesesBase[MES_TRABAJO] || 0;
+    // La hoja que ya es exactamente el mes de trabajo no se toca.
+    if(!(clavesBase.length === 1 && clavesBase[0] === MES_TRABAJO)){
+      var cands = [];
+      nombres.forEach(function(n){
+        var h = rows.hojas[n];
+        if(!h || h === rows) return;
+        var ms; try{ ms = mesesDe(parseEstadoCuenta(h, tipo)); }catch(e){ return; }
+        var ks = Object.keys(ms);
+        if(ks.length !== 1 || ks[0] !== MES_TRABAJO) return;   // la hoja tiene que ser de UN solo mes
+        /* Si la hoja que se iba a leer trae líneas del mes, la del mes tiene que traer EXACTAMENTE las
+           mismas: una de más o una de menos y las dos no dicen lo mismo, así que elegir cambiaría las
+           cifras en silencio. Si no trae ninguna (la primera hoja es de otro mes), no hay con qué
+           comparar y el conteo no aplica. */
+        if(nBase > 0 && ms[MES_TRABAJO] !== nBase) return;
+        cands.push(n);
+      });
+      if(cands.length === 1){                                  // con dos candidatas no se adivina
+        elegida = cands[0];
+        motivo = nBase > 0 ? "mezcla" : "otroMes";
+      }
+    }
+    /* El caso que NO se toca: que el libro no tenga ninguna hoja del mes de trabajo. Ahí no hay nada que
+       elegir y el control de períodos tiene que gritar — es la trampa que a BOUTI le costó 159 rojas
+       falsas (mandó el estado de julio llamándolo enero) y taparla sería peor que el problema. */
+  }catch(e){ elegida = null; }
+  SIN_SELECCION_HOJA = false;
+  rows._selMes = MES_TRABAJO;
+  rows._selHoja = null;
+  if(!elegida) return rows;
+  var sel = rows.hojas[elegida];
+  sel.hojas = rows.hojas;
+  rows._selHoja = sel;
+  if(!HOJAS_ELEGIDAS.some(function(x){ return x.hoja === elegida; })){
+    SIN_SELECCION_HOJA = true;
+    var nSel = 0; try{ nSel = mesesDe(parseEstadoCuenta(sel,tipo))[MES_TRABAJO]||0; }catch(e){}
+    SIN_SELECCION_HOJA = false;
+    HOJAS_ELEGIDAS.push({hoja:elegida, mes:MES_TRABAJO, lineas:nSel, motivo:motivo});
+  }
+  return sel;
+}
 function parseEstadoCuenta(rows, tipo){
+  rows = hojaDelMes(rows, tipo);
   // "bancogeneral" usa detección flexible porque no conocemos su formato exacto todavía:
   // busca Fecha, Descripción y columnas de débito/crédito en singular o plural.
   var tokens = tipo==="banistmo" ? ["Fecha","Descripcion","Debito","Credito","Saldo"]
@@ -5439,6 +5517,10 @@ function transitoPrevioDe(raws){
   return quitarConsolidadosDuplicados(tr);
 }
 function computaPaso(pasoKey, raws, opts){
+  /* El mes de trabajo, PRIMERO: de él depende qué hoja se lee de un estado partido por mes, y de la
+     hoja dependen el calendario bancario y todo el cotejo. Acá pasan los dos caminos — "ejecutar los 3
+     pasos" y "ejecutar solo este paso" — así que ninguno se queda sin él. */
+  fijarMesTrabajo(raws);
   // La ventana de días se mide sobre los días con movimiento bancario, no sobre el calendario.
   fijarCalendarioBancario(raws);
   // Si tenemos el archivo de Caja General, leemos su saldo (inicial/movimiento/final) para
@@ -5785,8 +5867,25 @@ function mesLargo(ym){
   var n=["","enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   var p=String(ym).split("-"); return (n[parseInt(p[1],10)]||p[1])+" "+p[0];
 }
+// Lo que la app eligió leer, cuando un estado de cuenta vino partido por mes. Se muestra siempre que
+// haya pasado: cambiar qué se lee sin decirlo deja a quien concilia mirando cifras de otra hoja.
+function hojasElegidasHtml(){
+  if(!HOJAS_ELEGIDAS.length) return "";
+  return '<div class="per-panel"><div class="per-title">\u2139 Un estado de cuenta venía partido por mes</div>' +
+    '<p class="per-txt">Su primera hoja no era la del mes de trabajo, así que se leyó la que sí lo es. ' +
+    'Cuando la primera hoja mezcla meses se exige además que la hoja del mes traiga exactamente las ' +
+    'mismas líneas de ese mes — si no, no se cambia nada.</p>' +
+    '<table class="per-tabla"><tbody>' +
+    HOJAS_ELEGIDAS.map(function(x){
+      return '<tr><td>\ud83d\udcc4 se leyó la hoja <b>' + esc(x.hoja) + '</b>' +
+        '<div class="per-det">' + x.lineas + ' línea(s) de ' + mesLargo(x.mes) +
+        (x.motivo === "mezcla" ? ' — la primera hoja mezclaba varios meses'
+                               : ' — la primera hoja era de otro mes') + '</div></td></tr>';
+    }).join("") +
+    '</tbody></table></div>';
+}
 function periodosHtml(diag){
-  if(!diag || !diag.alertas || !diag.alertas.length) return "";
+  if(!diag || !diag.alertas || !diag.alertas.length) return hojasElegidasHtml();
   var ajenos = diag.alertas.filter(function(a){ return a.clase==="ajeno"; });
   var grave = ajenos.length > 0;
   var h = '<div class="per-panel'+(grave?' per-grave':'')+'">' +
@@ -5809,7 +5908,7 @@ function periodosHtml(diag){
   h += '</tbody></table>';
   if(grave) h += '<p class="per-nota"><b>Un archivo sin registros del mes de trabajo hace que todo lo suyo salga como no compensado</b>, y esas no son diferencias reales: hay que volver a exportarlo con el rango correcto.</p>';
   h += '<p class="per-nota">El período se determina <b>solo por las fechas de los registros</b>. El nombre del archivo y su encabezado no se toman en cuenta: pueden decir un mes y contener otro.</p>';
-  return h + '</div>';
+  return h + '</div>' + hojasElegidasHtml();
 }
 
 // Un hallazgo cuenta como "diferencia roja" salvo que sea clase "sin_confirmar" (plata presente pero
@@ -5949,6 +6048,7 @@ function ejecutarConciliacion(){
       ensureResults();
       // Antes de conciliar nada: verificar que los archivos sean del mismo período. Un estado de cuenta
       // exportado con el rango equivocado genera decenas de hallazgos falsos que parecen reales.
+      fijarMesTrabajo(raws);   // para que el diagnostico se haga sobre la hoja que de verdad se va a leer
       STATE.periodos = diagnosticarPeriodos(raws);
       // Integridad entre archivos: si al navegador de Caja General le faltan lineas, todo lo que sigue
       // se calcula sobre datos incompletos.

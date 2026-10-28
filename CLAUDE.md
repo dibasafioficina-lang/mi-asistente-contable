@@ -529,3 +529,33 @@ Ya pasaba con **Banco General** (todo lo que dice `YAPPY` se rutea ahí) y no se
 
 - El Paso 2 agrupa esas líneas por banco y las reporta como **diferencia roja**, diciendo cuántas son, por cuánto, y que el resultado del paso está incompleto en ese importe.
 - El Paso 0 ya tenía su guard (`banco no reconocido`), pero su mensaje mandaba a **corregir la columna Banco** del archivo. Para una cuenta que la app **sí** conoce eso manda a corregir lo que está bien: ahora se reporta aparte (`cuenta sin estado de cuenta`) y el texto manda a subir el estado en el Paso 2. Si no hay **ningún** estado, de eso avisa el bloque general y el per-cuenta se calla — si no, repetiría el mismo mensaje tantas veces como bancos traiga el resumen.
+
+### El estado de cuenta puede venir partido por mes
+
+La banca en línea exporta el mes y nada más, pero un archivo armado a mano puede traer el año entero con una hoja por mes. Shopping mandó dos así en enero de 2026, y de formas distintas:
+
+| Archivo | Primera hoja (la que la app leía) | La hoja que correspondía |
+|---|---|---|
+| Estado STG **Bordados** | mezcla ene→sep, 843 líneas | `Ene 2026`, 118 líneas |
+| Estado STG **Super** | `Julio 2026 (2)` | `Enero 2026`, 498 líneas |
+
+Leyendo la primera hoja, a Bordados se le metían **725 líneas de otros meses** al cotejo de enero y a Super se le leía **el mes equivocado entero**. Para enero de Bordados no cambió ninguna cifra, pero en un mes con más movimiento una línea de agosto se engancha con un depósito de enero por coincidencia de importe — el falso positivo de siempre, con ocho meses de líneas para elegir.
+
+`hojaDelMes()` corre dentro de `parseEstadoCuenta`, así que **ningún punto de lectura puede olvidarse de ella**: los cuatro pasos, el calendario bancario, el control de períodos y los controles de integridad parsean los estados por su cuenta y cada uno la habría necesitado por separado.
+
+- **El mes no se adivina**: `fijarMesTrabajo()` lo saca de `diagnosticarPeriodos`, o sea de la **misma votación por mayoría** que ya usaba el control de períodos. No hay una segunda definición del mes de trabajo. Se fija en `computaPaso`, que es por donde pasan los dos caminos (los 3 pasos y "ejecutar solo este paso"), así que ninguno se queda sin él.
+- **Si la primera hoja mezcla meses**, la hoja del mes tiene que traer **exactamente las mismas líneas** de ese mes. Una de más o una de menos y no se toca nada: si no coinciden, las dos no dicen lo mismo y elegir movería las cifras en silencio.
+- **Si la primera hoja es de otro mes** no hay líneas con qué comparar, así que el conteo no aplica — pero la hoja del mes existe y es la que corresponde leer. Es el caso de Super.
+- **Si el libro no tiene ninguna hoja del mes de trabajo, no se elige nada.** Ahí el control de períodos tiene que gritar: es la trampa de BOUTI (mandó el estado de julio llamándolo enero, 159 rojas falsas) y taparla cambiando de hoja sería peor que el problema.
+- **Solución única**, como en todo el resto: con dos hojas candidatas del mismo mes no se elige ninguna.
+- **No es silencioso.** `HOJAS_ELEGIDAS` guarda qué se leyó y el panel de períodos lo muestra con el motivo. Cambiar qué archivo se lee sin decirlo deja a quien concilia mirando cifras de otra hoja.
+- `SIN_SELECCION_HOJA` corta la recursión (`parseEstadoCuenta` llama a `hojaDelMes` y `hojaDelMes` parsea hojas candidatas) y es también lo que hace que la votación del mes se haga sobre los archivos **tal como vienen**. La elección se memoriza en el objeto de las filas (`_selMes`/`_selHoja`): sin eso, un libro de 11 hojas se reparsea entero en cada uno de los ~8 puntos de lectura de una corrida.
+
+### Shopping no es Petty: el volumen cambia
+
+El navegador de Caja General de Shopping trae **34,090 movimientos** (Petty traía unos cientos), porque esa cuenta registra **cada venta de contado** —14,485 líneas `CONTADO CONTADO - Cobro:PBUI…`— y no solo los depósitos del día. Consecuencias medidas en enero de 2026:
+
+- **El Paso 2 tarda minutos**, no segundos. En el navegador parece colgado.
+- **B/ 135,481.23 en 167 líneas `Deposito Contable: DP-… CASH`** que el reporte de cajeras no declara. Eso es el 73% de las rojas del Paso 1 (25 diferencias de Efectivo por B/ 127,034.75) y vuelve a salir en el Paso 2. No es un error de la app: es plata que entra a Caja General sin pasar por la caja registradora, el mismo patrón del Yappy de BOUTI pero mucho más grande.
+- **El saldo de Caja General es negativo** (apertura −3,374.56, cierre −149.08). En Petty siempre fue positivo.
+- Los 83 cheques pendientes por cambiar del Paso 2 suman **B/ 22,413.82**, que coincide exacto con el total que declara la hoja `DESGOLCE DE CK` del propio reporte: ningún cheque de enero se cambió, y el reporte y la app están de acuerdo.

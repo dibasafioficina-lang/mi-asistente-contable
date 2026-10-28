@@ -5811,6 +5811,124 @@ test("el Paso 2 no se come la plata de un banco sin estado de cuenta", () => {
   eq(contarRojas(h2), 0);
 });
 
+/* ---- El estado de cuenta puede venir partido por mes, una hoja por mes ----
+   La banca exporta el mes y nada mas, pero un archivo armado a mano puede traer el año entero. Shopping
+   mando dos asi en enero de 2026: el de Bordados con 843 lineas de enero a septiembre en la primera hoja
+   (y "Ene 2026" al lado con las 118 de enero), y el de Super con la primera hoja de JULIO (y "Enero 2026"
+   al lado). Leyendo la primera hoja se le metian al cotejo del mes 725 lineas de otros meses, o el mes
+   equivocado entero. */
+function hojaStg(filas){
+  var r = [["Fecha","Descripci\u00f3n","D\u00e9bitos(-)","Cr\u00e9ditos(+)","Balance"]];
+  filas.forEach(function(f){ r.push([f[0], f[1]||"DEPOSITO", 0, f[2], 0]); });
+  return r;
+}
+function libro(hojas){                       // {nombre: rows}, la primera es la que la app leeria
+  var nombres = Object.keys(hojas);
+  var primera = hojas[nombres[0]];
+  primera.hojas = hojas;
+  return primera;
+}
+function conMes(ym, fn){                     // fija el mes de trabajo y lo repone
+  var prev = MES_TRABAJO, prevH = HOJAS_ELEGIDAS;
+  MES_TRABAJO = ym; HOJAS_ELEGIDAS = [];
+  try { return fn(); } finally { MES_TRABAJO = prev; HOJAS_ELEGIDAS = prevH; }
+}
+
+test("se lee la hoja del mes cuando la primera mezcla meses", () => {
+  const lib = libro({
+    "Todo":      hojaStg([["2026-01-05",null,10], ["2026-01-06",null,20], ["2026-02-05",null,99], ["2026-03-05",null,98]]),
+    "Ene 2026":  hojaStg([["2026-01-05",null,10], ["2026-01-06",null,20]])
+  });
+  conMes("2026-01", () => {
+    const e = parseEstadoCuenta(lib, "stg");
+    eq(e.length, 2, "solo las dos lineas de enero");
+    cerca(e.reduce((a,x)=>a+x.credito,0), 30);
+    eq(HOJAS_ELEGIDAS.length, 1, "y se reporta que se cambio de hoja");
+    eq(HOJAS_ELEGIDAS[0].hoja, "Ene 2026");
+    eq(HOJAS_ELEGIDAS[0].motivo, "mezcla");
+  });
+});
+
+/* El caso de Super: la primera hoja no mezcla nada, es de OTRO mes. No hay lineas del mes con que
+   comparar, asi que el conteo no aplica — pero la hoja del mes existe y es la que corresponde leer. */
+test("se lee la hoja del mes cuando la primera es de otro mes", () => {
+  const lib = libro({
+    "Julio 2026":  hojaStg([["2026-07-05",null,55], ["2026-07-06",null,66]]),
+    "Enero 2026":  hojaStg([["2026-01-05",null,10], ["2026-01-06",null,20]])
+  });
+  conMes("2026-01", () => {
+    const e = parseEstadoCuenta(lib, "stg");
+    eq(e.length, 2);
+    cerca(e.reduce((a,x)=>a+x.credito,0), 30, "las de enero, no las de julio");
+    eq(HOJAS_ELEGIDAS[0].motivo, "otroMes");
+  });
+});
+
+/* El guard que evita cambiar las cifras en silencio: si la hoja del mes NO trae las mismas lineas de ese
+   mes que la hoja mezclada, las dos no dicen lo mismo y no se toca nada. */
+test("si la hoja del mes no coincide en líneas, no se cambia", () => {
+  const lib = libro({
+    "Todo":      hojaStg([["2026-01-05",null,10], ["2026-01-06",null,20], ["2026-02-05",null,99]]),
+    "Ene 2026":  hojaStg([["2026-01-05",null,10]])         // le falta una
+  });
+  conMes("2026-01", () => {
+    const e = parseEstadoCuenta(lib, "stg");
+    eq(e.length, 3, "se sigue leyendo la hoja mezclada");
+    eq(HOJAS_ELEGIDAS.length, 0, "y no se reporta ningun cambio");
+  });
+});
+
+/* Y el guard que preserva la leccion de BOUTI: si el libro no tiene NINGUNA hoja del mes de trabajo, no
+   hay nada que elegir y el control de periodos tiene que gritar. Taparlo cambiando de hoja seria peor
+   que el problema — BOUTI mando el estado de julio llamandolo enero y eso solo dio 159 rojas falsas. */
+test("sin hoja del mes no se inventa nada", () => {
+  const lib = libro({
+    "Julio 2026":  hojaStg([["2026-07-05",null,55]]),
+    "Agosto 2026": hojaStg([["2026-08-05",null,66]])
+  });
+  conMes("2026-01", () => {
+    const e = parseEstadoCuenta(lib, "stg");
+    eq(e.length, 1, "se lee la primera hoja, tal cual");
+    cerca(e[0].credito, 55);
+    eq(HOJAS_ELEGIDAS.length, 0);
+  });
+});
+
+// Solucion UNICA, como en todo el resto: con dos hojas candidatas del mismo mes no se adivina.
+test("con dos hojas del mismo mes no se elige ninguna", () => {
+  const unaDeEnero = [["2026-01-05",null,10], ["2026-01-06",null,20]];
+  const lib = libro({
+    "Todo":        hojaStg(unaDeEnero.concat([["2026-02-05",null,99]])),
+    "Ene 2026":    hojaStg(unaDeEnero),
+    "Enero (bis)": hojaStg(unaDeEnero)
+  });
+  conMes("2026-01", () => {
+    eq(parseEstadoCuenta(lib, "stg").length, 3, "se queda con la hoja mezclada");
+    eq(HOJAS_ELEGIDAS.length, 0);
+  });
+});
+
+/* Y el mes no se adivina: lo vota la MAYORIA de los archivos cargados, con la misma votacion que ya usa
+   el control de periodos. Dos archivos de enero contra la primera hoja mezclada cuyo mes dominante es
+   marzo: manda enero. */
+test("el mes de trabajo lo votan los archivos, no el que viene mezclado", () => {
+  const lib = libro({
+    "Todo":      hojaStg([["2026-01-05",null,10], ["2026-03-05",null,98], ["2026-03-06",null,97], ["2026-03-07",null,96]]),
+    "Ene 2026":  hojaStg([["2026-01-05",null,10]])
+  });
+  // DOS archivos votan enero contra UNO que vota marzo. El voto manda; los registros solo desempatan,
+  // y aca marzo tiene MAS registros que cada uno de los de enero a proposito.
+  const estBan = [["Cuenta","Fecha","Hora","Cheque","Descripci\u00f3n","D\u00e9bito","Cr\u00e9dito","Saldo","Signo"],
+                  ["1","2026-01-10","00:00",0,"DEPOSITO",0,5,0,"C"],
+                  ["1","2026-01-11","00:00",0,"DEPOSITO",0,6,0,"C"]];
+  const raws = { estBanistmo: estBan, estBancoGeneral: estBan, estStg: lib };
+  fijarMesTrabajo(raws);
+  eq(MES_TRABAJO, "2026-01", "gana enero, que es el de la mayoria");
+  HOJAS_ELEGIDAS = [];
+  eq(parseEstadoCuenta(lib, "stg").length, 1, "y por eso se lee la hoja de enero");
+  MES_TRABAJO = null; HOJAS_ELEGIDAS = [];
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
