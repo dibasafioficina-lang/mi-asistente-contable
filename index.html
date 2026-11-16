@@ -603,7 +603,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.11";
+var APP_VERSION = "2026.11.12";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8804,7 +8804,8 @@ function ppPromptFactura(empresas){
     "- manuscrito: true si el total está escrito a mano.",
     "- dudas: en frases cortas, lo que no se leyó bien o admite dos lecturas. Si un importe o el número pudo ser otro, decilo acá.",
     "",
-    "Para reconocer la letra del campo cliente, estas son las empresas que suelen figurar: " + (empresas||[]).join(", ") + ".",
+    "Para reconocer la letra del campo cliente, estas son las empresas que suelen figurar: " + (empresas||[]).map(function(e){
+      return PP_RAZONES[e] ? e + " (" + PP_RAZONES[e][0] + ")" : e; }).join(", ") + ".",
     "Si lo escrito no coincide claramente con ninguna, transcribilo tal cual."
   ].join("\n");
 }
@@ -8828,13 +8829,33 @@ function ppNormalizarLectura(o){
     dudas: (Array.isArray(o.dudas) ? o.dudas : []).map(txt).filter(Boolean).slice(0, 8)
   };
 }
+/* La razón social con que cada empresa figura en las facturas, cuando no contiene el nombre corto del
+   encabezado de la plantilla (o lo contiene pero conviene que sea explícito). Lo dio Diba, 16-nov-2026.
+   La clave es el encabezado de la plantilla, tal cual. */
+var PP_RAZONES = {
+  "SHOPPING": ["SHOPPING CENTER BUILDING"],
+  "GANADERA": ["GANADERA SANTA RHITA", "SANTA RHITA"],
+  "BLVD": ["BLVD QUINTA AVENIDA", "BOULEVARD QUINTA AVENIDA", "QUINTA AVENIDA"],
+  "NATURAL": ["NATURAL PRODUCTOS AGRICOLAS"]
+};
 /* ¿Qué empresa de la plantilla nombra este texto? → { empresa, posibles }.
    "BLVD Quinta Ave" nombra a BLVD. Si nombra a dos y una contiene a la otra gana la más larga
-   ("SUFECHI BORDADOS" no es SUFECHI); si nombra a dos sin relación, no se elige. */
+   ("SUFECHI BORDADOS" no es SUFECHI); si nombra a dos sin relación, no se elige.
+   Se compara sin letras dobles ni H muda: la factura de SHOPPING llegó escrita «SHOPING CENTER BUILDING»
+   y la de GANADERA como «Santa Rita», «Santa Ritha» y «Santa Rhita». La CH se conserva. */
 function ppEmpresaDeTexto(texto, empresas){
-  function forma(s){ return " " + ppMayus(s).replace(/[^A-Z0-9 ]/g," ").replace(/([A-Z]) (?=\d)/g,"$1").replace(/\s+/g," ").trim() + " "; }
-  var t = forma(texto), hay = (empresas||[]).filter(function(e){ return t.indexOf(forma(e))!==-1; });
-  var posibles = hay.filter(function(e){ return !hay.some(function(o){ return o!==e && forma(o).indexOf(forma(e))!==-1; }); });
+  function forma(s){
+    var u = ppMayus(s).replace(/[^A-Z0-9 ]/g," ").replace(/([A-Z]) (?=\d)/g,"$1")
+      .replace(/CH/g,"\u0001").replace(/H/g,"").replace(/\u0001/g,"CH").replace(/([A-Z])\1+/g,"$1");
+    return " " + u.replace(/\s+/g," ").trim() + " ";
+  }
+  var t = forma(texto), hay = [];
+  (empresas||[]).forEach(function(e){
+    var fs = [e].concat(PP_RAZONES[e]||[]).map(forma).filter(function(f){ return f.trim() && t.indexOf(f)!==-1; });
+    if(fs.length) hay.push({ e:e, f: fs.sort(function(a,b){ return b.length-a.length; })[0] });
+  });
+  var posibles = hay.filter(function(h){ return !hay.some(function(o){ return o!==h && o.f!==h.f && o.f.indexOf(h.f)!==-1; }); })
+    .map(function(h){ return h.e; });
   return { empresa: posibles.length===1 ? posibles[0] : null, posibles: posibles };
 }
 function ppClaveBenef(f){ return f.cuenta+"|"+ppClaveNombre(f.nombre); }

@@ -6512,11 +6512,27 @@ test("la empresa: la más específica gana, y si no hay una sola no se elige", (
   eq(ppEmpresaDeTexto("Comercial La Estrella", E).empresa, null);
   eq(ppEmpresaDeTexto("BLVDS", E).empresa, null, "tiene que ser la palabra entera");
 });
+// Las razones sociales que dio Diba (16-nov-2026) y cómo llegaron escritas en las primeras facturas de WhatsApp.
+test("la razón social de la factura lleva a la empresa de la plantilla, aunque venga mal escrita", () => {
+  const E = ["BLVD", "GANADERA", "NATURAL", "SHOPPING", "SHOPPING MARKET", "SUFECHI", "SUFECHI BORDADOS"];
+  eq(ppEmpresaDeTexto("SHOPING CENTER BUILDING SOCIEDAD ANONIMA", E).empresa, "SHOPPING", "con una sola P (factura 198)");
+  eq(ppEmpresaDeTexto("Shopping Center Building, S.A.", E).empresa, "SHOPPING");
+  eq(ppEmpresaDeTexto("Shopping Market", E).empresa, "SHOPPING MARKET", "la más larga sigue ganando");
+  eq(ppEmpresaDeTexto("Ganadera Santa Ritha S.A.", E).empresa, "GANADERA");
+  eq(ppEmpresaDeTexto("SANTA RITA, S.A.", E).empresa, "GANADERA", "sin la palabra GANADERA");
+  eq(ppEmpresaDeTexto("Boulevard Quinta Avenida", E).empresa, "BLVD");
+  eq(ppEmpresaDeTexto("QUINTA AVENIDA S.A.", E).empresa, "BLVD");
+  eq(ppEmpresaDeTexto("Natural Productos Agrícolas", E).empresa, "NATURAL");
+  eq(ppEmpresaDeTexto("Sufechi Bordados", E).empresa, "SUFECHI BORDADOS", "las letras dobles no rompen lo demás");
+  eq(ppEmpresaDeTexto("Comercial La Estrella", E).empresa, null);
+  eq(/BLVD \(BLVD QUINTA AVENIDA\)/.test(ppPromptFactura(E)), true, "el modelo recibe la razón social");
+});
 test("sin empresa reconocida no se propone beneficiario: los candidatos dependen de la empresa", () => {
-  const r = ppCruzarFactura(ppLecturaKalir({ cliente: "Quinta Avenida" }), ppPlantillaBLVD(), []);
+  // Antes el ejemplo era «Quinta Avenida»; desde PP_RAZONES eso ya es BLVD (lo dijo Diba).
+  const r = ppCruzarFactura(ppLecturaKalir({ cliente: "Comercial La Estrella" }), ppPlantillaBLVD(), []);
   eq(r.empresa, ""); eq(r.fila, null);
   eq(/no nombra a ninguna empresa/.test(r.avisos[0]), true);
-  const f = ppCruzarFactura(ppLecturaKalir({ cliente: "Quinta Avenida" }), ppPlantillaBLVD(), [], "BLVD");
+  const f = ppCruzarFactura(ppLecturaKalir({ cliente: "Comercial La Estrella" }), ppPlantillaBLVD(), [], "BLVD");
   eq(f.fila.cuenta, "0447000000001", "cuando una persona elige la empresa, el cruce sigue");
 });
 /* Con varias líneas parecidas, elegir sería adivinar. "PRESTA PANAMA" tiene una línea por persona con la

@@ -162,10 +162,11 @@ Lo que devuelve el modelo es **un dato sin confianza** y pasa por `ppNormalizarL
 
 | Dato | Se propone solo si… |
 |---|---|
-| Empresa | el destinatario nombra **una** empresa de la plantilla (`SUFECHI BORDADOS` le gana a `SUFECHI`; con dos sin relación no se elige) |
+| Empresa | el destinatario nombra **una** empresa de la plantilla, por su encabezado o por su razón social (`PP_RAZONES`) (`SUFECHI BORDADOS` le gana a `SUFECHI`; con dos sin relación no se elige) |
 | Beneficiario | hay **una** línea de esa empresa que comparte palabras significativas con el membrete; con varias, gana una solo si comparte **dos o más** y le saca ventaja a la segunda (`PRESTA PANAMA` tiene una línea por persona: el membrete no dice de quién es) |
 | Monto | el total **cuadra con el detalle** de la propia factura: renglones (o subtotal) más el ITBMS si figura aparte. Si no cuadra, alguno se leyó mal y no hay forma de saber cuál |
 
+- **La razón social no siempre contiene el encabezado de la plantilla**, así que `PP_RAZONES` la declara (lo dio Diba, 16-nov-2026): `SHOPPING CENTER BUILDING` → SHOPPING, `GANADERA SANTA RHITA` → GANADERA, `BLVD QUINTA AVENIDA` → BLVD, `NATURAL PRODUCTOS AGRICOLAS` → NATURAL. La comparación ignora letras dobles y la H muda (la CH no), porque las primeras facturas llegaron como «SHOPING CENTER BUILDING» y «Santa Rita / Ritha / Rhita». La razón social también va en las instrucciones al modelo. Faltan las de las otras 18 empresas.
 - El beneficiario se busca en **todas las listas a la vez**, sin aviso: decidido con Diba, una línea de la plantilla sirve para cualquier empresa aunque el encabezado diga otra. Las de la empresa van primero y ganan los empates. Antes se buscaba primero solo en la propia, y la factura 729 de `ALDO MARTÍNEZ` a SHOPPING se propuso para `DIEGO MARTINEZ M TECHNOLOGY` (el único MARTINEZ de esa lista) aunque `ALDO MARTINEZ` estaba completo en COMPRA Y VENTA DIBA; el pago terminó confirmado a otra cuenta y hubo que corregirlo a mano.
 - Las dudas que declara el modelo, el total manuscrito y la factura repetida salen como avisos junto a la foto.
 - Lo propuesto entra a los pendientes **sin confirmar**, marcado como leído de foto y con lo que decía el membrete, para compararlo con la línea de la plantilla al confirmar.
