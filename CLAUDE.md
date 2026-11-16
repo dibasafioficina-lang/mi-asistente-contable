@@ -134,6 +134,8 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 
 **La plantilla guardada** (`ppFilas`, `ppImportar`, `ppEditarBeneficiario`). Los `.txt` son solo la forma de cargarla la primera vez; después vive en la app:
 
+- **En pantalla va abajo y recogida** (`m.madreAbierta`), pedido de Diba: lo de todos los días son los pagos; la plantilla se despliega solo para editarla. Arranca abierta si está vacía, y editar no la cierra.
+
 - **Importar suma, no pisa.** Una línea que ya está (misma empresa, cuenta y nombre) queda como está. Si pisara, cada reimportación desharía lo corregido a mano.
 - **Los hallazgos son de dos clases.** Los de *lectura* (línea cortada, monto viejo sin borrar) son del archivo y se muestran hasta la próxima importación. Los de *cuenta* (`ppControlesDePlantilla`) se recalculan sobre toda la plantilla en cada cambio.
 - **Corregir una cuenta arrastra** (`ppAlcanceDeCuenta`): la misma línea en las demás empresas se corrige junto —un proveedor tiene una sola cuenta— y los pagos pendientes a esa línea pasan a la cuenta nueva **y se desconfirman**. Sin eso, el pago ya cargado saldría a la cuenta que se acaba de corregir. Otra persona que comparte la cuenta (`PRESTA PANAMA …`) es otra línea y no se toca.

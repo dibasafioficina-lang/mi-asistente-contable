@@ -227,6 +227,8 @@
   .saldo-ctx .saldo-sub{font-size:12.5px;color:#5B6472;margin-top:3px;line-height:1.5}
 
   /* Plantilla de pagos */
+  .pp-madre-carga p.desc{font-size:13.5px;color:var(--slate);margin:6px 0 16px}
+  .pp-madre > .step-head h4{font-size:15px}
   .pp-archivos{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
   .pp-archivo{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:var(--heading);
     background:var(--brand-light);border-radius:999px;padding:5px 6px 5px 12px}
@@ -566,7 +568,7 @@ var STATE = {
     retenciones:null
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
-  mod4:{ filas:null, plantilla:undefined, importe:null, editando:null, sinGuardar:false, empresa:"", q:"", plegados:{},
+  mod4:{ filas:null, plantilla:undefined, importe:null, editando:null, sinGuardar:false, empresa:"", q:"", plegados:{}, madreAbierta:false,
          alta:{ abierta:false, empresa:"", cuenta:"", nombre:"", banco:"", error:"" }, pagos:null, descargas:{}, errorForm:"", fotos:[], bandeja:[], minis:{}, leyendo:false,
          form:{ empresa:"", benef:"", factura:"", monto:"", todas:false } },
   parsed:{},
@@ -601,7 +603,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.9";
+var APP_VERSION = "2026.11.10";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8365,8 +8367,7 @@ function renderResultadosMod4(){
   var avisos = P.hallazgos.filter(function(h){ return h.clase==="aviso"; }).length;
   var cuentas = {}; P.filas.forEach(function(f){ cuentas[f.cuenta] = 1; });
   area.innerHTML =
-    '<div class="results-head"><h2>Plantilla madre</h2>' +
-      (P.hallazgos.length?'<button class="btn-export" id="exportBtn4">Descargar hallazgos (Excel)</button>':'')+'</div>' +
+    (P.hallazgos.length?'<div class="pp-acciones"><button class="btn-export" id="exportBtn4">Descargar hallazgos (Excel)</button></div>':'') +
     '<div class="summary-bar">' +
       '<span class="chip">'+P.empresas.length+' empresas</span>' +
       '<span class="chip">'+P.filas.length+' líneas de pago</span>' +
@@ -8435,10 +8436,24 @@ function renderModulo4(){
   }
   var compartida = ppCompartida(), copia = compartida ? ppCopiaLocal() : { filas:[], pagos:[] };
   if(m.plantilla===undefined) ppReleer();
-  var filas = ppFilas(), hay = filas.length>0, imp = m.importe;
+  var filas = ppFilas(), hay = filas.length>0, imp = m.importe, P = m.plantilla;
+  // Pedido de Diba: el maestro queda abajo y recogido; se despliega solo para editarlo. Sin plantilla
+  // arranca abierto, porque lo primero que hay que hacer es cargarla.
+  var abierta = m.madreAbierta || !hay;
+  var porResolver = P ? P.hallazgos.filter(function(h){ return h.clase==="diff"; }).length : 0;
+  var resumen = hay ? filas.length+' beneficiarios · '+(P?P.empresas.length:0)+' empresas'+(porResolver?' · '+porResolver+' por resolver':'') : 'sin cargar';
   app.innerHTML = headerHtml() +
     '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos STG</span></div>' +
-    '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> A quién se le paga, por empresa</h3>' +
+    (m.sinGuardar?'<div class="pp-error">Este navegador no dejó guardar la plantilla (modo privado o almacenamiento lleno). Lo que ves se pierde al cerrar la pestaña: descargala como .txt.</div>':'') +
+    (B.error?'<div class="pp-error">'+esc(B.error)+'</div>':'') +
+    ((copia.filas.length || copia.pagos.length) ? '<div class="pp-copia">En este navegador quedaron guardados de antes <b>'+copia.filas.length+' beneficiarios</b> y <b>'+copia.pagos.length+' pagos pendientes</b>. ' +
+      'Pasarlos suma a la base compartida lo que le falte; no pisa lo que ya tiene. <button class="btn-export" id="ppPasarCopia">Pasarlos a la base compartida</button> <button class="btn-plegar" id="ppOlvidarCopia">No, descartarlos</button></div>' : '') +
+    '<div id="pagosArea4"></div>' +
+    '<div class="step-block pp-madre'+(abierta?'':' plegado')+'">' +
+      '<div class="step-head" id="ppMadreHead" role="button" tabindex="0" aria-expanded="'+(abierta?"true":"false")+'">' +
+        '<div class="lado"><span class="chev">▼</span><h4>Plantilla madre · '+(abierta?'agregar, editar o importar beneficiarios':'desplegar para editar')+'</h4></div>' +
+        '<span class="count">'+resumen+'</span></div>' +
+    '<div class="step-body"><div class="pp-madre-carga">' +
     '<p class="desc">'+(hay ? 'La plantilla queda guardada'+(compartida?' y es la misma para todo el equipo':'')+': no hace falta subirla cada vez. Agregá o corregí beneficiarios en la tabla de abajo, o importá un <b>.txt</b> para sumarle líneas.'
       : 'Importá los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga — o empezá cargando beneficiarios a mano más abajo. Queda guardada para las próximas veces.')+'</p>' +
     '<div class="dropzones"><div class="dz'+(hay?' filled':'')+'" id="ppDz">' +
@@ -8451,14 +8466,16 @@ function renderModulo4(){
       '<label class="btn-sel">Importar<input type="file" accept=".txt,text/plain" multiple id="ppFile"></label>' +
     '</div></div>' +
     (hay?'<div class="pp-archivos"><button class="btn-export" id="ppBajarMadre">Descargar la plantilla (.txt)</button><button class="btn-plegar" id="ppLimpiar">Vaciar la plantilla</button></div>':'') +
-    (m.sinGuardar?'<div class="pp-error">Este navegador no dejó guardar la plantilla (modo privado o almacenamiento lleno). Lo que ves se pierde al cerrar la pestaña: descargala como .txt.</div>':'') +
-    (B.error?'<div class="pp-error">'+esc(B.error)+'</div>':'') +
-    ((copia.filas.length || copia.pagos.length) ? '<div class="pp-copia">En este navegador quedaron guardados de antes <b>'+copia.filas.length+' beneficiarios</b> y <b>'+copia.pagos.length+' pagos pendientes</b>. ' +
-      'Pasarlos suma a la base compartida lo que le falte; no pisa lo que ya tiene. <button class="btn-export" id="ppPasarCopia">Pasarlos a la base compartida</button> <button class="btn-plegar" id="ppOlvidarCopia">No, descartarlos</button></div>' : '') +
     '<p class="cg-note pp-nota">'+(compartida ? 'La plantilla y los pagos pendientes se guardan en la base compartida de esta página: los ve y los cambia todo el que tenga acceso para usarla.'
       : 'La plantilla se guarda en este navegador. En otro equipo o navegador hay que importarla de nuevo; descargala como .txt para tener respaldo.')+'</p>' +
-    '</div><div id="pagosArea4"></div><div id="resultsArea4"></div>';
+    '</div><div id="resultsArea4"></div></div></div>';
   document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
+  var mh = document.getElementById("ppMadreHead");
+  if(mh){
+    var alternarMadre = function(){ m.madreAbierta = !abierta; ppRedibujar(); };
+    mh.addEventListener("click", alternarMadre);
+    mh.addEventListener("keydown", function(e){ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); alternarMadre(); } });
+  }
   var inp = document.getElementById("ppFile");
   if(inp) inp.addEventListener("change", function(e){ ppSubirArchivos(e.target.files); });
   var dz = document.getElementById("ppDz");
