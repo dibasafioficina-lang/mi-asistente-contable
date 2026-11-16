@@ -245,6 +245,27 @@
   .pp-tabla tr.pp-fila-bloq td:last-child{text-decoration:none}
   .pp-marca{display:inline-block;font-size:11px;font-weight:800;border-radius:999px;padding:2px 8px;white-space:nowrap}
   .pp-bloq{background:var(--alert-bg);color:var(--alert)}
+  .pp-form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:8px}
+  .pp-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:800;color:var(--slate)}
+  .pp-form .cg-inp{width:150px;text-align:left;font-weight:700}
+  .pp-form select.cg-inp{width:190px}
+  .pp-form .pp-f-benef{flex:1;min-width:260px}
+  .pp-form .pp-f-benef .cg-inp{width:100%}
+  .pp-f-todas{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--slate);margin-bottom:14px}
+  .pp-error{font-size:13px;font-weight:700;color:var(--alert);background:var(--alert-bg);border-radius:10px;padding:9px 12px;margin-bottom:14px}
+  .pp-empresa{margin-top:14px}
+  .pp-todas{margin:4px 0 0}
+  .pp-pagos .cg-inp{width:120px;text-align:left;font-weight:700}
+  .pp-cta-sub{display:block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--slate)}
+  .pp-problema{display:block;font-size:12px;font-weight:700;color:var(--alert);margin-top:2px}
+  .pp-ok{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;white-space:nowrap}
+  .pp-ok input{width:17px;height:17px;accent-color:var(--brand)}
+  .pp-pre-t{font-size:12px;font-weight:800;color:var(--slate);margin:14px 0 4px}
+  .pp-pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;background:#FBF7F9;border:1px solid var(--line);
+    border-radius:10px;padding:10px 12px;overflow-x:auto;white-space:pre;color:var(--heading)}
+  .pp-acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+  .pp-acciones button[disabled]{opacity:.45;cursor:default}
+  .pp-acc-nota{font-size:12.5px;color:var(--slate)}
   .pp-conf{background:#FBF1E3;color:#9A6E1E}
 
   .btn-export{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-family:"Mulish";font-size:13.5px;font-weight:800;
@@ -514,7 +535,8 @@ var STATE = {
     retenciones:null
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
-  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{} },
+  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{}, pagos:null, descargas:{}, errorForm:"",
+         form:{ empresa:"", benef:"", factura:"", monto:"", todas:false } },
   parsed:{},
   // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
   // acredita sin que un feriado largo lo distorsione. Medido contra enero y febrero de 2026, subirla de 3
@@ -547,7 +569,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.1";
+var APP_VERSION = "2026.11.2";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7909,7 +7931,7 @@ function renderModulo4(){
     '</div></div>' +
     (lista?'<div class="pp-archivos">'+lista+'<button class="btn-plegar" id="ppLimpiar">Quitar todos</button></div>':'') +
     '<p class="cg-note pp-nota">La plantilla no se guarda todavía: al cerrar la pestaña hay que volver a subirla.</p>' +
-    '</div><div id="resultsArea4"></div>';
+    '</div><div id="pagosArea4"></div><div id="resultsArea4"></div>';
   document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
   var inp = document.getElementById("ppFile");
   if(inp) inp.addEventListener("change", function(e){ ppSubirArchivos(e.target.files); });
@@ -7924,6 +7946,7 @@ function renderModulo4(){
   });
   var lim = document.getElementById("ppLimpiar");
   if(lim) lim.onclick = function(){ m.archivos = []; ppReleer(); renderModulo4(); };
+  renderPagosMod4();
   renderResultadosMod4();
 }
 function exportarHallazgosPlantilla(){
@@ -7938,6 +7961,249 @@ function exportarHallazgosPlantilla(){
   XLSX.writeFile(wb, "plantilla_de_pagos_hallazgos.xlsx");
 }
 
+
+/* ---- Pagos pendientes y el archivo de pago ----
+   Un pago es una línea de la plantilla madre más la factura y el monto. El archivo que se sube al banco
+   es un .txt por empresa, una línea por pago:
+
+       0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404,15.00
+       └── cuenta ─┘ └────────── nombre ─────────┘ └fac┘ └monto
+
+   Sin el prefijo «PAGO DE PROVEEDOR», el monto SIN separador de miles (una coma partiría el campo),
+   líneas separadas por CRLF y sin salto al final: es como sale del bloc de notas que se usaba a mano.
+   Nada entra al archivo sin que una persona lo confirme, y lo confirmado se desconfirma si se edita. */
+var PP_PAGOS_KEY = "pagosPendientesMod4";
+// El monto como va al archivo ("13130.00"), o null si no se entiende. Es estricto a propósito: un monto
+// con tres decimales o con texto pegado no se redondea ni se "arregla" — se devuelve a quien lo escribió.
+function ppMontoArchivo(v){
+  var t = String(v===null||v===undefined?"":v).replace(/[ \s]/g,"").replace(/^B\/\.?/i,"").replace(/^\$/,"");
+  var n = null;
+  if(/^\d+(\.\d{1,2})?$/.test(t)) n = parseFloat(t);
+  else if(/^\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(t)) n = parseFloat(t.replace(/,/g,""));   // 13,130.00
+  else if(/^\d+,\d{1,2}$/.test(t)) n = parseFloat(t.replace(",","."));                    // 20,00 (coma decimal)
+  if(n===null || !isFinite(n) || n<=0) return null;
+  return n.toFixed(2);
+}
+// La factura como va al archivo, o null. No puede llevar coma: le agregaría un campo a la línea.
+function ppFacturaArchivo(v){
+  var t = ppLimpio(v);
+  return (!t || t.indexOf(",")!==-1) ? null : t;
+}
+// Lo que le falta a un pago para poder ir al archivo ([] si está completo). No mira la confirmación.
+function ppProblemasDePago(p){
+  var pr = [];
+  if(!/^\d+$/.test(String(p.cuenta||""))) pr.push("La cuenta no es válida");
+  if(!ppLimpio(p.nombre)) pr.push("Falta el nombre del beneficiario");
+  if(!ppLimpio(p.factura)) pr.push("Falta el número de factura");
+  else if(!ppFacturaArchivo(p.factura)) pr.push("La factura no puede llevar coma");
+  if(!ppLimpio(p.monto)) pr.push("Falta el monto");
+  else if(!ppMontoArchivo(p.monto)) pr.push("El monto no se entiende: escribilo como 1234.56");
+  return pr;
+}
+function ppLineaDePago(p){
+  if(ppProblemasDePago(p).length) return null;
+  return p.cuenta + "," + ppLimpio(String(p.nombre).replace(/,/g," ")) + " " + ppFacturaArchivo(p.factura) + "," + ppMontoArchivo(p.monto);
+}
+// Los pagos de una empresa que van al archivo: completos Y confirmados, en el orden en que se cargaron.
+function ppPagosListos(pagos, empresa){
+  return (pagos||[]).filter(function(p){ return p.empresa===empresa && p.confirmado && !ppProblemasDePago(p).length; });
+}
+function ppArchivoDePago(pagos){
+  return (pagos||[]).map(ppLineaDePago).filter(Boolean).join("\r\n");
+}
+// Un archivo por empresa, con su nombre y la fecha del día en que se genera:
+// "pago proveedores BLVD 16 de noviembre 2026.txt".
+var PP_MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+function ppNombreArchivo(empresa, fecha){
+  var d = fecha || new Date();
+  return "pago proveedores " + ppLimpio(String(empresa||"").replace(/[\\\/:*?"<>|]/g," ")) + " " +
+    d.getDate() + " de " + PP_MESES[d.getMonth()] + " " + d.getFullYear() + ".txt";
+}
+// La misma factura a la misma cuenta ya está pendiente: casi siempre es el mismo pago cargado dos veces.
+function ppPagoDuplicado(pagos, p){
+  var fac = ppMayus(p.factura);
+  for(var i=0;i<(pagos||[]).length;i++){
+    var q = pagos[i];
+    if(q.id!==p.id && q.cuenta===p.cuenta && ppMayus(q.factura)===fac && fac) return q;
+  }
+  return null;
+}
+// Arma un pago nuevo a partir de una línea de la plantilla → { pago } o { error }.
+function ppNuevoPago(pagos, empresa, fila, factura, monto){
+  if(!empresa) return { error:"Elegí la empresa que paga." };
+  if(!fila) return { error:"Elegí el beneficiario de la lista: tiene que ser una línea de la plantilla madre." };
+  if(fila.noUsar) return { error:fila.nombre+" está marcado como NO USAR en la plantilla." };
+  var p = { id:"p"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), empresa:empresa, cuenta:fila.cuenta,
+            nombre:ppLimpio(String(fila.nombre).replace(/,/g," ")), factura:ppLimpio(factura), monto:ppLimpio(monto),
+            confirmado:false, cuentaPorConfirmar:!!fila.enConflicto };
+  var pr = ppProblemasDePago(p);
+  if(pr.length) return { error:pr.join(". ")+"." };
+  p.monto = ppMontoArchivo(p.monto);
+  var dup = ppPagoDuplicado(pagos, p);
+  if(dup) return { error:"La factura "+p.factura+" para la cuenta "+p.cuenta+" ya está pendiente en "+dup.empresa+" por B/ "+fmt(dup.monto)+". Si es otro pago, distinguí el número de factura." };
+  return { pago:p };
+}
+// Los beneficiarios que se pueden elegir: los de la empresa primero y, si se pide, los de todas (la lista
+// de beneficiarios es compartida). Las líneas NO USAR no se ofrecen.
+function ppBeneficiarios(P, empresa, todas){
+  var vistos = {}, out = [];
+  function tomar(f){
+    if(f.noUsar) return;
+    var k = f.cuenta+"|"+ppClaveNombre(f.nombre);
+    if(vistos[k]) return; vistos[k] = 1; out.push(f);
+  }
+  P.filas.forEach(function(f){ if(f.empresa===empresa) tomar(f); });
+  if(todas) P.filas.forEach(function(f){ if(f.empresa!==empresa) tomar(f); });
+  return out;
+}
+function ppEtiquetaBenef(f){ return f.nombre+" · "+f.cuenta; }
+
+function ppPagos(){
+  var m = STATE.mod4;
+  if(!m.pagos){ var g = leerPrefs()[PP_PAGOS_KEY]; m.pagos = Array.isArray(g) ? g : []; }
+  return m.pagos;
+}
+function ppGuardarPagos(){ guardarPref(PP_PAGOS_KEY, STATE.mod4.pagos||[]); }
+function ppDescargarTxt(nombre, texto){
+  var blob = new Blob([texto], { type:"text/plain;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = nombre;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+}
+function ppFormHtml(P){
+  var fo = STATE.mod4.form;
+  if(!P) return '<div class="empty-skip">Subí la plantilla madre para poder agregar pagos.</div>';
+  var benef = fo.empresa ? ppBeneficiarios(P, fo.empresa, fo.todas) : [];
+  return '<div class="pp-form">' +
+    '<label>Empresa que paga<select id="ppfEmpresa" class="cg-inp"><option value="">Elegir…</option>' +
+      P.empresas.map(function(e){ return '<option value="'+esc(e)+'"'+(fo.empresa===e?' selected':'')+'>'+esc(e)+'</option>'; }).join("") +
+    '</select></label>' +
+    '<label class="pp-f-benef">Beneficiario<input id="ppfBenef" class="cg-inp" list="ppfLista" autocomplete="off" value="'+esc(fo.benef)+'" placeholder="'+(fo.empresa?"Escribí parte del nombre o la cuenta":"Primero elegí la empresa")+'"'+(fo.empresa?'':' disabled')+'>' +
+      '<datalist id="ppfLista">'+benef.map(function(f){ return '<option value="'+esc(ppEtiquetaBenef(f))+'"></option>'; }).join("")+'</datalist></label>' +
+    '<label>Factura<input id="ppfFactura" class="cg-inp" autocomplete="off" value="'+esc(fo.factura)+'"></label>' +
+    '<label>Monto<input id="ppfMonto" class="cg-inp" inputmode="decimal" autocomplete="off" value="'+esc(fo.monto)+'" placeholder="0.00"></label>' +
+    '<button class="btn-export" id="ppfAgregar">＋ Agregar pago</button>' +
+    '</div>' +
+    '<label class="pp-f-todas"><input type="checkbox" id="ppfTodas"'+(fo.todas?' checked':'')+'> Buscar también entre los beneficiarios de las otras empresas</label>' +
+    (STATE.mod4.errorForm?'<div class="pp-error">'+esc(STATE.mod4.errorForm)+'</div>':'');
+}
+function ppBloqueEmpresaHtml(empresa){
+  var m = STATE.mod4, todos = ppPagos().filter(function(p){ return p.empresa===empresa; });
+  var listos = ppPagosListos(ppPagos(), empresa), texto = ppArchivoDePago(listos);
+  var total = listos.reduce(function(a,p){ return a + parseFloat(ppMontoArchivo(p.monto)); }, 0);
+  var fuera = todos.length - listos.length;
+  // «Plantilla generada» solo se habilita si lo que se descargó es EXACTAMENTE lo que hay ahora: si se
+  // editó un pago después de bajar el archivo, el archivo ya no dice lo mismo que la pantalla.
+  var descargado = !!texto && m.descargas[empresa]===texto;
+  return '<div class="step-block pp-empresa"><div class="step-head"><div class="lado"><h4>'+esc(empresa)+'</h4></div>' +
+      '<span class="count">'+listos.length+' de '+todos.length+' confirmados · B/ '+fmt(total)+'</span></div>' +
+    '<div class="step-body"><table class="ret-tabla pp-tabla pp-pagos"><thead><tr><th>Beneficiario</th><th>Factura</th><th>Monto</th><th>Confirmado</th><th></th></tr></thead><tbody>' +
+    todos.map(function(p){
+      var pr = ppProblemasDePago(p);
+      return '<tr><td>'+esc(p.nombre)+'<span class="pp-cta-sub">'+esc(p.cuenta)+'</span>' +
+          (p.cuentaPorConfirmar?'<span class="pp-marca pp-conf">cuenta por confirmar en la plantilla</span>':'') +
+          (pr.length?'<span class="pp-problema">'+esc(pr.join(" · "))+'</span>':'')+'</td>' +
+        '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="factura" value="'+esc(p.factura)+'"></td>' +
+        '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="monto" inputmode="decimal" value="'+esc(p.monto)+'"></td>' +
+        '<td><label class="pp-ok"><input type="checkbox" class="pp-conf-ck" data-id="'+esc(p.id)+'"'+(p.confirmado?' checked':'')+(pr.length?' disabled':'')+'> cuenta y monto</label></td>' +
+        '<td><button class="sidet-del2 pp-quitar" data-id="'+esc(p.id)+'" title="Quitar este pago">✕</button></td></tr>';
+    }).join("") + '</tbody></table>' +
+    (texto ? '<div class="pp-pre-t">Así queda el archivo:</div><pre class="pp-pre">'+esc(texto)+'</pre>' : '') +
+    '<div class="pp-acciones">' +
+      '<button class="btn-export pp-bajar" data-emp="'+esc(empresa)+'"'+(texto?'':' disabled')+'>Descargar '+esc(ppNombreArchivo(empresa))+'</button>' +
+      '<button class="btn-export pp-generada" data-emp="'+esc(empresa)+'"'+(descargado?'':' disabled')+'>Plantilla generada · borrar '+(listos.length===1?'este pago':'estos '+listos.length+' pagos')+'</button>' +
+      '<span class="pp-acc-nota">'+(!texto ? "Confirmá al menos un pago para generar el archivo."
+        : (fuera ? fuera+" sin confirmar: no entran al archivo y quedan pendientes. " : "") +
+          (descargado ? "" : "Descargá el archivo para poder marcarlo como generado."))+'</span>' +
+    '</div></div></div>';
+}
+function renderPagosMod4(){
+  var area = document.getElementById("pagosArea4"); if(!area) return;
+  var m = STATE.mod4, P = m.plantilla, pagos = ppPagos();
+  if(!P && !pagos.length){ area.innerHTML = ""; return; }
+  var empresas = [];
+  pagos.forEach(function(p){ if(empresas.indexOf(p.empresa)===-1) empresas.push(p.empresa); });
+  var conArchivo = empresas.filter(function(e){ return ppPagosListos(pagos, e).length>0; });
+  area.innerHTML = '<div class="stage"><h3><span class="tag">PAGOS</span> Pendientes de elevar</h3>' +
+    '<p class="desc">Cada pago toma la cuenta y el nombre de la plantilla madre; vos ponés la factura y el monto. Al archivo solo entra lo que confirmaste, y un pago editado hay que volver a confirmarlo.</p>' +
+    ppFormHtml(P) +
+    // Con pagos confirmados en varias empresas, un solo clic baja una plantilla por cada una.
+    (conArchivo.length>1 ? '<div class="pp-acciones pp-todas"><button class="btn-export" id="ppBajarTodas">Descargar las '+conArchivo.length+' plantillas · una por empresa</button></div>' : '') +
+    (empresas.length ? empresas.map(ppBloqueEmpresaHtml).join("") : '<div class="empty-skip">No hay pagos pendientes.</div>') +
+    '<p class="cg-note pp-nota">Los pagos pendientes se guardan en este navegador hasta que marques la plantilla como generada. Todavía no se comparten con el resto del equipo.</p>' +
+    '</div>';
+  function pago(id){ return pagos.filter(function(p){ return p.id===id; })[0]; }
+  function redibujar(){ ppGuardarPagos(); renderPagosMod4(); }
+  var fo = m.form;
+  [["ppfBenef","benef"],["ppfFactura","factura"],["ppfMonto","monto"]].forEach(function(par){
+    var el = document.getElementById(par[0]);
+    if(el) el.addEventListener("input", function(){ fo[par[1]] = el.value; });
+  });
+  var se = document.getElementById("ppfEmpresa");
+  if(se) se.addEventListener("change", function(){ fo.empresa = se.value; fo.benef = ""; m.errorForm = ""; renderPagosMod4(); });
+  var ck = document.getElementById("ppfTodas");
+  if(ck) ck.addEventListener("change", function(){ fo.todas = ck.checked; renderPagosMod4(); });
+  var ag = document.getElementById("ppfAgregar");
+  if(ag) ag.onclick = function(){
+    var fila = ppBeneficiarios(P, fo.empresa, fo.todas).filter(function(f){ return ppEtiquetaBenef(f)===ppLimpio(fo.benef); })[0];
+    var r = ppNuevoPago(pagos, fo.empresa, fila, fo.factura, fo.monto);
+    if(r.error){ m.errorForm = r.error; renderPagosMod4(); return; }
+    pagos.push(r.pago);
+    m.errorForm = ""; fo.benef = ""; fo.factura = ""; fo.monto = "";   // la empresa queda: se cargan varios seguidos
+    redibujar();
+  };
+  area.querySelectorAll(".pp-edit").forEach(function(inp){
+    inp.addEventListener("change", function(){
+      var p = pago(inp.getAttribute("data-id")), f = inp.getAttribute("data-f"); if(!p) return;
+      var nuevo = ppLimpio(inp.value);
+      if(f==="monto" && ppMontoArchivo(nuevo)) nuevo = ppMontoArchivo(nuevo);
+      if(nuevo===p[f]) return;
+      p[f] = nuevo; p.confirmado = false;      // lo que se confirmó ya no es lo que dice la fila
+      redibujar();
+    });
+  });
+  area.querySelectorAll(".pp-conf-ck").forEach(function(c){
+    c.addEventListener("change", function(){ var p = pago(c.getAttribute("data-id")); if(p){ p.confirmado = c.checked && !ppProblemasDePago(p).length; redibujar(); } });
+  });
+  area.querySelectorAll(".pp-quitar").forEach(function(b){
+    b.onclick = function(){ var p = pago(b.getAttribute("data-id")); if(p){ pagos.splice(pagos.indexOf(p), 1); redibujar(); } };
+  });
+  area.querySelectorAll(".pp-bajar").forEach(function(b){
+    b.onclick = function(){
+      var emp = b.getAttribute("data-emp"), texto = ppArchivoDePago(ppPagosListos(pagos, emp));
+      if(!texto) return;
+      ppDescargarTxt(ppNombreArchivo(emp), texto);
+      m.descargas[emp] = texto; renderPagosMod4();
+    };
+  });
+  var bt = document.getElementById("ppBajarTodas");
+  if(bt) bt.onclick = function(){
+    conArchivo.forEach(function(emp, i){
+      var texto = ppArchivoDePago(ppPagosListos(pagos, emp));
+      m.descargas[emp] = texto;
+      // Escalonadas: varias descargas en el mismo instante el navegador las puede descartar.
+      setTimeout(function(){ ppDescargarTxt(ppNombreArchivo(emp), texto); }, i*350);
+    });
+    renderPagosMod4();
+  };
+  area.querySelectorAll(".pp-generada").forEach(function(b){
+    b.onclick = function(){
+      var emp = b.getAttribute("data-emp"), listos = ppPagosListos(pagos, emp);
+      if(!listos.length || m.descargas[emp]!==ppArchivoDePago(listos)) return;
+      if(typeof confirm==="function" && !confirm((listos.length===1 ? "Se va a borrar el pago de "+emp+" que está" : "Se van a borrar los "+listos.length+" pagos de "+emp+" que están")+" en el archivo descargado. No queda historial. ¿Continuar?")) return;
+      ppMarcarGenerada(emp);
+      redibujar();
+    };
+  });
+}
+// Borra de los pendientes lo que entró al archivo de esa empresa. Lo no confirmado se queda.
+function ppMarcarGenerada(empresa){
+  var m = STATE.mod4, pagos = ppPagos(), listos = ppPagosListos(pagos, empresa);
+  listos.forEach(function(p){ pagos.splice(pagos.indexOf(p), 1); });
+  delete m.descargas[empresa];
+  return listos.length;
+}
 
 function render(){
   if(STATE.view==="menu") return renderMenu();
@@ -7987,7 +8253,7 @@ function renderMenu(){
       enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tag:TAG_CONCILIATORIO,
       tagText:"2 archivos", action:"Próximamente"},
     {id:"modulo4", nombre:"Plantilla de pagos",
-      desc:"La plantilla madre de beneficiarios por empresa: cuenta, nombre y banco. Revisa que cada cuenta tenga un solo dueño antes de armar un pago.",
+      desc:"Arma el archivo de pagos de cada empresa a partir de la plantilla madre de beneficiarios: cuenta, nombre, factura y monto.",
       enabled:true, icon:"🏦", iconBg:"var(--accent-green-bg)", tag:TAG_REVISION,
       tagText:"plantillas .txt", action:"Abrir"}
   ];

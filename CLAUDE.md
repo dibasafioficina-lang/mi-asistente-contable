@@ -48,7 +48,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
-| 4 | Plantilla de pagos | En construcción — cargador de la plantilla madre listo; ver abajo |
+| 4 | Plantilla de pagos | En construcción — plantilla madre y generador del archivo listos; falta leer las facturas y compartir los pendientes. Ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -68,13 +68,17 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 
 ### Módulo 4 — Plantilla de pagos
 
-Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy solo está construido el cargador**, que no guarda nada.
+Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos el cargador de la plantilla madre y el generador del archivo**; los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, clave `pagosPendientesMod4`) y la factura y el monto se digitan a mano.
 
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
-- El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8.
+- El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8 sin BOM y sin salto al final.
+- **Una plantilla por empresa**, con su nombre y la fecha del día: `pago proveedores BLVD 16 de noviembre 2026.txt`.
+- Cuando se confirma que la plantilla se generó, sus pagos **se borran** de los pendientes. No hay historial.
+- El número de una **guía de entrega** vale como número de factura.
 - La cuenta y el nombre salen de la **plantilla madre**; el banco de la plantilla es referencia y no viaja.
-- La factura y el monto llegan por **fotos de facturas en grupos de WhatsApp**. No hay forma de asignarle un número a Claude: la Groups API de Meta no lee grupos existentes (solo los que ella crea, máximo 8 personas, y pide OBA). El camino es el **export del chat con adjuntos**.
+- La factura y el monto llegan por **fotos de facturas por WhatsApp**. El número +507 6847-6207 ("mi asistente contable") está conectado a **LetsBot** por la API oficial: recibe fotos en chat directo, pero **no ve grupos** (la API oficial no entra a grupos existentes; LetsBot también admite conexión por QR, que sí los vería, con riesgo de suspensión del número). El proveedor y la empresa que paga vienen **en la misma factura**, así que alcanza la foto.
+- Las fotos viven en `storage.letsbot.net`: una sesión de Claude solo las abre si corre en el entorno `mi-asistente-contable`, que permite ese host.
 - Un monto leído de una foto **nunca** entra al archivo sin que una persona lo confirme.
 - La lista de beneficiarios es compartida entre empresas y **un proveedor tiene una sola cuenta**.
 
@@ -94,6 +98,16 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 | La misma cuenta con nombres que no se parecen | la cuenta de `FELIPE MOTTA` figura también como `AVICOLAS ATHENAS` |
 
 **Una cuenta con varias personas NO es un conflicto**: `PRESTA PANAMA` cobra en una sola cuenta lo de ocho empleados y el texto dice de quién es cada pago (igual `CASA FUNERALES`, Caja de Ahorros, Banco Nacional). Por eso la clave de un beneficiario es **la línea** (cuenta + nombre), no el proveedor, y por eso el segundo control solo dispara cuando los nombres no comparten ninguna palabra significativa (`ppSeParecen`). Sin esa distinción salían 47 "conflictos" y los 5 de verdad quedaban tapados.
+
+**El generador** (`ppNuevoPago`, `ppLineaDePago`, `ppArchivoDePago`) arma el archivo a partir de los pagos pendientes. Sus guards, todos por la misma razón — acá un error es plata mal enviada:
+
+- **El beneficiario tiene que ser una línea de la plantilla madre.** No se escribe una cuenta a mano.
+- **Nada entra al archivo sin confirmar**, y un pago editado después de confirmarlo se desconfirma solo.
+- **El monto es estricto** (`ppMontoArchivo`): `15.005` o `15 aprox` no se redondean ni se arreglan, se devuelven a quien los escribió. `20,00` es 20.00 (coma decimal), igual que en `money()`.
+- **La misma factura a la misma cuenta no se carga dos veces**, tampoco desde otra empresa.
+- **«Plantilla generada» solo se habilita si lo descargado es exactamente lo que hay en pantalla**: si se edita un pago después de bajar el archivo, hay que bajarlo de nuevo. Borra lo que entró al archivo; lo no confirmado se queda.
+
+El caso que validó el flujo de punta a punta: la guía de entrega **3404** de `TRANSPORTE KALIR SMILE` a **BLVD** por **15.00**, leída de una foto. La factura dice `TRANSPORTE KALIR SMILE` y la cuenta está a nombre de `ROSY MIRANDA TRANSPORTE KALIR`: el cruce es por las palabras que comparten y vale porque en la lista de BLVD hay **una sola** línea con `KALIR`. El total manuscrito (15.00) coincide con la suma de las líneas (3.00 + 12.00) — ese control hay que conservarlo cuando la lectura sea automática. La empresa vino con el nombre corto (`BLVD`), igual que el encabezado de la plantilla.
 
 Las pruebas usan **cuentas ficticias**: las de los beneficiarios no se guardan en el repositorio.
 

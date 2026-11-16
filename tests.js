@@ -6346,6 +6346,124 @@ test("la pantalla del módulo dibuja la plantilla y escapa lo que viene del arch
   STATE.mod4.archivos = []; ppReleer();
 });
 
+grupo("Plantilla de pagos — el archivo de pago");
+
+const ppPago = (o) => Object.assign({ id: "x" + Math.random(), empresa: "BLVD", cuenta: "0447000000001",
+  nombre: "ROSY MIRANDA TRANSPORTE KALIR", factura: "3404", monto: "15.00", confirmado: true }, o || {});
+
+/* El caso que validó el flujo: la guía de entrega 3404 de Transporte Kalir a BLVD por 15.00, leída de una
+   foto y cruzada con la única línea "KALIR" de la plantilla de BLVD. */
+test("la línea de pago: cuenta, nombre + factura, monto", () =>
+  eq(ppLineaDePago(ppPago()), "0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404,15.00"));
+
+// Decidido con Diba: el monto va SIN separador de miles. Con la coma, "13,130.00" parte el campo en dos y
+// el banco lee la factura 13 y el monto 130.00.
+test("el monto va sin separador de miles", () => {
+  eq(ppMontoArchivo("13,130.00"), "13130.00");
+  eq(ppMontoArchivo("146130"), "146130.00");
+  eq(ppMontoArchivo("B/ 1,234.5"), "1234.50");
+  eq(ppLineaDePago(ppPago({ monto: "13,130.00" })).split(",").length, 3, "siguen siendo tres campos");
+});
+test('el monto con coma decimal "20,00" es 20.00, no 2000', () => eq(ppMontoArchivo("20,00"), "20.00"));
+// Un monto dudoso no se redondea ni se arregla: vuelve a quien lo escribió.
+test("un monto que no se entiende no se adivina", () => {
+  ["", "0", "-15", "15.005", "1,2345", "15 aprox", "quince", "1.234.567"].forEach(v =>
+    eq(ppMontoArchivo(v), null, JSON.stringify(v)));
+});
+test("la factura no puede llevar coma ni quedar vacía", () => {
+  eq(ppFacturaArchivo(" 3404 "), "3404");
+  eq(ppFacturaArchivo("A-1619 / 2128"), "A-1619 / 2128");
+  eq(ppFacturaArchivo("1619,2128"), null);
+  eq(ppFacturaArchivo("  "), null);
+});
+test("un pago incompleto no produce línea, y dice qué le falta", () => {
+  eq(ppLineaDePago(ppPago({ factura: "" })), null);
+  eq(ppProblemasDePago(ppPago({ factura: "" }))[0], "Falta el número de factura");
+  eq(ppProblemasDePago(ppPago({ monto: "abc" })).length, 1);
+  eq(ppProblemasDePago(ppPago()).length, 0);
+});
+/* El archivo, tal como salía del bloc de notas: CRLF entre líneas y sin salto al final (las dos líneas de
+   la muestra medían 75 caracteres contando el salto como uno). */
+test("el archivo: una línea por pago, CRLF y sin salto final", () => {
+  const txt = ppArchivoDePago([
+    ppPago({ cuenta: "0430000000001", nombre: "Kenyi Graell", factura: "13", monto: "130.00" }),
+    ppPago({ cuenta: "0472000000002", nombre: "PEDRO MORALES", factura: "146", monto: "130.00" })]);
+  eq(txt, "0430000000001,Kenyi Graell 13,130.00\r\n0472000000002,PEDRO MORALES 146,130.00");
+  eq(txt.replace(/\r\n/g, "\n").length, 75);
+});
+// Lo que no se confirmó no viaja: se queda pendiente para la próxima plantilla.
+test("al archivo solo entra lo confirmado, y solo lo de esa empresa", () => {
+  const pagos = [ppPago({ factura: "1" }), ppPago({ factura: "2", confirmado: false }),
+    ppPago({ factura: "3", empresa: "SUFECHI" }), ppPago({ factura: "4", monto: "abc" })];
+  eq(ppPagosListos(pagos, "BLVD").map(p => p.factura).join(","), "1");
+  eq(ppPagosListos(pagos, "SUFECHI").length, 1);
+});
+// Pedido de Diba: una plantilla por empresa, con su nombre — "pago proveedores BLVD 16 de noviembre 2026".
+test("el nombre del archivo lleva la empresa y la fecha del día", () => {
+  eq(ppNombreArchivo("BLVD", new Date(2026, 10, 16)), "pago proveedores BLVD 16 de noviembre 2026.txt");
+  eq(ppNombreArchivo("SON IMPORT", new Date(2027, 0, 5)), "pago proveedores SON IMPORT 5 de enero 2027.txt");
+  eq(ppNombreArchivo("COMPRA/VENTA: DIBA", new Date(2026, 10, 16)), "pago proveedores COMPRA VENTA DIBA 16 de noviembre 2026.txt");
+});
+test("con pagos confirmados en varias empresas se ofrece bajar una plantilla por cada una", () => {
+  STATE.mod4.archivos = []; ppReleer();
+  STATE.mod4.pagos = [ppPago({ factura: "1" }), ppPago({ factura: "2", empresa: "SUFECHI" }), ppPago({ factura: "3", empresa: "CALIZAS", confirmado: false })];
+  renderModulo4();
+  eq(store.pagosArea4.innerHTML.indexOf("Descargar las 2 plantillas") !== -1, true, "CALIZAS no cuenta: no tiene nada confirmado");
+  STATE.mod4.pagos = [ppPago()]; renderPagosMod4();
+  eq(store.pagosArea4.innerHTML.indexOf("ppBajarTodas"), -1, "con una sola empresa alcanza su propio botón");
+  STATE.mod4.pagos = [];
+});
+
+const ppFila = (o) => Object.assign({ cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", empresa: "BLVD" }, o || {});
+test("un pago nuevo nace sin confirmar y con el monto ya normalizado", () => {
+  const r = ppNuevoPago([], "BLVD", ppFila(), "3404", "15");
+  eq(r.pago.confirmado, false); eq(r.pago.monto, "15.00"); eq(r.pago.cuenta, "0447000000001");
+});
+// La misma factura a la misma cuenta dos veces es el mismo pago cargado dos veces: sale plata doble.
+test("la misma factura a la misma cuenta no se carga dos veces", () => {
+  const ya = [ppPago()];
+  eq(/ya está pendiente/.test(ppNuevoPago(ya, "BLVD", ppFila(), "3404", "15").error), true);
+  eq(/ya está pendiente/.test(ppNuevoPago(ya, "SUFECHI", ppFila(), "3404", "15").error), true, "tampoco desde otra empresa");
+  eq(!!ppNuevoPago(ya, "BLVD", ppFila(), "3405", "15").pago, true, "otra factura sí");
+  eq(!!ppNuevoPago(ya, "BLVD", ppFila({ cuenta: "0447000000009" }), "3404", "15").pago, true, "otra cuenta sí");
+});
+test("no se arma un pago sin beneficiario de la plantilla, ni a una línea NO USAR", () => {
+  eq(!!ppNuevoPago([], "BLVD", undefined, "1", "10").error, true);
+  eq(/NO USAR/.test(ppNuevoPago([], "BLVD", ppFila({ noUsar: true }), "1", "10").error), true);
+  eq(!!ppNuevoPago([], "", ppFila(), "1", "10").error, true);
+});
+test("un pago a una cuenta en conflicto se puede cargar, pero queda marcado", () =>
+  eq(ppNuevoPago([], "BLVD", ppFila({ enConflicto: true }), "1", "10").pago.cuentaPorConfirmar, true));
+// La lista de beneficiarios es compartida: los de la empresa primero, y los de las demás solo si se pide.
+test("los beneficiarios: los de la empresa, y los de todas si se pide; nunca los NO USAR", () => {
+  const P = ppParsearPlantilla([ppArch("P.txt", [
+    "BLVD",    "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR", "0342000000014,PAGO DE PROVEEDOR,ZAROSA BG NO UTILIZAR ESTA CUENTA",
+    "SUFECHI", "0447000000001,PAGO DE PROVEEDOR,ROSY MIRANDA TRANSPORTE KALIR", "0752000000002,PAGO DE PROVEEDOR OVIDIO NUNEZ,BG"])]);
+  eq(ppBeneficiarios(P, "BLVD", false).map(f => f.nombre).join("|"), "ROSY MIRANDA TRANSPORTE KALIR");
+  eq(ppBeneficiarios(P, "BLVD", true).map(f => f.nombre).join("|"), "ROSY MIRANDA TRANSPORTE KALIR|OVIDIO NUNEZ");
+});
+/* "Plantilla generada" borra lo que entró al archivo y nada más. No hay historial: lo no confirmado y lo
+   de las otras empresas tiene que seguir ahí. */
+test("marcar la plantilla como generada borra solo lo que entró al archivo", () => {
+  STATE.mod4.pagos = [ppPago({ factura: "1" }), ppPago({ factura: "2", confirmado: false }), ppPago({ factura: "3", empresa: "SUFECHI" })];
+  eq(ppMarcarGenerada("BLVD"), 1);
+  eq(STATE.mod4.pagos.map(p => p.empresa + ":" + p.factura).join(","), "BLVD:2,SUFECHI:3");
+  STATE.mod4.pagos = [];
+});
+test("la pantalla de pagos dibuja el archivo y no habilita «generada» sin haberlo descargado", () => {
+  STATE.mod4.archivos = [ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])];
+  STATE.mod4.pagos = [ppPago()]; STATE.mod4.descargas = {};
+  ppReleer(); renderModulo4();
+  let h = store.pagosArea4.innerHTML;
+  eq(h.indexOf("0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404,15.00") !== -1, true, "la vista previa del archivo");
+  eq(/pp-generada"[^>]*disabled/.test(h), true, "sin descarga, no se puede marcar como generada");
+  STATE.mod4.descargas.BLVD = ppArchivoDePago(STATE.mod4.pagos); renderPagosMod4();
+  eq(/pp-generada"[^>]*disabled/.test(store.pagosArea4.innerHTML), false, "con la descarga al día, sí");
+  STATE.mod4.pagos[0].monto = "16.00"; renderPagosMod4();
+  eq(/pp-generada"[^>]*disabled/.test(store.pagosArea4.innerHTML), true, "si el pago cambió después de bajar el archivo, otra vez no");
+  STATE.mod4.archivos = []; STATE.mod4.pagos = []; STATE.mod4.descargas = {}; ppReleer();
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
