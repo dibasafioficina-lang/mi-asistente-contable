@@ -255,6 +255,29 @@
   .pp-error{font-size:13px;font-weight:700;color:var(--alert);background:var(--alert-bg);border-radius:10px;padding:9px 12px;margin-bottom:14px}
   .pp-empresa{margin-top:14px}
   .pp-todas{margin:4px 0 0}
+  .pp-lector{border:1px dashed var(--dz-empty-line);border-radius:16px;padding:14px 16px;margin:6px 0 16px}
+  .pp-lector-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:14px;color:var(--heading)}
+  .pp-lector-btn{cursor:pointer}
+  .pp-lector-btn input{display:none}
+  .pp-lector button[disabled]{opacity:.45;cursor:default}
+  .pp-foto{display:flex;gap:14px;align-items:flex-start;border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  .pp-foto-img{flex:0 0 170px;display:block;cursor:zoom-in}
+  .pp-foto-img.grande{flex-basis:100%;cursor:zoom-out}
+  .pp-foto-img.grande img{width:100%;max-height:none}
+  .pp-foto:has(.pp-foto-img.grande){flex-wrap:wrap}
+  .pp-ver-foto summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--brand)}
+  .pp-ver-foto img{display:block;max-width:520px;width:100%;margin-top:6px;border-radius:10px;border:1px solid var(--line)}
+  .pp-foto-img img{width:170px;max-height:230px;object-fit:contain;border-radius:10px;border:1px solid var(--line);background:#fff}
+  .pp-foto-sin{font-size:12px;color:var(--slate);word-break:break-all}
+  .pp-foto-cuerpo{flex:1;min-width:0}
+  .pp-foto-estado{font-size:13.5px;color:var(--slate);font-weight:700;padding-top:6px}
+  .pp-foto-leido{font-size:13.5px;color:var(--heading);margin-bottom:6px}
+  .pp-foto-avisos{margin:0 0 10px 18px;font-size:12.5px;color:#9A6E1E}
+  .pp-foto-avisos li{margin:2px 0}
+  .pp-foto-form select.cg-inp{width:170px}
+  .pp-foto-form .pp-f-benef select.cg-inp{width:100%}
+  .pp-de-foto{display:block;font-size:12px;color:var(--slate);margin-top:2px}
+  @media (max-width:720px){ .pp-foto{flex-direction:column} .pp-foto-img{flex-basis:auto} }
   .pp-pagos .cg-inp{width:120px;text-align:left;font-weight:700}
   .pp-cta-sub{display:block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--slate)}
   .pp-problema{display:block;font-size:12px;font-weight:700;color:var(--alert);margin-top:2px}
@@ -535,7 +558,7 @@ var STATE = {
     retenciones:null
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
-  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{}, pagos:null, descargas:{}, errorForm:"",
+  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{}, pagos:null, descargas:{}, errorForm:"", fotos:[], minis:{}, leyendo:false,
          form:{ empresa:"", benef:"", factura:"", monto:"", todas:false } },
   parsed:{},
   // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
@@ -569,7 +592,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.3";
+var APP_VERSION = "2026.11.4";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8141,6 +8164,8 @@ function ppBloqueEmpresaHtml(empresa){
       var pr = ppProblemasDePago(p);
       return '<tr><td>'+esc(p.nombre)+'<span class="pp-cta-sub">'+esc(p.cuenta)+'</span>' +
           (p.cuentaPorConfirmar?'<span class="pp-marca pp-conf">cuenta por confirmar en la plantilla</span>':'') +
+          (p.origen==="foto"?'<span class="pp-de-foto">📷 Leído de una foto'+(p.enLaFoto?' de «'+esc(p.enLaFoto)+'»':'')+
+            '</span>'+(m.minis[p.id]?'<details class="pp-ver-foto"><summary>ver la foto</summary><img src="'+m.minis[p.id]+'" alt="Foto de la factura"></details>':''):'') +
           (pr.length?'<span class="pp-problema">'+esc(pr.join(" · "))+'</span>':'')+'</td>' +
         '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="factura" value="'+esc(p.factura)+'"></td>' +
         '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="monto" inputmode="decimal" value="'+esc(p.monto)+'"></td>' +
@@ -8159,13 +8184,14 @@ function ppBloqueEmpresaHtml(empresa){
 function renderPagosMod4(){
   var area = document.getElementById("pagosArea4"); if(!area) return;
   var m = STATE.mod4, P = m.plantilla, pagos = ppPagos();
+  ppIniciarLector();
   if(!P && !pagos.length){ area.innerHTML = ""; return; }
   var empresas = [];
   pagos.forEach(function(p){ if(empresas.indexOf(p.empresa)===-1) empresas.push(p.empresa); });
   var conArchivo = empresas.filter(function(e){ return ppPagosListos(pagos, e).length>0; });
   area.innerHTML = '<div class="stage"><h3><span class="tag">PAGOS</span> Pendientes de elevar</h3>' +
-    '<p class="desc">Cada pago toma la cuenta y el nombre de la plantilla madre; vos ponés la factura y el monto. Al archivo solo entra lo que confirmaste, y un pago editado hay que volver a confirmarlo.</p>' +
-    ppFormHtml(P) +
+    '<p class="desc">Cada pago toma la cuenta y el nombre de la plantilla madre; la factura y el monto los ponés vos o salen de la foto de la factura. Al archivo solo entra lo que confirmaste, y un pago editado hay que volver a confirmarlo.</p>' +
+    ppFormHtml(P) + ppLectorHtml() +
     // Con pagos confirmados en varias empresas, un solo clic baja una plantilla por cada una.
     (conArchivo.length>1 ? '<div class="pp-acciones pp-todas"><button class="btn-export" id="ppBajarTodas">Descargar las '+conArchivo.length+' plantillas · una por empresa</button></div>' : '') +
     (empresas.length ? empresas.map(ppBloqueEmpresaHtml).join("") : '<div class="empty-skip">No hay pagos pendientes.</div>') +
@@ -8173,6 +8199,7 @@ function renderPagosMod4(){
     '</div>';
   function pago(id){ return pagos.filter(function(p){ return p.id===id; })[0]; }
   function redibujar(){ ppGuardarPagos(); renderPagosMod4(); }
+  ppBindLector(area);
   var fo = m.form;
   [["ppfBenef","benef"],["ppfFactura","factura"],["ppfMonto","monto"]].forEach(function(par){
     var el = document.getElementById(par[0]);
@@ -8240,6 +8267,315 @@ function ppMarcarGenerada(empresa){
   listos.forEach(function(p){ pagos.splice(pagos.indexOf(p), 1); });
   delete m.descargas[empresa];
   return listos.length;
+}
+
+/* ---- Lectura de facturas ----
+   La factura llega como foto. Dentro de claude.ai la página se la puede dar a leer a Claude (permiso
+   `sample` con imágenes); lo que vuelve es un JSON con lo que se lee, y ESO es un dato sin confianza:
+   una foto torcida o un total manuscrito se leen mal. Por eso la lectura nunca arma un pago sola —
+   propone, y cada cosa que no puede probar la deja en blanco y la dice:
+
+   - la empresa sale del destinatario solo si nombra UNA de las empresas de la plantilla;
+   - el beneficiario sale del membrete solo si hay UNA línea de esa empresa que se le parezca
+     ("TRANSPORTE KALIR SMILE" ↔ "ROSY MIRANDA TRANSPORTE KALIR": la cuenta rara vez está a nombre
+     de lo que dice el membrete);
+   - el monto se propone solo si el total cuadra con el detalle de la propia factura.
+
+   Lo propuesto entra a los pendientes SIN confirmar, como cualquier pago cargado a mano. */
+function ppPromptFactura(empresas){
+  return [
+    "La imagen es la foto de una factura, una guía de entrega o un recibo de Panamá. Puede venir girada, torcida o con sombras.",
+    "Transcribí SOLO lo que se lee. Si un dato no se distingue con seguridad, poné null: no lo deduzcas, no lo completes y no lo corrijas.",
+    "",
+    "Respondé únicamente con un objeto JSON con esta forma:",
+    '{"proveedor": string|null, "ruc": string|null, "tipo": "factura"|"guia de entrega"|"recibo"|"otro"|null,',
+    ' "numero": string|null, "fecha": "AAAA-MM-DD"|null, "cliente": string|null,',
+    ' "lineas": [{"descripcion": string, "total": number|null}],',
+    ' "subtotal": number|null, "impuesto": number|null, "total": number|null,',
+    ' "manuscrito": boolean, "dudas": [string]}',
+    "",
+    "- proveedor: quien EMITE el documento (el membrete), tal como está impreso.",
+    "- numero: el número del documento, solo el número, tal como está impreso.",
+    "- cliente: a quién va dirigido (cliente, destinatario, señores), tal como está escrito.",
+    "- lineas: una por renglón del detalle, con su importe total. Sin renglones legibles, [].",
+    "- impuesto: el ITBMS si figura aparte. total: el total a pagar.",
+    "- Los importes van como número con punto decimal y sin separador de miles (1234.50).",
+    "- manuscrito: true si el total está escrito a mano.",
+    "- dudas: en frases cortas, lo que no se leyó bien o admite dos lecturas. Si un importe o el número pudo ser otro, decilo acá.",
+    "",
+    "Para reconocer la letra del campo cliente, estas son las empresas que suelen figurar: " + (empresas||[]).join(", ") + ".",
+    "Si lo escrito no coincide claramente con ninguna, transcribilo tal cual."
+  ].join("\n");
+}
+// Un importe que devolvió el modelo → número con dos decimales, o null. No se confía en el tipo.
+function ppNumero(v){
+  if(typeof v==="number") return (isFinite(v) && v>=0) ? Math.round(v*100)/100 : null;
+  if(typeof v==="string"){ var m = ppMontoArchivo(v); return m===null ? null : parseFloat(m); }
+  return null;
+}
+// Lo que devolvió el modelo → una lectura con forma conocida. Cualquier campo raro queda vacío.
+function ppNormalizarLectura(o){
+  o = (o && typeof o==="object" && !Array.isArray(o)) ? o : {};
+  function txt(v){ return (typeof v==="string" || typeof v==="number") ? ppLimpio(v) : ""; }
+  return {
+    proveedor: txt(o.proveedor), ruc: txt(o.ruc), tipo: txt(o.tipo), fecha: txt(o.fecha), cliente: txt(o.cliente),
+    numero: ppLimpio(txt(o.numero).replace(/^(?:N[°ºo]?\.?|No\.?|#)\s*/i,"").replace(/,/g," ")),
+    lineas: (Array.isArray(o.lineas) ? o.lineas : []).filter(function(l){ return l && typeof l==="object"; })
+      .map(function(l){ return { descripcion: txt(l.descripcion), total: ppNumero(l.total) }; }),
+    subtotal: ppNumero(o.subtotal), impuesto: ppNumero(o.impuesto), total: ppNumero(o.total),
+    manuscrito: o.manuscrito===true,
+    dudas: (Array.isArray(o.dudas) ? o.dudas : []).map(txt).filter(Boolean).slice(0, 8)
+  };
+}
+/* ¿Qué empresa de la plantilla nombra este texto? → { empresa, posibles }.
+   "BLVD Quinta Ave" nombra a BLVD. Si nombra a dos y una contiene a la otra gana la más larga
+   ("SUFECHI BORDADOS" no es SUFECHI); si nombra a dos sin relación, no se elige. */
+function ppEmpresaDeTexto(texto, empresas){
+  function forma(s){ return " " + ppMayus(s).replace(/[^A-Z0-9 ]/g," ").replace(/([A-Z]) (?=\d)/g,"$1").replace(/\s+/g," ").trim() + " "; }
+  var t = forma(texto), hay = (empresas||[]).filter(function(e){ return t.indexOf(forma(e))!==-1; });
+  var posibles = hay.filter(function(e){ return !hay.some(function(o){ return o!==e && forma(o).indexOf(forma(e))!==-1; }); });
+  return { empresa: posibles.length===1 ? posibles[0] : null, posibles: posibles };
+}
+function ppClaveBenef(f){ return f.cuenta+"|"+ppClaveNombre(f.nombre); }
+// Las líneas que se parecen al membrete: las que comparten alguna palabra significativa, de más a menos.
+function ppCandidatosBenef(proveedor, filas){
+  var pal = ppPalabras(proveedor);
+  return (filas||[]).map(function(f){
+    var pf = ppPalabras(f.nombre);
+    return { fila:f, comunes: pal.filter(function(p){ return pf.indexOf(p)!==-1; }).length };
+  }).filter(function(c){ return c.comunes>0; }).sort(function(a,b){ return b.comunes-a.comunes; });
+}
+// De los candidatos se elige uno solo si no hay discusión: es el único, o comparte al menos dos palabras
+// y le gana al segundo. Con una sola palabra en común y varios candidatos, elegir sería adivinar.
+function ppElegirCandidato(cands){
+  if(!cands.length) return null;
+  if(cands.length===1) return cands[0].fila;
+  return (cands[0].comunes>=2 && cands[0].comunes>cands[1].comunes) ? cands[0].fila : null;
+}
+/* El monto que la propia factura respalda → { monto, aviso }. Se propone el total solo si cuadra con el
+   detalle: la suma de los renglones (o el subtotal), más el impuesto si figura aparte. Si no cuadra, alguno
+   de los números se leyó mal y no hay forma de saber cuál: queda en blanco. */
+function ppTotalDeLectura(L){
+  function igual(a, b){ return Math.abs(a-b) < 0.005; }
+  if(L.total===null || !(L.total>0)) return { monto:"", aviso:"No se leyó el total: escribí el monto mirando la foto." };
+  var conTotal = L.lineas.filter(function(l){ return l.total!==null; });
+  var suma = (L.lineas.length && conTotal.length===L.lineas.length)
+    ? Math.round(conTotal.reduce(function(a,l){ return a+l.total; }, 0)*100)/100 : null;
+  var base = L.subtotal!==null ? L.subtotal : suma;
+  if(base===null) return { monto:L.total.toFixed(2), aviso:"El total ("+fmt(L.total)+") no se pudo comprobar contra el detalle de la factura: comparalo con la foto." };
+  if(suma!==null && L.subtotal!==null && !igual(suma, L.subtotal))
+    return { monto:"", aviso:"Los renglones suman "+fmt(suma)+" y el subtotal leído es "+fmt(L.subtotal)+": algún número se leyó mal. Escribí el monto mirando la foto." };
+  var esperado = Math.round((base + (L.impuesto||0))*100)/100;
+  if(igual(esperado, L.total)) return { monto:L.total.toFixed(2), aviso:"" };
+  return { monto:"", aviso:"El detalle da "+fmt(esperado)+(L.impuesto?" con el impuesto":"")+" y el total leído es "+fmt(L.total)+": no coinciden. Escribí el monto mirando la foto." };
+}
+/* Cruza una lectura con la plantilla madre → la propuesta de pago, con lo que quedó sin resolver.
+   `empresaForzada` es la que eligió una persona cuando la lectura no alcanzó. */
+function ppCruzarFactura(L, P, pagos, empresaForzada){
+  var r = { empresa:"", fila:null, candidatos:[], factura:L.numero||"", monto:"", avisos:[], deOtraLista:false };
+  var e = ppEmpresaDeTexto(L.cliente, P.empresas);
+  if(empresaForzada) r.empresa = empresaForzada;
+  else if(e.empresa) r.empresa = e.empresa;
+  else if(e.posibles.length>1) r.avisos.push("El destinatario («"+L.cliente+"») nombra a "+e.posibles.join(" y a ")+": elegí cuál paga.");
+  else r.avisos.push(L.cliente ? "El destinatario («"+L.cliente+"») no nombra a ninguna empresa de la plantilla: elegí cuál paga."
+                               : "No se leyó a quién va dirigida la factura: elegí la empresa que paga.");
+  if(r.empresa){
+    var propios = ppCandidatosBenef(L.proveedor, ppBeneficiarios(P, r.empresa, false));
+    r.candidatos = propios; r.fila = ppElegirCandidato(propios);
+    if(!propios.length){
+      // La lista de beneficiarios es compartida: si no está en la de esta empresa, puede estar en otra.
+      var ajenos = ppCandidatosBenef(L.proveedor, ppBeneficiarios(P, r.empresa, true));
+      r.candidatos = ajenos; r.fila = ppElegirCandidato(ajenos); r.deOtraLista = !!r.fila;
+      if(r.fila) r.avisos.push("«"+L.proveedor+"» no está en la lista de "+r.empresa+": se tomó la línea de "+r.fila.empresa+". Confirmá que es el mismo beneficiario.");
+    }
+    if(!r.fila) r.avisos.push(!L.proveedor ? "No se leyó quién emite la factura: elegí el beneficiario."
+      : r.candidatos.length ? "Hay "+r.candidatos.length+" líneas que se parecen a «"+L.proveedor+"»: elegí el beneficiario."
+      : "Ninguna línea de la plantilla se parece a «"+L.proveedor+"»: elegí el beneficiario, o agregalo a la plantilla madre.");
+  }
+  if(!r.factura) r.avisos.push("No se leyó el número del documento: escribilo mirando la foto.");
+  var t = ppTotalDeLectura(L);
+  r.monto = t.monto; if(t.aviso) r.avisos.push(t.aviso);
+  if(L.manuscrito && r.monto) r.avisos.push("El total está escrito a mano: comparalo con la foto antes de confirmar.");
+  L.dudas.forEach(function(d){ r.avisos.push("Duda de lectura: "+d); });
+  if(r.fila && r.factura){
+    var dup = ppPagoDuplicado(pagos, { id:null, cuenta:r.fila.cuenta, factura:r.factura });
+    if(dup) r.avisos.push("La factura "+r.factura+" para esta cuenta ya está pendiente en "+dup.empresa+" por B/ "+fmt(dup.monto)+".");
+  }
+  return r;
+}
+
+/* ---- El lector en la pantalla ---- */
+// ¿Esta vista puede darle fotos a leer a Claude? Se averigua una vez; mientras tanto, y si no, la
+// sección no se ofrece (fuera de claude.ai no hay a quién pedírselo).
+function ppIniciarLector(){
+  var m = STATE.mod4;
+  if(m.lector!==undefined) return;
+  m.lector = null;
+  var c = typeof window!=="undefined" ? window.claude : null;
+  if(!c || typeof c.use!=="function"){ m.lector = false; return; }
+  c.use("sample").then(function(sample){
+    if(!sample) return null;
+    return sample.limits().then(function(lim){ return (lim && lim.images) ? { sample:sample, tipos:lim.images.mediaTypes||[] } : null; });
+  }).then(function(l){ m.lector = l || false; renderPagosMod4(); }, function(){ m.lector = false; renderPagosMod4(); });
+}
+// Miniatura para mostrar junto al pago. Va como data: y achicada: es lo único de la foto que se redibuja.
+function ppMiniatura(file){
+  return new Promise(function(resolve){
+    try{
+      var fr = new FileReader();
+      fr.onerror = function(){ resolve(""); };
+      fr.onload = function(){
+        var img = new Image();
+        img.onerror = function(){ resolve(""); };
+        img.onload = function(){
+          try{
+            var k = Math.min(1, 1100/Math.max(img.width, img.height)), cv = document.createElement("canvas");
+            cv.width = Math.round(img.width*k); cv.height = Math.round(img.height*k);
+            cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+            resolve(cv.toDataURL("image/jpeg", 0.82));
+          }catch(e){ resolve(""); }
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    }catch(e){ resolve(""); }
+  });
+}
+var PP_ERROR_LECTOR = {
+  not_granted:"No se autorizó a esta página a usar Claude: la lectura de fotos queda apagada.",
+  sampling_disabled:"Claude no está disponible para esta cuenta.",
+  images_unavailable:"Esta vista no puede enviar imágenes a Claude.",
+  image_rejected:"Claude no aceptó la imagen (tipo o tamaño). Probá con otra foto.",
+  rate_limited:"Se alcanzó el límite de uso de Claude. Probá de nuevo más tarde.",
+  session_expired:"La sesión venció: volvé a iniciar sesión en claude.ai.",
+  refused:"Claude no quiso leer esta imagen.",
+  invalid_json:"La lectura volvió con un formato que no se entiende. Probá de nuevo.",
+  cancelled:"Lectura cancelada."
+};
+function ppAgregarFotos(fileList){
+  var m = STATE.mod4;
+  Array.prototype.slice.call(fileList||[]).forEach(function(file){
+    var it = { id:"f"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), nombre:file.name, file:file, mini:"",
+               estado:"en cola", lectura:null, cruce:null, form:null, error:"" };
+    m.fotos.push(it);
+    ppMiniatura(file).then(function(u){ it.mini = u; renderPagosMod4(); });
+  });
+  renderPagosMod4();
+}
+// Lee UNA foto → promesa. Lo que vuelve del modelo pasa por ppNormalizarLectura antes de usarse.
+function ppLeerFoto(it){
+  var m = STATE.mod4, P = m.plantilla;
+  it.estado = "leyendo"; it.error = ""; renderPagosMod4();
+  return m.lector.sample.json(ppPromptFactura(P ? P.empresas : []), { images:[it.file] }).then(function(o){
+    it.lectura = ppNormalizarLectura(o);
+    ppRecruzar(it, "");
+    it.estado = "leída";
+  }, function(err){
+    it.estado = "error";
+    it.error = PP_ERROR_LECTOR[err && err.code] || "No se pudo leer la foto. Probá de nuevo.";
+    if(err && (err.code==="not_granted" || err.code==="sampling_disabled" || err.code==="images_unavailable")) m.lector = false;
+  }).then(renderPagosMod4);
+}
+// De a una y solo por un clic: cada lectura gasta uso de Claude de quien la pide.
+function ppLeerEnCola(){
+  var m = STATE.mod4;
+  if(m.leyendo) return;
+  m.leyendo = true;
+  (function siguiente(){
+    var it = m.lector ? m.fotos.filter(function(f){ return f.estado==="en cola"; })[0] : null;
+    if(!it){ m.leyendo = false; renderPagosMod4(); return; }
+    ppLeerFoto(it).then(siguiente);
+  })();
+}
+function ppRecruzar(it, empresaForzada){
+  var m = STATE.mod4;
+  it.cruce = ppCruzarFactura(it.lectura, m.plantilla, ppPagos(), empresaForzada);
+  it.form = { empresa:it.cruce.empresa, benef:it.cruce.fila ? ppClaveBenef(it.cruce.fila) : "", factura:it.cruce.factura, monto:it.cruce.monto };
+}
+function ppFotoHtml(it){
+  var P = STATE.mod4.plantilla, L = it.lectura, c = it.cruce, fo = it.form;
+  var cuerpo;
+  if(it.estado==="en cola") cuerpo = '<div class="pp-foto-estado">En cola para leer.</div>';
+  else if(it.estado==="leyendo") cuerpo = '<div class="pp-foto-estado">Leyendo… puede tardar un minuto.</div>';
+  else if(it.estado==="error") cuerpo = '<div class="pp-error">'+esc(it.error)+'</div><button class="btn-plegar pp-foto-reintentar" data-id="'+it.id+'">Volver a intentar</button>';
+  else{
+    var vistos = {}, opciones = [];
+    c.candidatos.forEach(function(k){ vistos[ppClaveBenef(k.fila)] = 1; opciones.push([k.fila, "★ "]); });
+    if(fo.empresa) ppBeneficiarios(P, fo.empresa, false).forEach(function(f){ if(!vistos[ppClaveBenef(f)]){ vistos[ppClaveBenef(f)] = 1; opciones.push([f, ""]); } });
+    cuerpo = '<div class="pp-foto-leido">En la foto: <b>'+esc(L.proveedor||"(emisor sin leer)")+'</b>' +
+        (L.tipo||L.numero ? ' · '+esc(L.tipo||"documento")+' N° '+esc(L.numero||"?") : '') +
+        (L.cliente ? ' · para «'+esc(L.cliente)+'»' : '') + (L.total!==null ? ' · total '+fmt(L.total) : '') + '</div>' +
+      (c.avisos.length ? '<ul class="pp-foto-avisos">'+c.avisos.map(function(a){ return '<li>'+esc(a)+'</li>'; }).join("")+'</ul>' : '') +
+      '<div class="pp-form pp-foto-form">' +
+        '<label>Empresa que paga<select class="cg-inp pp-foto-emp" data-id="'+it.id+'"><option value="">Elegir…</option>' +
+          P.empresas.map(function(e){ return '<option value="'+esc(e)+'"'+(fo.empresa===e?' selected':'')+'>'+esc(e)+'</option>'; }).join("")+'</select></label>' +
+        '<label class="pp-f-benef">Beneficiario<select class="cg-inp pp-foto-inp" data-id="'+it.id+'" data-f="benef"'+(fo.empresa?'':' disabled')+'><option value="">Elegir…</option>' +
+          opciones.map(function(o){ var k = ppClaveBenef(o[0]); return '<option value="'+esc(k)+'"'+(fo.benef===k?' selected':'')+'>'+o[1]+esc(ppEtiquetaBenef(o[0]))+'</option>'; }).join("")+'</select></label>' +
+        '<label>Factura<input class="cg-inp pp-foto-inp" data-id="'+it.id+'" data-f="factura" autocomplete="off" value="'+esc(fo.factura)+'"></label>' +
+        '<label>Monto<input class="cg-inp pp-foto-inp" data-id="'+it.id+'" data-f="monto" inputmode="decimal" autocomplete="off" value="'+esc(fo.monto)+'" placeholder="0.00"></label>' +
+        '<button class="btn-export pp-foto-agregar" data-id="'+it.id+'">＋ A pendientes</button>' +
+      '</div>' + (it.error?'<div class="pp-error">'+esc(it.error)+'</div>':'');
+  }
+  return '<div class="pp-foto">' +
+    // La foto se agranda en el lugar: dentro de claude.ai no se puede abrir en otra pestaña.
+    (it.mini ? '<div class="pp-foto-img'+(it.grande?' grande':'')+'" data-id="'+it.id+'" title="Clic para agrandar o achicar"><img src="'+it.mini+'" alt="Foto de la factura"></div>' : '<div class="pp-foto-img pp-foto-sin">'+esc(it.nombre)+'</div>') +
+    '<div class="pp-foto-cuerpo">'+cuerpo+'</div>' +
+    '<button class="sidet-del2 pp-foto-quitar" data-id="'+it.id+'" title="Descartar esta foto">✕</button></div>';
+}
+function ppLectorHtml(){
+  var m = STATE.mod4;
+  if(!m.plantilla) return "";
+  if(m.lector===false) return (typeof window!=="undefined" && window.claude) ? "" :
+    '<p class="cg-note pp-nota pp-lector-no">La lectura de facturas desde fotos funciona al abrir la app dentro de claude.ai.</p>';
+  if(!m.lector) return "";
+  var enCola = m.fotos.filter(function(f){ return f.estado==="en cola"; }).length;
+  return '<div class="pp-lector"><div class="pp-lector-head"><b>Leer facturas de fotos</b>' +
+      '<label class="btn-export pp-lector-btn">Elegir fotos<input type="file" id="ppFotos" multiple accept="'+esc(m.lector.tipos.join(","))+'"></label>' +
+      (enCola ? '<button class="btn-export" id="ppLeer"'+(m.leyendo?' disabled':'')+'>'+(m.leyendo?'Leyendo…':'Leer '+(enCola===1?'la foto':'las '+enCola+' fotos'))+'</button>' : '') +
+      '<span class="pp-acc-nota">Claude propone el pago; vos lo revisás contra la foto y lo confirmás.</span></div>' +
+    m.fotos.map(ppFotoHtml).join("") + '</div>';
+}
+function ppBindLector(area){
+  var m = STATE.mod4, P = m.plantilla;
+  function foto(id){ return m.fotos.filter(function(f){ return f.id===id; })[0]; }
+  var inp = document.getElementById("ppFotos");
+  if(inp) inp.addEventListener("change", function(e){ ppAgregarFotos(e.target.files); });
+  var leer = document.getElementById("ppLeer"); if(leer) leer.onclick = ppLeerEnCola;
+  area.querySelectorAll(".pp-foto-img[data-id]").forEach(function(d){
+    d.onclick = function(){ var it = foto(d.getAttribute("data-id")); if(it){ it.grande = !it.grande; d.classList.toggle("grande"); } };
+  });
+  area.querySelectorAll(".pp-foto-quitar").forEach(function(b){
+    b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(it){ m.fotos.splice(m.fotos.indexOf(it), 1); renderPagosMod4(); } };
+  });
+  area.querySelectorAll(".pp-foto-reintentar").forEach(function(b){
+    b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(it){ it.estado = "en cola"; ppLeerEnCola(); } };
+  });
+  // Cambiar la empresa vuelve a buscar el beneficiario: los candidatos son los de ESA empresa.
+  area.querySelectorAll(".pp-foto-emp").forEach(function(s){
+    s.addEventListener("change", function(){
+      var it = foto(s.getAttribute("data-id")); if(!it) return;
+      var fac = it.form.factura, mon = it.form.monto;
+      ppRecruzar(it, s.value); it.form.empresa = s.value; it.form.factura = fac; it.form.monto = mon; it.error = "";
+      renderPagosMod4();
+    });
+  });
+  area.querySelectorAll(".pp-foto-inp").forEach(function(el){
+    el.addEventListener(el.tagName==="SELECT" ? "change" : "input", function(){ var it = foto(el.getAttribute("data-id")); if(it) it.form[el.getAttribute("data-f")] = el.value; });
+  });
+  area.querySelectorAll(".pp-foto-agregar").forEach(function(b){
+    b.onclick = function(){
+      var it = foto(b.getAttribute("data-id")); if(!it) return;
+      var fila = ppBeneficiarios(P, it.form.empresa, true).filter(function(f){ return ppClaveBenef(f)===it.form.benef; })[0];
+      var r = ppNuevoPago(ppPagos(), it.form.empresa, fila, it.form.factura, it.form.monto);
+      if(r.error){ it.error = r.error; renderPagosMod4(); return; }
+      // Nace sin confirmar, y recuerda qué decía la foto para compararlo al confirmar.
+      r.pago.origen = "foto"; r.pago.enLaFoto = it.lectura.proveedor;
+      ppPagos().push(r.pago);
+      if(it.mini) m.minis[r.pago.id] = it.mini;
+      m.fotos.splice(m.fotos.indexOf(it), 1);
+      ppGuardarPagos(); renderPagosMod4();
+    };
+  });
 }
 
 function render(){

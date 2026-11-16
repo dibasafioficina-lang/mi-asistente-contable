@@ -57,7 +57,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
-| 4 | Plantilla de pagos | En construcción — plantilla madre y generador del archivo listos; falta leer las facturas y compartir los pendientes. Ver abajo |
+| 4 | Plantilla de pagos | En construcción — plantilla madre, generador del archivo y lectura de facturas desde fotos listos; falta que las fotos lleguen solas desde WhatsApp y compartir los pendientes. Ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -77,7 +77,7 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 
 ### Módulo 4 — Plantilla de pagos
 
-Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos el cargador de la plantilla madre y el generador del archivo**; los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, clave `pagosPendientesMod4`) y la factura y el monto se digitan a mano.
+Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos el cargador de la plantilla madre y el generador del archivo**; los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, clave `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
 
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
@@ -115,6 +115,23 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 - **El monto es estricto** (`ppMontoArchivo`): `15.005` o `15 aprox` no se redondean ni se arreglan, se devuelven a quien los escribió. `20,00` es 20.00 (coma decimal), igual que en `money()`.
 - **La misma factura a la misma cuenta no se carga dos veces**, tampoco desde otra empresa.
 - **«Plantilla generada» solo se habilita si lo descargado es exactamente lo que hay en pantalla**: si se edita un pago después de bajar el archivo, hay que bajarlo de nuevo. Borra lo que entró al archivo; lo no confirmado se queda.
+
+**La lectura de facturas** (`ppLeerFoto`, `ppCruzarFactura`) funciona **solo dentro de claude.ai**: la página le da la foto a Claude con el permiso `sample` (declarar `capabilities: {downloads: true, sample: {images: true}}` al republicar; como página suelta la sección no aparece). Dos límites del visor que definen el diseño:
+
+- **La página no puede traer una imagen de una URL** (su red está bloqueada): la foto la elige o la arrastra quien usa la app. Por eso las fotos de LetsBot **no entran solas** todavía — falta un puente (una sesión programada de Claude que lea LetsBot, o un backend).
+- La plataforma achica cada imagen a ~1.2 megapíxeles antes de mandarla: letra chica o un sello encima pueden no leerse.
+
+Lo que devuelve el modelo es **un dato sin confianza** y pasa por `ppNormalizarLectura()`. El cruce propone, nunca arma el pago solo, y lo que no puede probar lo deja en blanco y lo dice:
+
+| Dato | Se propone solo si… |
+|---|---|
+| Empresa | el destinatario nombra **una** empresa de la plantilla (`SUFECHI BORDADOS` le gana a `SUFECHI`; con dos sin relación no se elige) |
+| Beneficiario | hay **una** línea de esa empresa que comparte palabras significativas con el membrete; con varias, gana una solo si comparte **dos o más** y le saca ventaja a la segunda (`PRESTA PANAMA` tiene una línea por persona: el membrete no dice de quién es) |
+| Monto | el total **cuadra con el detalle** de la propia factura: renglones (o subtotal) más el ITBMS si figura aparte. Si no cuadra, alguno se leyó mal y no hay forma de saber cuál |
+
+- Si el beneficiario no está en la lista de la empresa se busca en las demás (la lista es compartida) y se avisa.
+- Las dudas que declara el modelo, el total manuscrito y la factura repetida salen como avisos junto a la foto.
+- Lo propuesto entra a los pendientes **sin confirmar**, marcado como leído de foto y con lo que decía el membrete, para compararlo con la línea de la plantilla al confirmar.
 
 El caso que validó el flujo de punta a punta: la guía de entrega **3404** de `TRANSPORTE KALIR SMILE` a **BLVD** por **15.00**, leída de una foto. La factura dice `TRANSPORTE KALIR SMILE` y la cuenta está a nombre de `ROSY MIRANDA TRANSPORTE KALIR`: el cruce es por las palabras que comparten y vale porque en la lista de BLVD hay **una sola** línea con `KALIR`. El total manuscrito (15.00) coincide con la suma de las líneas (3.00 + 12.00) — ese control hay que conservarlo cuando la lectura sea automática. La empresa vino con el nombre corto (`BLVD`), igual que el encabezado de la plantilla.
 

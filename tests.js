@@ -6471,6 +6471,145 @@ test("la pantalla de pagos dibuja el archivo y no habilita «generada» sin habe
   STATE.mod4.archivos = []; STATE.mod4.pagos = []; STATE.mod4.descargas = {}; ppReleer();
 });
 
+grupo("Plantilla de pagos — lectura de facturas");
+
+const ppPlantillaBLVD = () => ppParsearPlantilla([ppArch("P.txt", [
+  "BLVD",
+    "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR",
+    "0447000000031,PAGO DE PROVEEDOR EDWIN ESPINOSA,BG",
+    "3320000000032,PAGO DE PROVEEDOR MARIA MIRANDA,",
+    "0345000000033,PAGO DE PROVEEDOR PRESTA PANAMA ARELYS SALDANA,BG",
+    "0345000000033,PAGO DE PROVEEDOR PRESTA PANAMA OSCAR SERRANO,BG",
+  "SUFECHI",
+    "0752000000034,PAGO DE PROVEEDOR OVIDIO NUNEZ,BG",
+  "SUFECHI BORDADOS",
+    "0442000000035,PAGO DE PROVEEDOR ERNESTO COTO,BG"])]);
+/* La lectura real que validó el flujo: guía de entrega 3404 de TRANSPORTE KALIR SMILE, destinatario
+   "BLVD Quinta Ave", dos renglones (3.00 y 12.00) y un total manuscrito de 15.00. */
+const ppLecturaKalir = (o) => ppNormalizarLectura(Object.assign({ proveedor: "TRANSPORTE KALIR SMILE", tipo: "guia de entrega",
+  numero: "3404", fecha: "2026-11-16", cliente: "BLVD Quinta Ave",
+  lineas: [{ descripcion: "1 bulto O/C 1619", total: 3 }, { descripcion: "3 bultos O/C 2128", total: 12 }],
+  subtotal: null, impuesto: null, total: 15, manuscrito: true, dudas: [] }, o || {}));
+
+test("el caso real: la guía 3404 de Transporte Kalir a BLVD queda propuesta completa", () => {
+  const r = ppCruzarFactura(ppLecturaKalir(), ppPlantillaBLVD(), []);
+  eq(r.empresa, "BLVD");
+  eq(r.fila.nombre, "ROSY MIRANDA TRANSPORTE KALIR", "el membrete no es el titular de la cuenta: se cruza por KALIR");
+  eq(r.fila.cuenta, "0447000000001");
+  eq(r.factura, "3404"); eq(r.monto, "15.00");
+  eq(r.avisos.length, 1, "solo el aviso de que el total es manuscrito");
+});
+// La empresa sale del destinatario solo si nombra a UNA. Con dos sin relación, o ninguna, la elige una persona.
+test("la empresa: la más específica gana, y si no hay una sola no se elige", () => {
+  const E = ["BLVD", "SUFECHI", "SUFECHI BORDADOS", "SHOPPING", "SHOPPING MARKET", "SUPER1"];
+  eq(ppEmpresaDeTexto("BLVD Quinta Ave", E).empresa, "BLVD");
+  eq(ppEmpresaDeTexto("Sufechi Bordados", E).empresa, "SUFECHI BORDADOS", "no SUFECHI a secas");
+  eq(ppEmpresaDeTexto("SUFECHI, S.A.", E).empresa, "SUFECHI");
+  eq(ppEmpresaDeTexto("Super 1", E).empresa, "SUPER1");
+  eq(ppEmpresaDeTexto("SHOPPING / BLVD", E).empresa, null);
+  eq(ppEmpresaDeTexto("SHOPPING / BLVD", E).posibles.length, 2);
+  eq(ppEmpresaDeTexto("Comercial La Estrella", E).empresa, null);
+  eq(ppEmpresaDeTexto("BLVDS", E).empresa, null, "tiene que ser la palabra entera");
+});
+test("sin empresa reconocida no se propone beneficiario: los candidatos dependen de la empresa", () => {
+  const r = ppCruzarFactura(ppLecturaKalir({ cliente: "Quinta Avenida" }), ppPlantillaBLVD(), []);
+  eq(r.empresa, ""); eq(r.fila, null);
+  eq(/no nombra a ninguna empresa/.test(r.avisos[0]), true);
+  const f = ppCruzarFactura(ppLecturaKalir({ cliente: "Quinta Avenida" }), ppPlantillaBLVD(), [], "BLVD");
+  eq(f.fila.cuenta, "0447000000001", "cuando una persona elige la empresa, el cruce sigue");
+});
+/* Con varias líneas parecidas, elegir sería adivinar. "PRESTA PANAMA" tiene una línea por persona con la
+   misma cuenta: el membrete no dice de quién es el pago. */
+test("varios candidatos igual de parecidos: no se elige, se ofrecen", () => {
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "PRESTA PANAMA S.A." }), ppPlantillaBLVD(), []);
+  eq(r.fila, null); eq(r.candidatos.length, 2);
+  eq(/Hay 2 líneas que se parecen/.test(r.avisos.join("|")), true);
+});
+test("el candidato que comparte más palabras gana solo si comparte al menos dos", () => {
+  const P = ppPlantillaBLVD();
+  eq(ppCruzarFactura(ppLecturaKalir({ proveedor: "ROSY MIRANDA" }), P, []).fila.nombre, "ROSY MIRANDA TRANSPORTE KALIR");
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "MIRANDA" }), P, []);
+  eq(r.fila, null, "«MIRANDA» sola calza con dos líneas"); eq(r.candidatos.length, 2);
+});
+// La lista de beneficiarios es compartida: si no está en la de la empresa, se busca en las demás y se avisa.
+test("un beneficiario que solo figura en otra empresa se toma de ahí, avisando", () => {
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "OVIDIO NUNEZ" }), ppPlantillaBLVD(), []);
+  eq(r.fila.cuenta, "0752000000034"); eq(r.deOtraLista, true);
+  eq(/no está en la lista de BLVD/.test(r.avisos.join("|")), true);
+});
+test("un proveedor que no se parece a ninguna línea queda sin beneficiario", () => {
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "FERRETERIA EL CLAVO" }), ppPlantillaBLVD(), []);
+  eq(r.fila, null); eq(r.candidatos.length, 0);
+});
+/* El monto se propone solo si la propia factura lo respalda. Si el total no cuadra con el detalle, alguno
+   de los dos se leyó mal y no hay forma de saber cuál. */
+test("el total que no cuadra con los renglones no se propone", () => {
+  const t = ppTotalDeLectura(ppLecturaKalir({ total: 75 }));
+  eq(t.monto, ""); eq(/no coinciden/.test(t.aviso), true);
+  eq(ppTotalDeLectura(ppLecturaKalir()).monto, "15.00");
+});
+test("el ITBMS aparte se suma al detalle antes de comparar", () => {
+  const con = ppLecturaKalir({ lineas: [{ descripcion: "a", total: 100 }], subtotal: 100, impuesto: 7, total: 107 });
+  eq(ppTotalDeLectura(con).monto, "107.00");
+  const mal = ppLecturaKalir({ lineas: [{ descripcion: "a", total: 100 }], subtotal: 100, impuesto: 7, total: 170 });
+  eq(ppTotalDeLectura(mal).monto, "");
+  const sub = ppLecturaKalir({ lineas: [{ descripcion: "a", total: 100 }], subtotal: 90, impuesto: null, total: 90 });
+  eq(ppTotalDeLectura(sub).monto, "", "renglones y subtotal tampoco pueden contradecirse");
+});
+test("sin detalle legible el total se propone, pero avisando que no se pudo comprobar", () => {
+  const t = ppTotalDeLectura(ppLecturaKalir({ lineas: [] }));
+  eq(t.monto, "15.00"); eq(/no se pudo comprobar/.test(t.aviso), true);
+  const medio = ppTotalDeLectura(ppLecturaKalir({ lineas: [{ descripcion: "a", total: 3 }, { descripcion: "b", total: null }] }));
+  eq(/no se pudo comprobar/.test(medio.aviso), true, "con un renglón sin leer, la suma no prueba nada");
+  eq(ppTotalDeLectura(ppLecturaKalir({ total: null })).monto, "");
+});
+// Lo que devuelve el modelo no es de confianza: cualquier forma rara termina en campos vacíos, no en un error.
+test("una respuesta del modelo con forma rara no rompe nada ni inventa datos", () => {
+  [null, "hola", [], { total: "quince", lineas: "x", dudas: 5, numero: { a: 1 } }].forEach(o => {
+    const L = ppNormalizarLectura(o);
+    eq(L.total, null); eq(L.lineas.length, 0); eq(L.numero, ""); eq(L.dudas.length, 0);
+    const r = ppCruzarFactura(L, ppPlantillaBLVD(), []);
+    eq(r.fila, null); eq(r.monto, ""); eq(r.factura, "");
+  });
+  const L = ppNormalizarLectura({ numero: "N° 3,404", total: "1,250.50", manuscrito: "sí" });
+  eq(L.numero, "3 404", "la coma no puede llegar a la línea de pago"); eq(L.total, 1250.5); eq(L.manuscrito, false);
+});
+test("las dudas del modelo y la factura repetida llegan como avisos", () => {
+  const ya = [ppPago({ cuenta: "0447000000001", factura: "3404" })];
+  const r = ppCruzarFactura(ppLecturaKalir({ dudas: ["el total podría ser 13.00"] }), ppPlantillaBLVD(), ya);
+  eq(/Duda de lectura: el total podría ser 13.00/.test(r.avisos.join("|")), true);
+  eq(/ya está pendiente/.test(r.avisos.join("|")), true);
+});
+const ppConLector = (json) => { global.claude = { use: n => Promise.resolve(n === "sample" ? Object.assign(() => {}, { json }) : null) }; };
+testAsync("leer una foto: lo propuesto queda para revisar, no entra solo a los pendientes", async () => {
+  let pedido = null;
+  STATE.mod4.archivos = [ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])];
+  ppReleer(); STATE.mod4.pagos = [];
+  STATE.mod4.lector = { tipos: ["image/jpeg"], sample: { json: (prompt, opts) => { pedido = { prompt, opts }; return Promise.resolve({
+    proveedor: "TRANSPORTE KALIR SMILE", numero: "3404", cliente: "BLVD Quinta Ave", lineas: [{ descripcion: "a", total: 3 }, { descripcion: "b", total: 12 }], total: 15, manuscrito: true, dudas: [] }); } } };
+  const it = { id: "f1", nombre: "factura.jpg", file: { name: "factura.jpg" }, mini: "", estado: "en cola", form: null };
+  STATE.mod4.fotos = [it];
+  await ppLeerFoto(it);
+  eq(it.estado, "leída");
+  eq(pedido.opts.images[0], it.file, "la foto viaja como imagen");
+  eq(/BLVD/.test(pedido.prompt), true, "el pedido nombra las empresas de la plantilla");
+  eq(it.form.empresa + "|" + it.form.factura + "|" + it.form.monto, "BLVD|3404|15.00");
+  eq(STATE.mod4.pagos.length, 0, "leer no agrega nada por su cuenta");
+  renderModulo4();
+  eq(store.pagosArea4.innerHTML.indexOf("TRANSPORTE KALIR SMILE") !== -1, true);
+});
+testAsync("si Claude no puede leer la foto, se dice por qué y no se propone nada", async () => {
+  STATE.mod4.lector = { tipos: [], sample: { json: () => Promise.reject({ code: "image_rejected", message: "x" }) } };
+  const it = { id: "f2", nombre: "rota.jpg", file: {}, mini: "", estado: "en cola", form: null };
+  STATE.mod4.fotos = [it];
+  await ppLeerFoto(it);
+  eq(it.estado, "error"); eq(/no aceptó la imagen/.test(it.error), true); eq(it.form, null);
+  STATE.mod4.lector = { tipos: [], sample: { json: () => Promise.reject({ code: "not_granted", message: "x" }) } };
+  it.estado = "en cola"; await ppLeerFoto(it);
+  eq(STATE.mod4.lector, false, "sin permiso, la lectura se apaga para toda la vista");
+  STATE.mod4.fotos = []; STATE.mod4.archivos = []; STATE.mod4.lector = false; ppReleer();
+});
+
 /* Hallazgo: dentro de claude.ai el visor ignora los enlaces de descarga, así que el botón no hacía nada —
    y aun así se anotaba la descarga y quedaba habilitado «Plantilla generada». Se podían borrar los pagos
    sin tener el archivo. Ahora la descarga se anota solo si el archivo de verdad se entregó. */
