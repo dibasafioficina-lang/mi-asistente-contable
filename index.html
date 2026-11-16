@@ -283,6 +283,8 @@
   .pp-foto-form select.cg-inp{width:170px}
   .pp-foto-form .pp-f-benef select.cg-inp{width:100%}
   .pp-de-foto{display:block;font-size:12px;color:var(--slate);margin-top:2px}
+  .pp-foto-wa{font-size:12px;font-weight:800;color:#3F6E56;margin-bottom:4px}
+  .pp-copia{font-size:13px;color:var(--heading);background:#FBF1E3;border-radius:12px;padding:12px 14px;margin-top:12px;line-height:1.7}
   @media (max-width:720px){ .pp-foto{flex-direction:column} .pp-foto-img{flex-basis:auto} }
   .pp-pagos .cg-inp{width:120px;text-align:left;font-weight:700}
   .pp-cta-sub{display:block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--slate)}
@@ -565,7 +567,7 @@ var STATE = {
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
   mod4:{ filas:null, plantilla:undefined, importe:null, editando:null, sinGuardar:false, empresa:"", q:"", plegados:{},
-         alta:{ abierta:false, empresa:"", cuenta:"", nombre:"", banco:"", error:"" }, pagos:null, descargas:{}, errorForm:"", fotos:[], minis:{}, leyendo:false,
+         alta:{ abierta:false, empresa:"", cuenta:"", nombre:"", banco:"", error:"" }, pagos:null, descargas:{}, errorForm:"", fotos:[], bandeja:[], minis:{}, leyendo:false,
          form:{ empresa:"", benef:"", factura:"", monto:"", todas:false } },
   parsed:{},
   // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
@@ -599,7 +601,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.5";
+var APP_VERSION = "2026.11.6";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7883,6 +7885,7 @@ function ppFilas(){
 // escribir (modo privado, almacenamiento lleno), y acá perder lo editado sin aviso no es aceptable.
 function ppGuardarFilas(){
   var m = STATE.mod4, filas = (m.filas||[]).map(ppFilaGuardable);
+  if(PP_BASE.estado!=="local"){ ppSincronizar("plantilla", ppDocsDePlantilla(m.filas||[])); return; }
   guardarPref(PP_PLANTILLA_KEY, filas);
   var g = leerPrefs()[PP_PLANTILLA_KEY];
   m.sinGuardar = !(Array.isArray(g) && g.length===filas.length);
@@ -7991,6 +7994,222 @@ function ppPlantillaComoTexto(filas){
       return f.cuenta + "," + f.nombre + "," + (f.banco||"") + (f.noUsar ? " NO USAR" : "");
     }).join("\r\n");
   }).join("\r\n\r\n") + "\r\n";
+}
+
+/* ---- La base compartida ----
+   Dentro de claude.ai la plantilla madre, los pagos pendientes y las facturas que llegan por WhatsApp
+   viven en la base de datos de la propia página (permiso `db`): todo el equipo ve lo mismo y en vivo.
+   Como página suelta no hay base y todo sigue en el navegador, como antes.
+
+       plantilla/<empresa>   { empresa, orden, filas:[{id,cuenta,nombre,banco,nota,noUsar}] }
+       pagos/<id>            un pago pendiente
+       bandeja/<id>          una factura leída de WhatsApp, a la espera de que alguien la revise
+       turnos/<empresa>      el turno de quien está generando la plantilla de esa empresa
+
+   El resto del módulo no sabe dónde se guarda: sigue cambiando sus listas y llamando a ppGuardarFilas /
+   ppGuardarPagos. Acá se compara cada documento con lo último que se supo de la base y se escribe solo
+   lo que cambió. Dos reglas que no se negocian:
+   - NADA se escribe antes de haber recibido la base: comparar contra una base "vacía" que todavía no
+     llegó subiría la copia vieja de este navegador encima de la de todos.
+   - Lo que llega de la base reemplaza lo local. La base es la verdad; esta pantalla, una vista. */
+var PP_BASE = null;
+function ppBaseReiniciar(){
+  PP_BASE = { iniciada:false, estado:"local", db:null, listo:{ plantilla:false, pagos:false }, sinc:{ plantilla:{}, pagos:{} },
+              orden:{}, cola:{}, error:"", lento:false, pestana:"t"+Date.now().toString(36)+Math.random().toString(36).slice(2,8) };
+}
+ppBaseReiniciar();
+function ppCompartida(){ return PP_BASE.estado==="compartida"; }
+// ¿Se puede trabajar? Como página suelta, siempre. Con base, recién cuando llegaron plantilla y pagos.
+function ppBaseLista(){ return PP_BASE.estado==="local" || (ppCompartida() && PP_BASE.listo.plantilla && PP_BASE.listo.pagos); }
+function ppSlug(empresa){ return ppMayus(empresa).replace(/[^A-Z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "SIN-NOMBRE"; }
+function ppPagoGuardable(p){
+  return { id:String(p.id), empresa:String(p.empresa||""), cuenta:String(p.cuenta||""), nombre:String(p.nombre||""), factura:String(p.factura||""),
+           monto:String(p.monto||""), confirmado:p.confirmado===true, cuentaPorConfirmar:p.cuentaPorConfirmar===true,
+           origen:String(p.origen||""), enLaFoto:String(p.enLaFoto||""), foto:ppFotoId(p.foto),
+           de:String(p.de||""), recibido:String(p.recibido||""), creado:Number(p.creado)||0 };
+}
+// El id de una foto guardada en la página. Viene de la base, o sea de afuera: solo se acepta con su forma.
+function ppFotoId(v){ return /^[0-9a-f]{32}$/i.test(String(v||"")) ? String(v) : ""; }
+function ppDocsDePlantilla(filas){
+  var B = PP_BASE, por = {}, empresas = [], docs = {}, max = -1;
+  Object.keys(B.orden).forEach(function(k){ if(B.orden[k]>max) max = B.orden[k]; });
+  filas.forEach(function(f){
+    if(!por[f.empresa]){ por[f.empresa] = []; empresas.push(f.empresa); }
+    por[f.empresa].push({ id:f.id, cuenta:f.cuenta, nombre:f.nombre, banco:f.banco||"", nota:f.nota||"", noUsar:!!f.noUsar });
+  });
+  empresas.forEach(function(e){
+    var s = ppSlug(e);
+    if(B.orden[s]===undefined) B.orden[s] = ++max;     // una empresa nueva va al final y conserva su lugar
+    docs[s] = { empresa:e, orden:B.orden[s], filas:por[e] };
+  });
+  return docs;
+}
+// Escribe en la base lo que cambió respecto de lo último que se supo de ella, y nada más.
+function ppSincronizar(coleccion, actuales){
+  var B = PP_BASE, sinc = B.sinc[coleccion];
+  if(!ppCompartida() || !B.listo[coleccion]) return;
+  Object.keys(actuales).forEach(function(id){
+    var j = JSON.stringify(actuales[id]);
+    if(sinc[id]===j) return;
+    sinc[id] = j; ppEscribir(coleccion+"/"+id, JSON.parse(j));
+  });
+  Object.keys(sinc).forEach(function(id){
+    if(Object.prototype.hasOwnProperty.call(actuales, id)) return;
+    delete sinc[id]; ppEscribir(coleccion+"/"+id, null);
+  });
+}
+// De a una escritura por documento, en orden: la base pide no pisar una escritura con otra.
+function ppEscribir(ruta, datos){
+  var B = PP_BASE;
+  B.cola[ruta] = (B.cola[ruta] || Promise.resolve()).then(function(){
+    var ref = B.db.doc(ruta);
+    return datos===null ? ref.delete() : ref.set(datos);
+  }).then(null, function(err){
+    B.error = "No se pudo guardar un cambio en la base compartida"+(err && err.code ? " ("+err.code+")" : "")+". Recargá la página para ver cómo quedó.";
+    ppAlCambiarBase();
+  });
+  return B.cola[ruta];
+}
+function ppEnEdicion(){
+  var a = (typeof document!=="undefined") ? document.activeElement : null;
+  return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName||""));
+}
+// Algo cambió en la base (lo cambió otra persona, o la tarea que lee WhatsApp): se redibuja, salvo que
+// alguien esté escribiendo en un campo — ahí se espera a que salga, para no borrarle lo que teclea.
+function ppAlCambiarBase(){
+  if(STATE.view!=="modulo4") return;
+  if(ppEnEdicion()){
+    PP_BASE.redibujoPendiente = true;
+    if(!PP_BASE.escuchaFoco && typeof document.addEventListener==="function"){
+      PP_BASE.escuchaFoco = true;
+      document.addEventListener("focusout", function(){
+        setTimeout(function(){ if(PP_BASE.redibujoPendiente && !ppEnEdicion()){ PP_BASE.redibujoPendiente = false; ppRedibujar(); } }, 80);
+      });
+    }
+    return;
+  }
+  PP_BASE.redibujoPendiente = false;
+  ppRedibujar();
+}
+function ppAlFallarBase(err){
+  PP_BASE.error = "Se perdió la conexión con la base compartida"+(err && err.code ? " ("+err.code+")" : "")+". Recargá la página.";
+  ppAlCambiarBase();
+}
+function ppAlLlegarPlantilla(snap){
+  var B = PP_BASE, m = STATE.mod4, docs = [], filas = [];
+  snap.docs.forEach(function(d){
+    var x = d.data();
+    if(x && typeof x.empresa==="string" && ppMayus(x.empresa) && Array.isArray(x.filas)) docs.push({ id:d.id, x:x });
+  });
+  docs.sort(function(a,b){ return ((Number(a.x.orden)||0)-(Number(b.x.orden)||0)) || (a.id<b.id ? -1 : 1); });
+  B.orden = {};
+  docs.forEach(function(d){
+    var emp = ppMayus(d.x.empresa);
+    B.orden[ppSlug(emp)] = Number(d.x.orden)||0;
+    d.x.filas.forEach(function(f, i){
+      if(!f || !/^\d+$/.test(String(f.cuenta||"")) || !ppLimpio(f.nombre)) return;
+      filas.push({ id:String(f.id || (d.id+"-"+i)), empresa:emp, cuenta:String(f.cuenta), nombre:ppLimpio(String(f.nombre).replace(/,/g," ")),
+                   banco:ppLimpio(f.banco||""), nota:ppLimpio(f.nota||""), noUsar:f.noUsar===true });
+    });
+  });
+  m.filas = filas;
+  // Lo último que se supo de la base, con la MISMA forma con que se va a comparar al guardar.
+  var canon = ppDocsDePlantilla(filas); B.sinc.plantilla = {};
+  docs.forEach(function(d){ B.sinc.plantilla[d.id] = ""; });        // un documento con otro id se reemplaza al primer cambio
+  Object.keys(canon).forEach(function(s){ if(B.sinc.plantilla[s]!==undefined) B.sinc.plantilla[s] = JSON.stringify(canon[s]); });
+  if(!snap.metadata || snap.metadata.fromCache!==true) B.listo.plantilla = true;
+  ppReleer(); ppAlCambiarBase();
+}
+function ppAlLlegarPagos(snap){
+  var B = PP_BASE, m = STATE.mod4, pagos = [];
+  snap.docs.forEach(function(d){
+    var x = d.data();
+    if(x && typeof x==="object") pagos.push(ppPagoGuardable(Object.assign({}, x, { id:d.id })));
+  });
+  pagos.sort(function(a,b){ return (a.creado-b.creado) || (a.id<b.id ? -1 : 1); });
+  m.pagos = pagos; B.sinc.pagos = {};
+  pagos.forEach(function(p){ B.sinc.pagos[p.id] = JSON.stringify(p); });
+  if(!snap.metadata || snap.metadata.fromCache!==true) B.listo.pagos = true;
+  ppAlCambiarBase();
+}
+// Las facturas que dejó la tarea que lee WhatsApp. Lo que trae cada una es una LECTURA, igual de poco
+// confiable que la de una foto elegida a mano: pasa por ppNormalizarLectura y por el mismo cruce.
+function ppAlLlegarBandeja(snap){
+  var m = STATE.mod4, antes = {}, items = [];
+  (m.bandeja||[]).forEach(function(it){ antes[it.id] = it; });
+  snap.docs.forEach(function(d){
+    var x = d.data(); if(!x || typeof x!=="object") return;
+    var firma = JSON.stringify(x.lectura||null), prev = antes[d.id];
+    if(prev && prev.firma===firma){ items.push(prev); return; }      // se conserva lo que ya se le estaba corrigiendo
+    var foto = ppFotoId(x.foto);
+    items.push({ id:d.id, origen:"whatsapp", firma:firma, nombre:ppLimpio(x.nombre||x.de||"WhatsApp"), de:ppLimpio(x.de||""), recibido:ppLimpio(x.recibido||""),
+                 nota:ppLimpio(x.nota||""), foto:foto, mini: foto ? "/_blob/"+foto : "", estado:"leída", lectura:ppNormalizarLectura(x.lectura), cruce:null, form:null, error:"" });
+  });
+  items.sort(function(a,b){ return a.recibido<b.recibido ? -1 : a.recibido>b.recibido ? 1 : (a.id<b.id ? -1 : 1); });
+  m.bandeja = items;
+  ppAlCambiarBase();
+}
+function ppIniciarBase(){
+  var B = PP_BASE, m = STATE.mod4;
+  if(B.iniciada) return;
+  B.iniciada = true;
+  var c = typeof window!=="undefined" ? window.claude : null;
+  if(!c || typeof c.use!=="function"){ B.estado = "local"; return; }
+  // Mientras no se sepa si hay base, lo guardado en este navegador NO se muestra: si la hay, es una copia vieja.
+  B.estado = "conectando"; m.filas = []; m.pagos = []; m.plantilla = null;
+  function aLocal(){ B.estado = "local"; m.filas = null; m.pagos = null; m.plantilla = undefined; ppAlCambiarBase(); }
+  c.use("db").then(function(db){
+    if(!db){ aLocal(); return; }
+    B.db = db; B.estado = "compartida";
+    setTimeout(function(){ if(!ppBaseLista()){ B.lento = true; ppAlCambiarBase(); } }, 10000);
+    db.collection("plantilla").onSnapshot(ppAlLlegarPlantilla, ppAlFallarBase);
+    db.collection("pagos").onSnapshot(ppAlLlegarPagos, ppAlFallarBase);
+    db.collection("bandeja").onSnapshot(ppAlLlegarBandeja, ppAlFallarBase);
+    // Cuándo pasó por última vez la tarea que lee WhatsApp: si hace mucho, las facturas no están entrando.
+    // Es un dato de cortesía: si falla, el resto de la base tiene que seguir andando.
+    try{
+      db.doc("config/whatsapp").onSnapshot(function(d){
+        var x = d && d.exists ? d.data() : null, antes = B.corrida;
+        B.corrida = x && typeof x.corrida==="string" ? ppLimpio(x.corrida).slice(0, 40) : "";
+        if(B.corrida!==antes) ppAlCambiarBase();
+      }, function(){});
+    }catch(e){}
+    ppAlCambiarBase();
+  }, aLocal);
+}
+/* El turno para generar la plantilla de una empresa → promesa con true si es de esta pestaña.
+   Sin esto, dos personas con los mismos pagos confirmados bajan cada una su archivo y los dos se suben
+   al banco: el pago sale dos veces. El turno dura 10 minutos y se vence solo. */
+function ppTomarTurno(empresa){
+  var B = PP_BASE;
+  if(!ppCompartida()) return Promise.resolve(true);
+  return B.db.doc("turnos/"+ppSlug(empresa)).acquire({ holder:B.pestana, ttlMs:600000 })
+    .then(function(r){ return !!(r && r.acquired); }, function(){ return true; });
+}
+// Lo que quedó guardado en este navegador de antes de la base compartida, para ofrecer pasarlo.
+function ppCopiaLocal(){
+  var pr = leerPrefs();
+  if(pr.migradoMod4) return { filas:[], pagos:[] };
+  return { filas:(Array.isArray(pr[PP_PLANTILLA_KEY]) ? pr[PP_PLANTILLA_KEY] : []).filter(function(f){ return f && f.empresa && f.cuenta && f.nombre; }),
+           pagos:(Array.isArray(pr[PP_PAGOS_KEY]) ? pr[PP_PAGOS_KEY] : []).filter(function(p){ return p && p.id && p.cuenta; }) };
+}
+// Suma a la base lo que había en este navegador: lo que ya está en la base no se pisa.
+function ppPasarCopiaLocal(){
+  var copia = ppCopiaLocal(), filas = ppFilas(), pagos = ppPagos(), ya = {}, r = { filas:0, pagos:0 };
+  if(!ppCompartida() || !ppBaseLista()) return r;
+  filas.forEach(function(f){ ya[f.empresa+"|"+ppClaveBenef(f)] = 1; });
+  copia.filas.forEach(function(f){
+    var g = ppFilaGuardable(f), k = g.empresa+"|"+ppClaveBenef(g);
+    if(ya[k]) return; ya[k] = 1; filas.push(g); r.filas++;
+  });
+  copia.pagos.forEach(function(p){
+    if(pagos.some(function(q){ return q.id===p.id; }) || ppPagoDuplicado(pagos, p)) return;
+    var g = ppPagoGuardable(p); g.confirmado = false; g.creado = g.creado || Date.now();   // en la base entra sin confirmar
+    pagos.push(g); r.pagos++;
+  });
+  guardarPref("migradoMod4", true);
+  ppGuardarFilas(); ppGuardarPagos(); ppReleer();
+  return r;
 }
 
 /* ---- Pantalla del módulo ---- */
@@ -8202,13 +8421,25 @@ function ppBindAlta(){
   };
 }
 function renderModulo4(){
-  var m = STATE.mod4;
+  var m = STATE.mod4, B = PP_BASE;
+  ppIniciarBase();
+  if(!ppBaseLista()){
+    // Con base compartida no se muestra ni se deja tocar nada hasta haberla recibido.
+    app.innerHTML = headerHtml() +
+      '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
+      '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> Conectando con la base compartida…</h3>' +
+      '<p class="desc">'+(B.error ? esc(B.error) : B.lento ? 'La base compartida todavía no responde. Puede ser la conexión: la página sigue intentando sola, no hace falta recargar.'
+        : 'Un momento: se está trayendo la plantilla y los pagos pendientes que comparte el equipo.')+'</p></div>';
+    document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
+    return;
+  }
+  var compartida = ppCompartida(), copia = compartida ? ppCopiaLocal() : { filas:[], pagos:[] };
   if(m.plantilla===undefined) ppReleer();
   var filas = ppFilas(), hay = filas.length>0, imp = m.importe;
   app.innerHTML = headerHtml() +
     '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
     '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> A quién se le paga, por empresa</h3>' +
-    '<p class="desc">'+(hay ? 'La plantilla queda guardada: no hace falta subirla cada vez. Agregá o corregí beneficiarios en la tabla de abajo, o importá un <b>.txt</b> para sumarle líneas.'
+    '<p class="desc">'+(hay ? 'La plantilla queda guardada'+(compartida?' y es la misma para todo el equipo':'')+': no hace falta subirla cada vez. Agregá o corregí beneficiarios en la tabla de abajo, o importá un <b>.txt</b> para sumarle líneas.'
       : 'Importá los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga — o empezá cargando beneficiarios a mano más abajo. Queda guardada para las próximas veces.')+'</p>' +
     '<div class="dropzones"><div class="dz'+(hay?' filled':'')+'" id="ppDz">' +
       '<div class="ico">'+(hay?"✓":"📄")+'</div>' +
@@ -8221,7 +8452,11 @@ function renderModulo4(){
     '</div></div>' +
     (hay?'<div class="pp-archivos"><button class="btn-export" id="ppBajarMadre">Descargar la plantilla (.txt)</button><button class="btn-plegar" id="ppLimpiar">Vaciar la plantilla</button></div>':'') +
     (m.sinGuardar?'<div class="pp-error">Este navegador no dejó guardar la plantilla (modo privado o almacenamiento lleno). Lo que ves se pierde al cerrar la pestaña: descargala como .txt.</div>':'') +
-    '<p class="cg-note pp-nota">La plantilla se guarda en este navegador. En otro equipo o navegador hay que importarla de nuevo; descargala como .txt para tener respaldo.</p>' +
+    (B.error?'<div class="pp-error">'+esc(B.error)+'</div>':'') +
+    ((copia.filas.length || copia.pagos.length) ? '<div class="pp-copia">En este navegador quedaron guardados de antes <b>'+copia.filas.length+' beneficiarios</b> y <b>'+copia.pagos.length+' pagos pendientes</b>. ' +
+      'Pasarlos suma a la base compartida lo que le falte; no pisa lo que ya tiene. <button class="btn-export" id="ppPasarCopia">Pasarlos a la base compartida</button> <button class="btn-plegar" id="ppOlvidarCopia">No, descartarlos</button></div>' : '') +
+    '<p class="cg-note pp-nota">'+(compartida ? 'La plantilla y los pagos pendientes se guardan en la base compartida de esta página: los ve y los cambia todo el que tenga acceso para usarla.'
+      : 'La plantilla se guarda en este navegador. En otro equipo o navegador hay que importarla de nuevo; descargala como .txt para tener respaldo.')+'</p>' +
     '</div><div id="pagosArea4"></div><div id="resultsArea4"></div>';
   document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
   var inp = document.getElementById("ppFile");
@@ -8236,9 +8471,13 @@ function renderModulo4(){
   if(bm) bm.onclick = function(){ guardarArchivo("plantilla madre de pagos.txt", ppPlantillaComoTexto(ppFilas()), "text/plain;charset=utf-8"); };
   var lim = document.getElementById("ppLimpiar");
   if(lim) lim.onclick = function(){
-    if(typeof confirm==="function" && !confirm("Se van a borrar los "+filas.length+" beneficiarios guardados en este navegador. Los pagos pendientes no se tocan. ¿Continuar?")) return;
+    if(typeof confirm==="function" && !confirm("Se van a borrar los "+filas.length+" beneficiarios guardados "+(compartida?"en la base compartida, PARA TODO EL EQUIPO":"en este navegador")+". Los pagos pendientes no se tocan. ¿Continuar?")) return;
     ppVaciarPlantilla(); renderModulo4();
   };
+  var pc = document.getElementById("ppPasarCopia");
+  if(pc) pc.onclick = function(){ var r = ppPasarCopiaLocal(); alert("Se pasaron "+r.filas+" beneficiario(s) y "+r.pagos+" pago(s) que la base no tenía. Los pagos entran sin confirmar."); renderModulo4(); };
+  var oc = document.getElementById("ppOlvidarCopia");
+  if(oc) oc.onclick = function(){ guardarPref("migradoMod4", true); renderModulo4(); };
   renderPagosMod4();
   renderResultadosMod4();
 }
@@ -8328,7 +8567,7 @@ function ppNuevoPago(pagos, empresa, fila, factura, monto){
   if(fila.noUsar) return { error:fila.nombre+" está marcado como NO USAR en la plantilla." };
   var p = { id:"p"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), empresa:empresa, cuenta:fila.cuenta,
             nombre:ppLimpio(String(fila.nombre).replace(/,/g," ")), factura:ppLimpio(factura), monto:ppLimpio(monto),
-            confirmado:false, cuentaPorConfirmar:!!fila.enConflicto };
+            confirmado:false, cuentaPorConfirmar:!!fila.enConflicto, creado:Date.now() };
   var pr = ppProblemasDePago(p);
   if(pr.length) return { error:pr.join(". ")+"." };
   p.monto = ppMontoArchivo(p.monto);
@@ -8356,16 +8595,24 @@ function ppPagos(){
   if(!m.pagos){ var g = leerPrefs()[PP_PAGOS_KEY]; m.pagos = Array.isArray(g) ? g : []; }
   return m.pagos;
 }
-function ppGuardarPagos(){ guardarPref(PP_PAGOS_KEY, STATE.mod4.pagos||[]); }
+function ppGuardarPagos(){
+  var pagos = STATE.mod4.pagos||[];
+  if(PP_BASE.estado==="local"){ guardarPref(PP_PAGOS_KEY, pagos); return; }
+  var docs = {}; pagos.forEach(function(p){ docs[p.id] = ppPagoGuardable(p); });
+  ppSincronizar("pagos", docs);
+}
 /* Baja la plantilla de una empresa → promesa con true si el archivo se entregó.
    Recién ahí se anota la descarga, que es lo que habilita «Plantilla generada»: si quien la pidió canceló
    el guardado, no hay archivo, y borrar los pagos dejaría la plata sin plantilla y sin pendiente. */
 function ppBajarPlantilla(empresa){
   var m = STATE.mod4, texto = ppArchivoDePago(ppPagosListos(ppPagos(), empresa));
   if(!texto) return Promise.resolve(false);
-  return guardarArchivo(ppNombreArchivo(empresa), texto, "text/plain;charset=utf-8").then(function(ok){
-    if(ok) m.descargas[empresa] = texto;
-    return ok;
+  return ppTomarTurno(empresa).then(function(mio){
+    if(!mio){ alert("Otra persona está generando la plantilla de "+empresa+" en este momento. Para que el pago no salga dos veces, esperá a que termine: sus pagos van a desaparecer de esta lista."); return false; }
+    return guardarArchivo(ppNombreArchivo(empresa), texto, "text/plain;charset=utf-8").then(function(ok){
+      if(ok) m.descargas[empresa] = texto;
+      return ok;
+    });
   });
 }
 function ppFormHtml(P){
@@ -8400,8 +8647,8 @@ function ppBloqueEmpresaHtml(empresa){
       var pr = ppProblemasDePago(p);
       return '<tr><td>'+esc(p.nombre)+'<span class="pp-cta-sub">'+esc(p.cuenta)+'</span>' +
           (p.cuentaPorConfirmar?'<span class="pp-marca pp-conf">cuenta por confirmar en la plantilla</span>':'') +
-          (p.origen==="foto"?'<span class="pp-de-foto">📷 Leído de una foto'+(p.enLaFoto?' de «'+esc(p.enLaFoto)+'»':'')+
-            '</span>'+(m.minis[p.id]?'<details class="pp-ver-foto"><summary>ver la foto</summary><img src="'+m.minis[p.id]+'" alt="Foto de la factura"></details>':''):'') +
+          ((p.origen==="foto"||p.origen==="whatsapp")?'<span class="pp-de-foto">'+(p.origen==="whatsapp"?'📱 Llegó por WhatsApp'+(p.de?' de '+esc(p.de):'')+(p.recibido?' · '+esc(p.recibido):'')+' — leído':'📷 Leído')+' de una foto'+(p.enLaFoto?' de «'+esc(p.enLaFoto)+'»':'')+
+            '</span>'+((ppFotoId(p.foto)||m.minis[p.id])?'<details class="pp-ver-foto"><summary>ver la foto</summary><img src="'+(ppFotoId(p.foto)?"/_blob/"+ppFotoId(p.foto):m.minis[p.id])+'" alt="Foto de la factura"></details>':''):'') +
           (pr.length?'<span class="pp-problema">'+esc(pr.join(" · "))+'</span>':'')+'</td>' +
         '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="factura" value="'+esc(p.factura)+'"></td>' +
         '<td><input class="cg-inp pp-edit" data-id="'+esc(p.id)+'" data-f="monto" inputmode="decimal" value="'+esc(p.monto)+'"></td>' +
@@ -8431,7 +8678,8 @@ function renderPagosMod4(){
     // Con pagos confirmados en varias empresas, un solo clic baja una plantilla por cada una.
     (conArchivo.length>1 ? '<div class="pp-acciones pp-todas"><button class="btn-export" id="ppBajarTodas">Descargar las '+conArchivo.length+' plantillas · una por empresa</button></div>' : '') +
     (empresas.length ? empresas.map(ppBloqueEmpresaHtml).join("") : '<div class="empty-skip">No hay pagos pendientes.</div>') +
-    '<p class="cg-note pp-nota">Los pagos pendientes se guardan en este navegador hasta que marques la plantilla como generada. Todavía no se comparten con el resto del equipo.</p>' +
+    '<p class="cg-note pp-nota">'+(ppCompartida() ? 'Los pagos pendientes los ve todo el equipo, con la foto de la factura si llegó por WhatsApp, hasta que alguien marque la plantilla como generada.'+(PP_BASE.corrida?' Última revisión del WhatsApp: '+esc(PP_BASE.corrida)+'.':'')
+       : 'Los pagos pendientes se guardan en este navegador hasta que marques la plantilla como generada.')+'</p>' +
     '</div>';
   function pago(id){ return pagos.filter(function(p){ return p.id===id; })[0]; }
   function redibujar(){ ppGuardarPagos(); renderPagosMod4(); }
@@ -8738,7 +8986,8 @@ function ppFotoHtml(it){
     var vistos = {}, opciones = [];
     c.candidatos.forEach(function(k){ vistos[ppClaveBenef(k.fila)] = 1; opciones.push([k.fila, "★ "]); });
     if(fo.empresa) ppBeneficiarios(P, fo.empresa, false).forEach(function(f){ if(!vistos[ppClaveBenef(f)]){ vistos[ppClaveBenef(f)] = 1; opciones.push([f, ""]); } });
-    cuerpo = '<div class="pp-foto-leido">En la foto: <b>'+esc(L.proveedor||"(emisor sin leer)")+'</b>' +
+    cuerpo = (it.origen==="whatsapp" ? '<div class="pp-foto-wa">📱 Llegó por WhatsApp'+(it.nombre?' de '+esc(it.nombre):'')+(it.recibido?' · '+esc(it.recibido):'')+(it.nota?' · «'+esc(it.nota)+'»':'')+'</div>' : '') +
+      '<div class="pp-foto-leido">En la foto: <b>'+esc(L.proveedor||"(emisor sin leer)")+'</b>' +
         (L.tipo||L.numero ? ' · '+esc(L.tipo||"documento")+' N° '+esc(L.numero||"?") : '') +
         (L.cliente ? ' · para «'+esc(L.cliente)+'»' : '') + (L.total!==null ? ' · total '+fmt(L.total) : '') + '</div>' +
       (c.avisos.length ? '<ul class="pp-foto-avisos">'+c.avisos.map(function(a){ return '<li>'+esc(a)+'</li>'; }).join("")+'</ul>' : '') +
@@ -8758,22 +9007,52 @@ function ppFotoHtml(it){
     '<div class="pp-foto-cuerpo">'+cuerpo+'</div>' +
     '<button class="sidet-del2 pp-foto-quitar" data-id="'+it.id+'" title="Descartar esta foto">✕</button></div>';
 }
+// Las facturas a revisar: primero las que llegaron por WhatsApp, después las fotos elegidas a mano.
+function ppItemsLector(){ var m = STATE.mod4; return (m.bandeja||[]).concat(m.fotos); }
 function ppLectorHtml(){
-  var m = STATE.mod4;
-  if(!m.plantilla) return "";
-  if(m.lector===false) return (typeof window!=="undefined" && window.claude) ? "" :
-    '<p class="cg-note pp-nota pp-lector-no">La lectura de facturas desde fotos funciona al abrir la app dentro de claude.ai.</p>';
-  if(!m.lector) return "";
+  var m = STATE.mod4, bandeja = m.bandeja||[];
+  if(!m.plantilla) return bandeja.length ? '<div class="pp-error">Hay '+bandeja.length+' factura(s) que llegaron por WhatsApp esperando revisión. Cargá la plantilla madre para poder armar sus pagos.</div>' : "";
+  // El cruce de una factura de WhatsApp se hace acá, con la plantilla ya cargada, y una sola vez.
+  bandeja.forEach(function(it){ if(!it.form) ppRecruzar(it, ""); });
+  if(!m.lector && !bandeja.length) return (m.lector===false && !(typeof window!=="undefined" && window.claude)) ?
+    '<p class="cg-note pp-nota pp-lector-no">La lectura de facturas desde fotos funciona al abrir la app dentro de claude.ai.</p>' : "";
   var enCola = m.fotos.filter(function(f){ return f.estado==="en cola"; }).length;
-  return '<div class="pp-lector"><div class="pp-lector-head"><b>Leer facturas de fotos</b>' +
-      '<label class="btn-export pp-lector-btn">Elegir fotos<input type="file" id="ppFotos" multiple accept="'+esc(m.lector.tipos.join(","))+'"></label>' +
+  return '<div class="pp-lector"><div class="pp-lector-head"><b>Facturas por revisar</b>' +
+      (bandeja.length ? '<span class="chip">'+bandeja.length+' de WhatsApp</span>' : '') +
+      (m.lector ? '<label class="btn-export pp-lector-btn">Elegir fotos<input type="file" id="ppFotos" multiple accept="'+esc(m.lector.tipos.join(","))+'"></label>' : '') +
       (enCola ? '<button class="btn-export" id="ppLeer"'+(m.leyendo?' disabled':'')+'>'+(m.leyendo?'Leyendo…':'Leer '+(enCola===1?'la foto':'las '+enCola+' fotos'))+'</button>' : '') +
       '<span class="pp-acc-nota">Claude propone el pago; vos lo revisás contra la foto y lo confirmás.</span></div>' +
-    m.fotos.map(ppFotoHtml).join("") + '</div>';
+    ppItemsLector().map(ppFotoHtml).join("") + '</div>';
+}
+// Saca la factura de la lista: la de WhatsApp se borra de la base (para todos); la elegida a mano, de acá.
+function ppSacarFactura(it){
+  var m = STATE.mod4;
+  if(it.origen==="whatsapp"){
+    if(m.bandeja.indexOf(it)!==-1) m.bandeja.splice(m.bandeja.indexOf(it), 1);
+    if(ppCompartida()) ppEscribir("bandeja/"+it.id, null);
+  }
+  else if(m.fotos.indexOf(it)!==-1) m.fotos.splice(m.fotos.indexOf(it), 1);
+}
+/* La factura revisada pasa a los pagos pendientes → { pago } o { error }.
+   Nace SIN confirmar y recuerda qué decía la foto, para compararlo con la línea de la plantilla al
+   confirmar. Si llegó por WhatsApp se lleva la foto guardada, quién la mandó y cuándo: eso queda a la
+   vista de todo el equipo hasta que la plantilla se marca como generada. */
+function ppFacturaAPendientes(it){
+  var m = STATE.mod4, P = m.plantilla;
+  var fila = ppBeneficiarios(P, it.form.empresa, true).filter(function(f){ return ppClaveBenef(f)===it.form.benef; })[0];
+  var r = ppNuevoPago(ppPagos(), it.form.empresa, fila, it.form.factura, it.form.monto);
+  if(r.error) return r;
+  r.pago.origen = it.origen==="whatsapp" ? "whatsapp" : "foto"; r.pago.enLaFoto = it.lectura.proveedor;
+  if(it.origen==="whatsapp"){ r.pago.foto = it.foto; r.pago.de = it.nombre; r.pago.recibido = it.recibido; }
+  else if(it.mini) m.minis[r.pago.id] = it.mini;
+  ppPagos().push(r.pago);
+  ppSacarFactura(it);
+  ppGuardarPagos();
+  return r;
 }
 function ppBindLector(area){
   var m = STATE.mod4, P = m.plantilla;
-  function foto(id){ return m.fotos.filter(function(f){ return f.id===id; })[0]; }
+  function foto(id){ return ppItemsLector().filter(function(f){ return f.id===id; })[0]; }
   var inp = document.getElementById("ppFotos");
   if(inp) inp.addEventListener("change", function(e){ ppAgregarFotos(e.target.files); });
   var leer = document.getElementById("ppLeer"); if(leer) leer.onclick = ppLeerEnCola;
@@ -8781,7 +9060,9 @@ function ppBindLector(area){
     d.onclick = function(){ var it = foto(d.getAttribute("data-id")); if(it){ it.grande = !it.grande; d.classList.toggle("grande"); } };
   });
   area.querySelectorAll(".pp-foto-quitar").forEach(function(b){
-    b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(it){ m.fotos.splice(m.fotos.indexOf(it), 1); renderPagosMod4(); } };
+    b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(!it) return;
+      if(it.origen==="whatsapp" && typeof confirm==="function" && !confirm("Esta factura llegó por WhatsApp. Si la descartás desaparece para todo el equipo y no vuelve a entrar sola. ¿Continuar?")) return;
+      ppSacarFactura(it); renderPagosMod4(); };
   });
   area.querySelectorAll(".pp-foto-reintentar").forEach(function(b){
     b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(it){ it.estado = "en cola"; ppLeerEnCola(); } };
@@ -8801,15 +9082,9 @@ function ppBindLector(area){
   area.querySelectorAll(".pp-foto-agregar").forEach(function(b){
     b.onclick = function(){
       var it = foto(b.getAttribute("data-id")); if(!it) return;
-      var fila = ppBeneficiarios(P, it.form.empresa, true).filter(function(f){ return ppClaveBenef(f)===it.form.benef; })[0];
-      var r = ppNuevoPago(ppPagos(), it.form.empresa, fila, it.form.factura, it.form.monto);
-      if(r.error){ it.error = r.error; renderPagosMod4(); return; }
-      // Nace sin confirmar, y recuerda qué decía la foto para compararlo al confirmar.
-      r.pago.origen = "foto"; r.pago.enLaFoto = it.lectura.proveedor;
-      ppPagos().push(r.pago);
-      if(it.mini) m.minis[r.pago.id] = it.mini;
-      m.fotos.splice(m.fotos.indexOf(it), 1);
-      ppGuardarPagos(); renderPagosMod4();
+      var r = ppFacturaAPendientes(it);
+      if(r.error) it.error = r.error;
+      renderPagosMod4();
     };
   });
 }

@@ -57,7 +57,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
-| 4 | Plantilla de pagos | En construcción — plantilla madre guardada y editable, generador del archivo y lectura de facturas desde fotos listos; falta que las fotos lleguen solas desde WhatsApp y compartir plantilla y pendientes entre usuarios. Ver abajo |
+| 4 | Plantilla de pagos | Construido — plantilla madre compartida y editable, generador del archivo, lectura de facturas desde fotos y entrada automática desde WhatsApp. Ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -77,7 +77,7 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 
 ### Módulo 4 — Plantilla de pagos
 
-Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos la plantilla madre (guardada y editable) y el generador del archivo**; la plantilla y los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, claves `plantillaMadreMod4` y `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
+Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba, y es a propósito. Dentro de claude.ai la plantilla y los pagos pendientes viven en la **base compartida de la página** (permiso `db`, ver más abajo); como página suelta siguen en el navegador de cada quien (`localStorage`, claves `plantillaMadreMod4` y `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
 
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
@@ -91,7 +91,8 @@ Arma el archivo de pagos que se sube al banco, **uno por razón social** (la ofi
 - Un monto leído de una foto **nunca** entra al archivo sin que una persona lo confirme.
 - La lista de beneficiarios es compartida entre empresas y **un proveedor tiene una sola cuenta**.
 - **La plantilla madre tiene que estar siempre**, sin subirla en cada sesión, y poder agregarse y editarse desde la app.
-- **El equipo usa la app dentro de claude.ai**, no en GitHub Pages. Eso define el camino para lo que falta: la base de datos de la propia página (permiso `db`) para compartir plantilla y pendientes, y una sesión programada de Claude que lea LetsBot para que las fotos entren solas. No hace falta Supabase ni claves de API.
+- **El equipo usa la app dentro de claude.ai**, no en GitHub Pages. Por eso se comparte con la base de datos de la propia página (permiso `db`) y las fotos entran por una tarea programada de Claude que lee LetsBot. No hace falta Supabase ni claves de API.
+- LetsBot cuesta USD 69.99 al mes (complemento API + MCP) más el plan base desde el 30-nov-2026; la tarea programada depende de ese conector. El bot automático de LetsBot está activado y conviene apagarlo.
 
 **La plantilla madre** son los mismos `.txt` que hoy se editan a mano: el nombre de la empresa solo en una línea y debajo sus beneficiarios (`cuenta,PAGO DE PROVEEDOR nombre,banco`). Medidos el 16-nov-2026: 876 líneas, 22 empresas, 631 cuentas. Se digitan a mano y traen todas las variantes — `ppParsearLinea()` las lee y `ppParsearPlantilla()` reporta lo que encontró:
 
@@ -109,6 +110,25 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 | La misma cuenta con nombres que no se parecen | la cuenta de `FELIPE MOTTA` figura también como `AVICOLAS ATHENAS` |
 
 **Una cuenta con varias personas NO es un conflicto**: `PRESTA PANAMA` cobra en una sola cuenta lo de ocho empleados y el texto dice de quién es cada pago (igual `CASA FUNERALES`, Caja de Ahorros, Banco Nacional). Por eso la clave de un beneficiario es **la línea** (cuenta + nombre), no el proveedor, y por eso el segundo control solo dispara cuando los nombres no comparten ninguna palabra significativa (`ppSeParecen`). Sin esa distinción salían 47 "conflictos" y los 5 de verdad quedaban tapados.
+
+**La base compartida** (`ppIniciarBase`, `ppSincronizar`). Dentro de claude.ai todo el equipo ve lo mismo, en vivo:
+
+| Documento | Qué guarda |
+|---|---|
+| `plantilla/<empresa>` | `{ empresa, orden, filas:[{id,cuenta,nombre,banco,nota,noUsar}] }` — un documento por empresa |
+| `pagos/<id>` | un pago pendiente, con la foto (`foto`: id de un asset de la página), quién la mandó y cuándo |
+| `bandeja/<id>` | una factura leída de WhatsApp, a la espera de que alguien la revise |
+| `turnos/<empresa>` | el turno de quien está generando la plantilla de esa empresa |
+| `config/whatsapp` | el cursor de la tarea que lee WhatsApp (`ultimo` por teléfono) y cuándo corrió por última vez |
+
+- Al republicar hay que declarar **`capabilities: {downloads: true, sample: {images: true}, db: {rules: [{path: "", read: "interact", write: "interact"}]}, assets: {}}`**. La regla sube la lectura a `interact`: son cuentas bancarias, y por defecto las leería cualquiera con un enlace público.
+- El resto del módulo **no sabe dónde se guarda**: cambia sus listas y llama a `ppGuardarFilas` / `ppGuardarPagos`. La capa compara cada documento con lo último que se supo de la base y escribe **solo lo que cambió**.
+- **Nada se escribe antes de haber recibido la base**, y mientras tanto lo guardado en el navegador no se muestra: comparar contra una base "vacía" que todavía no llegó subiría la copia vieja de ese navegador encima de la de todos. La copia local se pasa a mano, con un botón, y **suma sin pisar**.
+- **Lo que llega de la base reemplaza lo local**, salvo que alguien esté escribiendo en un campo: ahí el redibujo espera a que salga (`ppAlCambiarBase`), para no borrarle lo que teclea.
+- **El turno** (`ppTomarTurno`, lease de 10 minutos): dos personas con los mismos pagos confirmados bajarían cada una su archivo y los dos se subirían al banco. La segunda recibe un aviso y no baja nada.
+- Un documento de la base es **dato de afuera**: una fila sin cuenta numérica o sin nombre no entra, y el id de una foto solo se acepta con su forma (32 hex) — la imagen sale siempre de `/_blob/<id>`, nunca de una URL que venga en el dato.
+
+**Las facturas de WhatsApp entran solas** por una tarea programada de Claude (lunes a sábado, cada hora de 8 a 18, hora de Panamá), que corre en el entorno `mi-asistente-contable` con el conector de LetsBot: lee los mensajes nuevos del número, transcribe cada factura, sube la foto como asset de la página y deja un documento en `bandeja`. **No cruza ni arma pagos**: eso lo hace la página, con la plantilla y los mismos guards de la lectura manual (`ppCruzarFactura`), y lo confirma una persona. Decidido con Diba: lo que sube LetsBot queda guardado y a la vista de todo el equipo **hasta que la plantilla se marca como generada**; ahí el pago se borra con todo lo suyo. Las fotos ya sin pago quedan en el almacén de la página sin que nada las muestre — limpiarlas es una tarea aparte.
 
 **La plantilla guardada** (`ppFilas`, `ppImportar`, `ppEditarBeneficiario`). Los `.txt` son solo la forma de cargarla la primera vez; después vive en la app:
 

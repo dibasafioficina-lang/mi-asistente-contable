@@ -6778,6 +6778,205 @@ testAsync("fuera de claude.ai el Excel sigue saliendo por XLSX.writeFile", async
   STATE.mod4.pagos = []; STATE.mod4.descargas = {};
 });
 
+/* =========================================================================
+   LA BASE COMPARTIDA
+   Dentro de claude.ai la plantilla, los pagos y las facturas de WhatsApp viven en la base de la página.
+   Acá va una base de mentira en memoria, con la misma forma que la real (doc/collection/onSnapshot).
+   ========================================================================= */
+grupo("Plantilla de pagos — la base compartida");
+
+function baseFalsa(inicial, opciones) {
+  const docs = new Map(Object.entries(inicial || {})), subs = [], escrituras = [], turnos = {};
+  const copia = v => JSON.parse(JSON.stringify(v));
+  const foto = col => {
+    const ds = [...docs.entries()].filter(([k]) => k.split("/")[0] === col).sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, v]) => ({ id: k.split("/")[1], exists: true, data: () => copia(v), metadata: { fromCache: false, hasPendingWrites: false } }));
+    return { docs: ds, size: ds.length, empty: !ds.length, docChanges: () => [], metadata: { fromCache: false, hasPendingWrites: false } };
+  };
+  const avisar = col => subs.filter(s => s.col === col).forEach(s => s.next(foto(col)));
+  const db = {
+    doc: ruta => ({
+      set: d => { escrituras.push("set " + ruta); docs.set(ruta, copia(d)); avisar(ruta.split("/")[0]); return Promise.resolve(); },
+      delete: () => { escrituras.push("delete " + ruta); docs.delete(ruta); avisar(ruta.split("/")[0]); return Promise.resolve(); },
+      acquire: o => { if (turnos[ruta] && turnos[ruta] !== o.holder) return Promise.resolve({ acquired: false }); turnos[ruta] = o.holder; return Promise.resolve({ acquired: true, holder: o.holder }); },
+      onSnapshot: next => { const dar = () => next({ id: ruta.split("/")[1], exists: docs.has(ruta), data: () => (docs.has(ruta) ? copia(docs.get(ruta)) : undefined) });
+        subs.push({ col: ruta.split("/")[0], next: dar }); if (!(opciones && opciones.muda)) Promise.resolve().then(dar); return () => {}; }
+    }),
+    collection: col => ({ onSnapshot: next => { subs.push({ col, next }); if (!(opciones && opciones.muda)) Promise.resolve().then(() => next(foto(col))); return () => {}; } })
+  };
+  return { db, docs, escrituras, deOtro(ruta, d) { if (d === null) docs.delete(ruta); else docs.set(ruta, copia(d)); avisar(ruta.split("/")[0]); } };
+}
+const ppTic = () => new Promise(r => setTimeout(r, 5));
+// Abre el módulo "dentro de claude.ai" con esa base, y espera a que llegue.
+async function ppAbrirConBase(F) {
+  ppBaseReiniciar();
+  global.claude = { use: n => Promise.resolve(n === "db" ? F.db : null) };
+  Object.assign(STATE.mod4, { filas: null, pagos: null, plantilla: undefined, importe: null, editando: null, bandeja: [], fotos: [], descargas: {}, lector: false });
+  STATE.view = "modulo4"; renderModulo4();
+  await ppTic();
+}
+function ppCerrarBase() { delete global.claude; ppBaseReiniciar(); PP_BASE.iniciada = true; STATE.view = "menu";
+  Object.assign(STATE.mod4, { filas: null, pagos: null, plantilla: undefined, importe: null, bandeja: [], fotos: [] }); }
+const ppDocBLVD = () => ({ empresa: "BLVD", orden: 0, filas: [
+  { id: "b1", cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", banco: "", nota: "", noUsar: false },
+  { id: "b2", cuenta: "0430000000077", nombre: "JORGE ARAUZ", banco: "Banco General", nota: "", noUsar: false }] });
+
+/* La regla que protege a todo el equipo: comparar contra una base "vacía" que todavía no llegó subiría la
+   copia vieja de este navegador encima de la de todos. */
+testAsync("antes de recibir la base no se muestra lo local ni se escribe nada", async () => {
+  ppCerrarBase(); ppVaciarPlantilla();
+  ppImportar([ppArch("P.txt", ["TEJAR", "0301000000020,PAGO DE PROVEEDOR COCHEZ Y CIA,BG"])]);     // copia local de antes
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD() }, { muda: true });
+  await ppAbrirConBase(F);
+  eq(ppBaseLista(), false);
+  eq(/Conectando con la base compartida/.test(global.app.innerHTML), true);
+  eq(ppFilas().length, 0, "la copia de este navegador no se muestra");
+  ppAgregarBeneficiario({ empresa: "TEJAR", cuenta: "0301000000021", nombre: "ALGUIEN", banco: "" });
+  ppGuardarPagos(); await ppTic();
+  eq(F.escrituras.length, 0, "y nada llega a la base");
+  ppCerrarBase();
+});
+testAsync("al abrir, la plantilla y los pagos son los de la base, no los del navegador", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(),
+    "pagos/p1": { id: "p1", empresa: "BLVD", cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", factura: "3404", monto: "15.00", confirmado: true, creado: 5 } });
+  await ppAbrirConBase(F);
+  eq(ppBaseLista(), true); eq(ppCompartida(), true);
+  eq(ppFilas().map(f => f.nombre).join("|"), "ROSY MIRANDA TRANSPORTE KALIR|JORGE ARAUZ");
+  eq(STATE.mod4.pagos.length, 1); eq(STATE.mod4.pagos[0].confirmado, true);
+  eq(/base compartida/.test(global.app.innerHTML), true);
+  eq(/quedaron guardados de antes/.test(global.app.innerHTML), true, "ofrece pasar la copia que quedó en el navegador");
+  eq(F.escrituras.length, 0, "abrir no escribe nada");
+  ppCerrarBase();
+});
+testAsync("cada cambio escribe solo el documento que cambió", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "plantilla/SUFECHI": { empresa: "SUFECHI", orden: 1, filas: [{ id: "s1", cuenta: "0752000000001", nombre: "OVIDIO NUNEZ", banco: "", nota: "", noUsar: false }] } });
+  await ppAbrirConBase(F);
+  ppEditarBeneficiario("b2", { cuenta: "0430000000077", nombre: "JORGE ARAUZ", banco: "BAC", noUsar: false }); await ppTic();
+  eq(F.escrituras.join(","), "set plantilla/BLVD", "SUFECHI no se toca");
+  eq(F.docs.get("plantilla/BLVD").filas[1].banco, "BAC");
+  const r = ppNuevoPago(ppPagos(), "BLVD", ppFilas()[0], "3404", "15"); ppPagos().push(r.pago); ppGuardarPagos(); await ppTic();
+  eq(F.escrituras[1], "set pagos/" + r.pago.id);
+  ppGuardarPagos(); ppGuardarFilas(); await ppTic();
+  eq(F.escrituras.length, 2, "guardar sin cambios no escribe");
+  STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); await ppTic();
+  eq(ppMarcarGenerada("BLVD"), 1); ppGuardarPagos(); await ppTic();
+  eq(F.escrituras.slice(2).join(","), "set pagos/" + r.pago.id + ",delete pagos/" + r.pago.id, "al generarse la plantilla, el pago se borra para todos");
+  eq(F.docs.has("pagos/" + r.pago.id), false);
+  ppAgregarBeneficiario({ empresa: "TEJAR", cuenta: "0301000000020", nombre: "COCHEZ Y CIA", banco: "" }); await ppTic();
+  eq(F.escrituras[4], "set plantilla/TEJAR"); eq(F.docs.get("plantilla/TEJAR").orden, 2, "una empresa nueva va al final");
+  ppQuitarBeneficiario(ppFilas().filter(f => f.empresa === "TEJAR")[0].id); await ppTic();
+  eq(F.escrituras[5], "delete plantilla/TEJAR", "una empresa sin beneficiarios deja de existir");
+  ppCerrarBase();
+});
+testAsync("lo que cambia otra persona llega solo, y no se reescribe", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD() });
+  await ppAbrirConBase(F);
+  const otro = ppDocBLVD(); otro.filas[0].cuenta = "0447000000999";
+  F.deOtro("plantilla/BLVD", otro);
+  F.deOtro("pagos/p9", { empresa: "BLVD", cuenta: "0447000000999", nombre: "ROSY MIRANDA TRANSPORTE KALIR", factura: "7", monto: "20.00", confirmado: false, creado: 1 });
+  eq(ppFilas()[0].cuenta, "0447000000999");
+  eq(STATE.mod4.pagos[0].id, "p9");
+  eq(/0447000000999/.test(store.resultsArea4.innerHTML), true, "y la pantalla se redibuja");
+  F.deOtro("pagos/p9", null);
+  eq(STATE.mod4.pagos.length, 0, "si otro genera la plantilla, el pago desaparece acá también");
+  ppGuardarFilas(); ppGuardarPagos(); await ppTic();
+  eq(F.escrituras.length, 0);
+  ppCerrarBase();
+});
+// Un documento de la base es dato de afuera: lo que no tenga forma de línea de pago no entra a la plantilla.
+testAsync("la pantalla dice cuándo se revisó el WhatsApp por última vez", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "config/whatsapp": { ultimo: { "50762292831": 4 }, corrida: "2026-11-17 08:17 <b>" } });
+  await ppAbrirConBase(F);
+  eq(/Última revisión del WhatsApp: 2026-11-17 08:17 &lt;b&gt;\./.test(store.pagosArea4.innerHTML), true);
+  ppCerrarBase();
+});
+testAsync("una fila rota en la base no entra a la plantilla", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": { empresa: "BLVD", orden: 0, filas: [null, { cuenta: "12ab", nombre: "X" }, { cuenta: "0447000000001", nombre: "" },
+    { cuenta: "0447000000001", nombre: "KALIR, ROSY" }] }, "plantilla/ROTO": { empresa: 5, filas: "no" } });
+  await ppAbrirConBase(F);
+  eq(ppFilas().length, 1); eq(ppFilas()[0].nombre, "KALIR ROSY", "y el nombre sigue sin poder traer una coma");
+  ppCerrarBase();
+});
+testAsync("la copia que quedó en el navegador se suma a la base sin pisarla", async () => {
+  ppCerrarBase(); ppVaciarPlantilla(); LS["miAsistenteContable.prefs"] = "{}";
+  ppImportar([ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR,BG", "TEJAR", "0301000000020,PAGO DE PROVEEDOR COCHEZ Y CIA,BG"])]);
+  STATE.mod4.pagos = [ppPago({ id: "viejo", factura: "88", confirmado: true })]; ppGuardarPagos();
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD() });
+  await ppAbrirConBase(F);
+  const r = ppPasarCopiaLocal(); await ppTic();
+  eq(r.filas, 1, "solo TEJAR: la línea de BLVD ya estaba"); eq(r.pagos, 1);
+  eq(F.docs.get("plantilla/BLVD").filas[0].banco, "", "la de la base no se pisa con la del navegador");
+  eq(F.docs.get("plantilla/TEJAR").filas[0].nombre, "COCHEZ Y CIA");
+  eq(F.docs.get("pagos/viejo").confirmado, false, "un pago que entra a la base hay que volver a confirmarlo");
+  eq(ppCopiaLocal().filas.length, 0, "y no se vuelve a ofrecer");
+  ppCerrarBase(); LS["miAsistenteContable.prefs"] = "{}";
+});
+/* Dos personas con los mismos pagos confirmados bajan cada una su archivo y los dos se suben al banco.
+   El turno deja pasar a una sola. */
+testAsync("el turno de una empresa lo tiene una sola pestaña a la vez", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "pagos/p1": { empresa: "BLVD", cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", factura: "3404", monto: "15.00", confirmado: true, creado: 1 } });
+  await ppAbrirConBase(F);
+  let guardados = 0;
+  global.claude = { use: n => Promise.resolve(n === "db" ? F.db : n === "downloads" ? { save: () => { guardados++; return Promise.resolve({ status: "saved" }); } } : null) };
+  PP_BASE.pestana = "ana"; eq(await ppBajarPlantilla("BLVD"), true);
+  PP_BASE.pestana = "beto"; STATE.mod4.descargas = {};
+  eq(await ppBajarPlantilla("BLVD"), false, "la segunda persona no baja el archivo");
+  eq(guardados, 1); eq(STATE.mod4.descargas.BLVD, undefined);
+  eq(await ppBajarPlantilla("SUFECHI"), false, "sin pagos confirmados no hay nada que bajar");
+  PP_BASE.pestana = "ana"; eq(await ppBajarPlantilla("BLVD"), true, "la primera puede volver a bajarlo");
+  ppCerrarBase();
+});
+/* Pedido de Diba: lo que llega por LetsBot queda guardado y a la vista de todos hasta que la plantilla
+   se da por generada. La factura entra a la bandeja, de ahí al pago pendiente —con su foto, quién la
+   mandó y cuándo— y se va con él. */
+const ppFacturaWA = (o) => Object.assign({ lectura: { proveedor: "TRANSPORTE KALIR SMILE", numero: "3404", cliente: "BLVD Quinta Ave",
+  lineas: [{ descripcion: "a", total: 3 }, { descripcion: "b", total: 12 }], total: 15, manuscrito: true, dudas: [] },
+  foto: "0123456789abcdef0123456789abcdef", nombre: "Diba", de: "50762292831", recibido: "2026-11-16 23:28:13", mensaje: 4 }, o || {});
+testAsync("una factura de WhatsApp aparece para revisar, con su foto y su propuesta", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "bandeja/wa-4": ppFacturaWA() });
+  await ppAbrirConBase(F);
+  eq(STATE.mod4.bandeja.length, 1);
+  const h = store.pagosArea4.innerHTML, it = STATE.mod4.bandeja[0];
+  eq(/Llegó por WhatsApp de Diba · 2026-11-16 23:28:13/.test(h), true);
+  eq(h.indexOf('src="/_blob/0123456789abcdef0123456789abcdef"') !== -1, true, "la foto es la que quedó guardada en la página");
+  eq(it.form.empresa + "|" + it.form.factura + "|" + it.form.monto, "BLVD|3404|15.00");
+  eq(F.escrituras.length, 0, "verla no cambia nada");
+  // otra persona la corrige mientras tanto: lo que yo estaba editando no se pierde
+  it.form.monto = "16.00"; F.deOtro("bandeja/wa-5", ppFacturaWA({ mensaje: 5, recibido: "2026-11-17 08:00:00" }));
+  eq(STATE.mod4.bandeja.length, 2); eq(STATE.mod4.bandeja[0].form.monto, "16.00");
+  ppCerrarBase();
+});
+testAsync("al pasarla a pendientes se lleva la foto y deja la bandeja; al generarse, se borra todo", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "bandeja/wa-4": ppFacturaWA() });
+  await ppAbrirConBase(F);
+  const r = ppFacturaAPendientes(STATE.mod4.bandeja[0]); await ppTic();
+  eq(F.docs.has("bandeja/wa-4"), false, "sale de la bandeja para todos");
+  const d = F.docs.get("pagos/" + r.pago.id);
+  eq(d.origen + "|" + d.foto + "|" + d.de + "|" + d.recibido + "|" + d.confirmado, "whatsapp|0123456789abcdef0123456789abcdef|Diba|2026-11-16 23:28:13|false");
+  eq(/Llegó por WhatsApp de Diba/.test(store.pagosArea4.innerHTML) && /\/_blob\/0123456789abcdef0123456789abcdef/.test(store.pagosArea4.innerHTML), true, "el pago pendiente muestra de dónde salió");
+  STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
+  eq([...F.docs.keys()].join(","), "plantilla/BLVD", "no queda historial");
+  ppCerrarBase();
+});
+testAsync("una factura de WhatsApp con datos raros no rompe la pantalla ni carga una imagen de afuera", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "bandeja/x": { lectura: "<b>hola</b>", foto: "https://malo.example/x.png", nombre: "<i>N</i>" }, "bandeja/y": "nada" });
+  await ppAbrirConBase(F);
+  const h = store.pagosArea4.innerHTML;
+  eq(STATE.mod4.bandeja.length, 1); eq(STATE.mod4.bandeja[0].mini, "");
+  eq(/malo\.example/.test(h), false); eq(h.indexOf("<i>N</i>"), -1);
+  eq(STATE.mod4.bandeja[0].form.monto, "", "sin lectura no se propone nada");
+  ppCerrarBase();
+});
+testAsync("si la página no tiene base, todo sigue en el navegador como antes", async () => {
+  ppCerrarBase(); ppVaciarPlantilla();
+  ppImportar([ppArch("P.txt", ["TEJAR", "0301000000020,PAGO DE PROVEEDOR COCHEZ Y CIA,BG"])]);
+  ppBaseReiniciar(); global.claude = { use: () => Promise.resolve(null) };
+  Object.assign(STATE.mod4, { filas: null, pagos: null, plantilla: undefined });
+  STATE.view = "modulo4"; renderModulo4(); await ppTic();
+  eq(PP_BASE.estado, "local"); eq(ppFilas().length, 1, "vuelve a mostrarse la copia del navegador");
+  ppCerrarBase(); ppVaciarPlantilla();
+});
+
 /* --- resumen --- */
 asincronas.then(() => {
   console.log("\n" + "=".repeat(52));
