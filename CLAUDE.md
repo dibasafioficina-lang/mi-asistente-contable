@@ -48,6 +48,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
+| 4 | Plantilla de pagos | En construcción — cargador de la plantilla madre listo; ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -64,6 +65,37 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 **Parámetros configurables**: ventana de días (default 3), tolerancia en B/ (default 0.01).
 
 **Pendiente de validar con datos de producción** (ver PRD del módulo): Paso 1 no probado aún con montos reales (el reporte de prueba compartido traía ceros); y si algún día el diario de Caja General no trae línea de débito separada por banco/método, el hallazgo del Paso 2 no se detectaría — asunción a confirmar.
+
+### Módulo 4 — Plantilla de pagos
+
+Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy solo está construido el cargador**, que no guarda nada.
+
+**Lo decidido con Diba** (para no volver a preguntarlo):
+
+- El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8.
+- La cuenta y el nombre salen de la **plantilla madre**; el banco de la plantilla es referencia y no viaja.
+- La factura y el monto llegan por **fotos de facturas en grupos de WhatsApp**. No hay forma de asignarle un número a Claude: la Groups API de Meta no lee grupos existentes (solo los que ella crea, máximo 8 personas, y pide OBA). El camino es el **export del chat con adjuntos**.
+- Un monto leído de una foto **nunca** entra al archivo sin que una persona lo confirme.
+- La lista de beneficiarios es compartida entre empresas y **un proveedor tiene una sola cuenta**.
+
+**La plantilla madre** son los mismos `.txt` que hoy se editan a mano: el nombre de la empresa solo en una línea y debajo sus beneficiarios (`cuenta,PAGO DE PROVEEDOR nombre,banco`). Medidos el 16-nov-2026: 876 líneas, 22 empresas, 631 cuentas. Se digitan a mano y traen todas las variantes — `ppParsearLinea()` las lee y `ppParsearPlantilla()` reporta lo que encontró:
+
+- **La coma puede ir antes o después del nombre** (`PAGO DE PROVEEDOR,PEDRO MORALES`): leído por posición, el nombre quedaba en el campo del banco.
+- **El banco viene pegado al nombre con un espacio** (`IMPADOEL BG`). Se despega solo del **final**, solo en formas que no se confunden con una palabra (`BG`, `BANISTMO`, `GLOBAL BANK`; `GENERAL` o `CANAL` valen únicamente solas en su campo), solo en líneas con el prefijo de proveedor (en `TRASPASO A CALIZAS A CANAL BANK` el banco **es** el concepto) y **nunca** si deja el nombre vacío (`PAGO DE PROVEEDOR BAC` es un pago al banco).
+- **Quedan restos de corridas anteriores**: 43 líneas con el monto sin borrar (`,96.30`, `85.00BG`, `48.22VIVERO SARA CELY`) y varias con la factura (`ALEXIS MONTENEGRO fact 605`). Se apartan del nombre: si no, el pago nuevo saldría con dos facturas.
+- **`NO USAR` / `NO UTILIZAR ESTA CUENTA`** bloquean la línea.
+- **El nombre nunca conserva una coma**: va a un archivo separado por comas.
+
+Los dos controles que importan son los de la **cuenta**, que es lo único que mueve plata:
+
+| Control | Caso real |
+|---|---|
+| El mismo nombre con dos cuentas | `EMPRESAS CARBONE` con `0313…` y `0312…` (un dígito); `JOSUE MCPHEE` con y sin el cero inicial; `EDWIN ESPINOSA` con dos cuentas sin relación |
+| La misma cuenta con nombres que no se parecen | la cuenta de `FELIPE MOTTA` figura también como `AVICOLAS ATHENAS` |
+
+**Una cuenta con varias personas NO es un conflicto**: `PRESTA PANAMA` cobra en una sola cuenta lo de ocho empleados y el texto dice de quién es cada pago (igual `CASA FUNERALES`, Caja de Ahorros, Banco Nacional). Por eso la clave de un beneficiario es **la línea** (cuenta + nombre), no el proveedor, y por eso el segundo control solo dispara cuando los nombres no comparten ninguna palabra significativa (`ppSeParecen`). Sin esa distinción salían 47 "conflictos" y los 5 de verdad quedaban tapados.
+
+Las pruebas usan **cuentas ficticias**: las de los beneficiarios no se guardan en el repositorio.
 
 ## Cómo se comporta cada banco (validado con datos de producción)
 

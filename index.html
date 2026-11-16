@@ -226,6 +226,27 @@
   .saldo-ctx .saldo-line{font-size:13.5px;font-weight:700;color:#3C5670}
   .saldo-ctx .saldo-sub{font-size:12.5px;color:#5B6472;margin-top:3px;line-height:1.5}
 
+  /* Plantilla de pagos */
+  .pp-archivos{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
+  .pp-archivo{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:var(--heading);
+    background:var(--brand-light);border-radius:999px;padding:5px 6px 5px 12px}
+  .pp-archivo button{background:none;border:none;color:var(--brand-dark);cursor:pointer;font-weight:800;padding:0 4px}
+  .cg-note.pp-nota{color:var(--slate)}
+  .pp-sub{font-size:12.5px;color:var(--slate);padding:8px 4px 2px}
+  .pp-diff .step-head .count{color:var(--alert)}
+  .pp-aviso .step-head .count{color:#9A6E1E}
+  .pp-filtros{display:flex;gap:10px;flex-wrap:wrap;padding:12px 0}
+  .pp-filtros .cg-inp{width:auto;text-align:left;font-weight:700}
+  .pp-filtros select.cg-inp{max-width:300px}
+  .pp-filtros input.cg-inp{flex:1;min-width:200px}
+  .ret-tabla.pp-tabla th, .ret-tabla.pp-tabla td{text-align:left}
+  .pp-tabla td.pp-cta{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:nowrap}
+  .pp-tabla tr.pp-fila-bloq td{color:var(--slate);text-decoration:line-through}
+  .pp-tabla tr.pp-fila-bloq td:last-child{text-decoration:none}
+  .pp-marca{display:inline-block;font-size:11px;font-weight:800;border-radius:999px;padding:2px 8px;white-space:nowrap}
+  .pp-bloq{background:var(--alert-bg);color:var(--alert)}
+  .pp-conf{background:#FBF1E3;color:#9A6E1E}
+
   .btn-export{background:#fff;border:1.5px solid var(--line);color:var(--brand);font-family:"Mulish";font-size:13.5px;font-weight:800;
     padding:10px 20px;border-radius:999px;cursor:pointer;box-shadow:0 6px 16px rgba(158,104,126,.08)}
   .btn-export:hover{background:var(--brand);color:#fff;border-color:var(--brand)}
@@ -493,6 +514,7 @@ var STATE = {
     retenciones:null
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
+  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{} },
   parsed:{},
   // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
   // acredita sin que un feriado largo lo distorsione. Medido contra enero y febrero de 2026, subirla de 3
@@ -525,7 +547,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.10.50";
+var APP_VERSION = "2026.11.1";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7461,10 +7483,467 @@ function mostrarAvisoVersion(nueva){
   if(b) b.onclick = function(){ location.replace(location.pathname + "?_v=" + (+new Date())); };
 }
 
+/* ================= Módulo 4 — Plantilla de pagos: la plantilla madre =================
+   La plantilla madre es el .txt que contabilidad edita a mano para armar cada pago: una línea por
+   beneficiario, agrupadas bajo el nombre de la empresa que paga.
+
+       SUFECHI
+       0472993715642,PAGO DE PROVEEDOR,PEDRO MORALES
+       0430998522820,PAGO DE PROVEEDOR Kenyi Graell,BG
+       └── cuenta ─┘                   └─ nombre ─┘ └ banco
+
+   De cada línea salen la CUENTA y el NOMBRE; el banco es referencia y no viaja al archivo de pago. El
+   archivo se digita a mano y viene con todas las variantes: la coma antes o después del nombre, el banco
+   pegado al nombre con un espacio, el monto o la factura de una corrida anterior sin borrar. Lo que se
+   puede leer se lee y se dice cómo; lo que no, se reporta — nunca se adivina una cuenta. */
+var PP_PREFIJO = /^[\s,]*PAGO\s*,?\s*(?:DE|A)\s+PROVEEDOR(?:ES(?=[\s,]|$))?[\s,]*/i;
+var PP_MONTO = /\d[\d,]*\.\d{2}(?!\d)/;
+var PP_EMAIL = /\S*@\S*/g;
+var PP_NO_USAR = /\bNO\s+(?:USAR|UTILIZAR)\b.*$/i;
+var PP_FACTURA_VIEJA = /\s+FACT(?:URA)?\.?(?:\s+\d+)?\s*$/i;
+
+/* Los bancos, como los escribe quien digita. `seguro` son las formas que no se confunden con una palabra
+   de un nombre: solo esas se despegan del final del nombre ("IMPADOEL BG"). Las demás ("GENERAL",
+   "CANAL", "MULTI") valen únicamente cuando ocupan solas el campo del banco, después de la coma. */
+var PP_BANCOS = [
+  { banco:"Banco General",   seguro:/^(?:B ?G|BBG|BANCO GENERAL)$/,                         suelto:/^GENERAL$/ },
+  { banco:"Banistmo",        seguro:/^BANISTMO(?:SH)?$/,                                    suelto:/^(?:BANIS|BANI|BANISTM|BAMI)$/ },
+  { banco:"BAC",             seguro:/^BAC(?: INTERNACIONAL| PANAMA)?$/,                     suelto:null },
+  { banco:"Global Bank",     seguro:/^GLOBAL(?: BANK)?$/,                                   suelto:null },
+  { banco:"Credicorp Bank",  seguro:/^(?:CREDICORP|CREDICIORP|CREIDICORP|CREDICK CORP|CREDI COR|CRIDI CORP|CRICORP)(?: BANK)?$/, suelto:/^CREDI$/ },
+  { banco:"Banco Nacional",  seguro:/^(?:BN|BANCO NACIONAL)$/,                              suelto:null },
+  { banco:"Banesco",         seguro:/^BANESCO$/,                                            suelto:null },
+  { banco:"Caja de Ahorros", seguro:/^CAJA DE AHORROS?$/,                                   suelto:null },
+  { banco:"Scotiabank",      seguro:/^SCOTIA ?BANK$/,                                       suelto:null },
+  { banco:"Metrobank",       seguro:/^METROBANK$/,                                          suelto:null },
+  { banco:"Multibank",       seguro:/^MULTIBANK$/,                                          suelto:/^MULTI?$/ },
+  { banco:"Mercantil",       seguro:/^BANCO MERCANTIL$/,                                    suelto:/^MERCANTIL$/ },
+  { banco:"Canal Bank",      seguro:/^CANAL BANK$/,                                         suelto:/^CANAL$/ },
+  { banco:"Banco Aliado",    seguro:/^BANCO ALIADO$/,                                       suelto:null },
+  { banco:"Davivienda",      seguro:/^(?:DAVIBANK|DAVIDBAN|DAVIANK)(?: CORR)?$/,            suelto:null },
+  { banco:"St. Georges",     seguro:/^ST GEORGES$/,                                         suelto:null }
+];
+function ppLimpio(s){
+  return String(s===null||s===undefined?"":s).replace(/[ \t]/g," ").replace(/\s+/g," ").trim();
+}
+function ppMayus(s){
+  return ppLimpio(s).normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
+}
+// ¿Este texto ENTERO es un banco? Con `soloSeguro` no se aceptan las formas que se confunden con un nombre.
+function ppBancoDe(txt, soloSeguro){
+  var t = ppMayus(txt).replace(/\./g,"").trim();
+  if(!t) return null;
+  for(var i=0;i<PP_BANCOS.length;i++){
+    var b = PP_BANCOS[i];
+    if(b.seguro.test(t)) return b.banco;
+    if(!soloSeguro && b.suelto && b.suelto.test(t)) return b.banco;
+  }
+  return null;
+}
+// Despega el banco del FINAL de un texto ("IMPADOEL BG" → IMPADOEL + Banco General). Nunca deja el texto
+// vacío: "PAGO DE PROVEEDOR BAC" es un pago AL banco, y ahí BAC es el nombre.
+function ppBancoAlFinal(txt){
+  var pal = ppLimpio(txt).split(" ");
+  for(var n=Math.min(3, pal.length-1); n>=1; n--){
+    var banco = ppBancoDe(pal.slice(pal.length-n).join(" "), true);
+    if(banco) return { resto: pal.slice(0, pal.length-n).join(" "), banco: banco };
+  }
+  return null;
+}
+// Despega el banco del PRINCIPIO ("BG NUEVO P" → Banco General + la nota).
+function ppBancoAlPrincipio(txt){
+  var pal = ppLimpio(txt).split(" ");
+  for(var n=Math.min(3, pal.length-1); n>=1; n--){
+    var banco = ppBancoDe(pal.slice(0,n).join(" "), true);
+    if(banco) return { banco: banco, resto: pal.slice(n).join(" ") };
+  }
+  return null;
+}
+function ppRecortar(s){ return ppLimpio(s).replace(/[\s.,]+$/,"").replace(/^[\s.,]+/,""); }
+
+/* Una línea de la plantilla → { cuenta, nombre, banco, nota, ... } o null si no es una línea de pago.
+   `avisos` son las cosas que se leyeron igual pero conviene saber (clave corta, la traduce el reporte). */
+function ppParsearLinea(raw){
+  var ln = ppLimpio(raw);
+  var m = ln.match(/^(\d+)/);
+  if(!m) return null;
+  var f = { cuenta:m[1], nombre:"", banco:"", nota:"", original:ln, conPrefijo:false,
+            montoViejo:null, facturaVieja:false, noUsar:false, sinReconocer:"", avisos:[] };
+  var cuerpo = ln.slice(f.cuenta.length);
+  if(cuerpo && !/^[\s,]/.test(cuerpo)) f.avisos.push("cuentaPegada");
+  var notas = [];
+
+  var nu = cuerpo.match(PP_NO_USAR);
+  if(nu){ f.noUsar = true; notas.push(ppLimpio(nu[0])); cuerpo = cuerpo.replace(PP_NO_USAR, " "); }
+  var mails = cuerpo.match(PP_EMAIL);
+  if(mails){ mails.forEach(function(e){ notas.push(e.replace(/[.,]+$/,"")); }); cuerpo = cuerpo.replace(PP_EMAIL, " "); }
+  // El monto se busca ANTES de quitar el prefijo y de partir por comas: viene pegado a cualquier cosa
+  // ("85.00BG", "306.02ERICK ALEXIS", "48.22VIVERO SARA CELY").
+  var mm = cuerpo.match(PP_MONTO);
+  if(mm){ f.montoViejo = mm[0]; cuerpo = cuerpo.replace(PP_MONTO, " "); }
+
+  f.conPrefijo = PP_PREFIJO.test(cuerpo);
+  cuerpo = cuerpo.replace(PP_PREFIJO, "").replace(/^[\s,]+/, "");
+
+  var partes = cuerpo.split(",");
+  var ult = partes.length>1 ? ppRecortar(partes[partes.length-1]) : "";
+  var nombre = ppRecortar((partes.length>1 ? partes.slice(0,-1) : partes).join(" "));
+  if(ult){
+    var entero = ppBancoDe(ult, false), ini, fin;
+    if(entero) f.banco = entero;
+    else if((ini = ppBancoAlPrincipio(ult))){ f.banco = ini.banco; notas.push(ini.resto); }
+    else if(f.conPrefijo && (fin = ppBancoAlFinal(ult))){ nombre = ppRecortar(nombre+" "+fin.resto); f.banco = fin.banco; }
+    else if(f.montoViejo) notas.push(ult);       // lo que acompañaba al monto viejo es una nota
+    else if(!nombre) nombre = ult;               // "cuenta,,NOMBRE": el nombre quedó en el último campo
+    else { f.sinReconocer = ult; notas.push(ult); }
+  }
+  // El banco pegado al nombre solo se despega en un pago a proveedor: en "TRASPASO A CALIZAS A CANAL BANK"
+  // el banco ES el concepto.
+  if(f.conPrefijo && !f.banco){
+    var pegado = ppBancoAlFinal(nombre);
+    if(pegado){ nombre = ppRecortar(pegado.resto); f.banco = pegado.banco; }
+  }
+  if(PP_FACTURA_VIEJA.test(" "+nombre)){
+    f.facturaVieja = true;
+    nombre = ppRecortar((" "+nombre).replace(PP_FACTURA_VIEJA, ""));
+  }
+  f.nombre = nombre;
+  f.nota = notas.filter(Boolean).join(" · ");
+  return f;
+}
+
+/* Nombre de la empresa cuando el archivo no trae encabezado: sale del nombre del archivo
+   ("PLANTILLA DE SUPER1 ACTUALIZADA.txt" → SUPER1). Es un último recurso y se avisa. */
+function ppEmpresaDeArchivo(nombreArchivo){
+  var t = ppMayus(String(nombreArchivo||"").replace(/\.[A-Za-z0-9]+$/,"").replace(/[_\-]+/g," "));
+  t = t.replace(/\b(?:PLANTILLAS?|DE|DEL|LA|ACTUALIZAD[AO]S?|ACTUAL|NUEV[AO]|COPIA|FINAL|PAGOS?|PROVEEDOR(?:ES)?)\b/g," ");
+  return ppLimpio(t);
+}
+// Clave para comparar nombres entre empresas: sin acentos, sin puntuación y sin el sufijo societario
+// ("REPRICO", "REPRICO SA" y "REPRICO S A" son el mismo proveedor).
+function ppClaveNombre(nombre){
+  var t = ppMayus(nombre).replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim();
+  var antes;
+  do{ antes = t; t = t.replace(/ (?:S A|SA|S DE R L|S DE RL|S D RL|INC|CORP)$/,""); }while(t!==antes);
+  return t;
+}
+var PP_PALABRAS_GENERICAS = /^(?:DE|DEL|LA|LAS|EL|LOS|Y|E|A|EN|SA|S|R|L|INC|CORP|CIA|COMPANIA|GRUPO|PANAMA|DISTRIBUIDORA|INVERSIONES|EMPRESAS|PRODUCTOS|AGENCIAS?|IMPORTADORA|INDUSTRIAS?|COMERCIAL|INTERNACIONAL|TRANSPORTE|BANCO|NACIONAL|CAJA|AHORROS?|PAGO|\d+)$/;
+function ppPalabras(nombre){
+  return ppClaveNombre(nombre).split(" ").filter(function(p){ return p.length>=3 && !PP_PALABRAS_GENERICAS.test(p); });
+}
+// Dos textos "se parecen" si comparten una palabra significativa, o una empieza como la otra
+// ("ADIPAN" no se parece a "ADITIVOS DE PANAMA": eso lo confirma una persona).
+function ppSeParecen(a, b){
+  var pa = ppPalabras(a), pb = ppPalabras(b);
+  for(var i=0;i<pa.length;i++) if(pb.indexOf(pa[i])!==-1) return true;
+  return false;
+}
+// En qué difieren dos cuentas del mismo nombre: orienta a quien corrige, no decide nada.
+function ppDiferenciaCuentas(a, b){
+  if(a.replace(/^0+/,"") === b.replace(/^0+/,"")) return "difieren solo en ceros a la izquierda";
+  if(a.length === b.length){
+    var d = 0; for(var i=0;i<a.length;i++) if(a[i]!==b[i]) d++;
+    if(d===1) return "difieren en un solo dígito: parece un error de tipeo";
+  }
+  return "son dos cuentas distintas";
+}
+
+/* Lee uno o varios archivos de plantilla → { empresas, filas, hallazgos }.
+   archivos: [{ nombre, texto }]. Varias empresas pueden venir en un mismo archivo, cada una bajo su
+   encabezado (una línea sin número de cuenta y sin coma). */
+function ppParsearPlantilla(archivos){
+  var filas = [], hallazgos = [], empresas = [], vistas = {}, repetidas = {};
+  function H(clase, tipo, empresa, texto, fuente){
+    hallazgos.push({ clase:clase, tipo:tipo, empresa:empresa||"", texto:texto, fuente:fuente||"" });
+  }
+  (archivos||[]).forEach(function(arch){
+    var empresa = null, deArchivo = false, ultimoBloque = null;
+    String(arch.texto||"").split(/\r?\n/).forEach(function(raw, i){
+      var ln = ppLimpio(raw), donde = arch.nombre+" · línea "+(i+1);
+      if(!ln) return;
+      if(!/^\d/.test(ln)){
+        if(ln.indexOf(",")!==-1){
+          H("diff","sinCuenta", empresa, "La línea no empieza con un número de cuenta, así que no se puede usar para pagar: «"+ln+"».", donde);
+          return;
+        }
+        empresa = ppMayus(ln); deArchivo = false;
+        if(vistas[empresa] && ultimoBloque!==empresa) repetidas[empresa] = (repetidas[empresa]||[vistas[empresa]]).concat(donde);
+        if(!vistas[empresa]){ vistas[empresa] = donde; empresas.push(empresa); }
+        ultimoBloque = empresa;
+        return;
+      }
+      if(empresa===null){
+        empresa = ppEmpresaDeArchivo(arch.nombre) || "(SIN EMPRESA)"; deArchivo = true;
+        if(empresa==="(SIN EMPRESA)")
+          H("diff","sinEmpresa", empresa, "El archivo no dice de qué empresa es y su nombre tampoco lo deja deducir. Escribí el nombre de la empresa como primera línea del archivo.", arch.nombre);
+        else
+          H("aviso","empresaDeArchivo", empresa, "El archivo no trae el nombre de la empresa como primera línea: se tomó «"+empresa+"» del nombre del archivo. Confirmá que es correcto, o agregá el encabezado.", arch.nombre);
+        if(!vistas[empresa]){ vistas[empresa] = donde; empresas.push(empresa); }
+        ultimoBloque = empresa;
+      }
+      var f = ppParsearLinea(ln);
+      f.empresa = empresa; f.archivo = arch.nombre; f.linea = i+1; f.donde = donde;
+      if(!f.nombre){
+        H("diff","sinNombre", empresa, "La línea trae la cuenta "+f.cuenta+" pero ningún nombre: no se sabe de quién es. Está cortada o incompleta.", donde+" · "+ln);
+        return;
+      }
+      filas.push(f);
+    });
+  });
+
+  Object.keys(repetidas).forEach(function(e){
+    H("aviso","empresaRepetida", e, "«"+e+"» aparece "+repetidas[e].length+" veces como encabezado. Sus líneas se juntaron en una sola empresa — confirmá que no son dos empresas distintas con el mismo nombre.", repetidas[e].join(" | "));
+  });
+
+  // Dentro de una empresa, la misma cuenta con el mismo nombre dos veces es la misma línea repetida.
+  var unicas = [], porClave = {};
+  filas.forEach(function(f){
+    var k = f.empresa+"|"+f.cuenta+"|"+ppClaveNombre(f.nombre);
+    if(porClave[k]){ porClave[k].repetida = (porClave[k].repetida||1)+1; return; }
+    porClave[k] = f; unicas.push(f);
+  });
+  unicas.forEach(function(f){
+    if(f.repetida) H("informativo","duplicada", f.empresa, f.nombre+" (cuenta "+f.cuenta+") está "+f.repetida+" veces en la lista de "+f.empresa+". Se dejó una sola.", f.donde);
+  });
+  filas = unicas;
+
+  filas.forEach(function(f){
+    if(f.noUsar) H("aviso","noUsar", f.empresa, f.nombre+" (cuenta "+f.cuenta+") está marcada como NO USAR en la plantilla. La línea queda bloqueada: no se puede elegir para un pago.", f.donde+" · "+f.original);
+    if(f.montoViejo || f.facturaVieja){
+      var restos = [f.montoViejo ? "el monto "+f.montoViejo : "", f.facturaVieja ? "un número de factura" : ""].filter(Boolean).join(" y ");
+      H("informativo","restos", f.empresa, f.nombre+" trae "+restos+" de un pago anterior, sin borrar. Se ignora: el monto y la factura de cada pago se cargan aparte.", f.donde+" · "+f.original);
+    }
+    if(f.sinReconocer) H("aviso","campoFinal", f.empresa, "Después de la última coma dice «"+f.sinReconocer+"», que no es un banco que la app reconozca. Quedó como nota, fuera del nombre «"+f.nombre+"». Si es parte del nombre, quitá esa coma en el archivo.", f.donde+" · "+f.original);
+    if(f.avisos.indexOf("cuentaPegada")!==-1) H("informativo","cuentaPegada", f.empresa, "La cuenta "+f.cuenta+" viene pegada al texto, sin coma. Se leyó igual — verificá que el número esté completo.", f.donde+" · "+f.original);
+  });
+
+  /* ---- Controles cruzados entre empresas ----
+     La cuenta es lo único que mueve plata, así que son los dos controles que importan. */
+  // 1) El mismo nombre con dos cuentas: al buscar por nombre habría que elegir una, y no hay con qué.
+  var cuentasDe = {};
+  filas.forEach(function(f){
+    var k = ppClaveNombre(f.nombre); if(!k) return;
+    (cuentasDe[k] = cuentasDe[k] || {})[f.cuenta] = (cuentasDe[k][f.cuenta]||[]).concat(f);
+  });
+  Object.keys(cuentasDe).forEach(function(k){
+    var ctas = Object.keys(cuentasDe[k]); if(ctas.length<2) return;
+    var det = ctas.map(function(c){
+      var emp = cuentasDe[k][c].map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
+      return c+" ("+emp.join(", ")+")";
+    });
+    var pista = ctas.length===2 ? " Las dos "+ppDiferenciaCuentas(ctas[0], ctas[1])+"." : "";
+    H("diff","nombreDosCuentas", "", cuentasDe[k][ctas[0]][0].nombre+" figura con "+ctas.length+" cuentas distintas: "+det.join(" · ")+"."+pista+" Hasta que se defina cuál es la buena, un pago a este nombre puede salir a la cuenta equivocada.", cuentasDe[k][ctas[0]][0].donde);
+    ctas.forEach(function(c){ cuentasDe[k][c].forEach(function(f){ f.enConflicto = true; }); });
+  });
+  // 2) La misma cuenta con dos nombres que no se parecen: uno de los dos tiene la cuenta de otro.
+  //    Que una cuenta sirva a varias personas es normal (una financiera cobra por cuenta de cada
+  //    empleado: "PRESTA PANAMA ..."), y ahí los textos comparten el nombre del acreedor.
+  var nombresDe = {};
+  filas.forEach(function(f){ (nombresDe[f.cuenta] = nombresDe[f.cuenta] || []).push(f); });
+  Object.keys(nombresDe).forEach(function(c){
+    var lista = nombresDe[c], grupos = [];
+    lista.forEach(function(f){
+      for(var g=0; g<grupos.length; g++){
+        if(ppClaveNombre(grupos[g][0].nombre)===ppClaveNombre(f.nombre) || ppSeParecen(grupos[g][0].nombre, f.nombre)){ grupos[g].push(f); return; }
+      }
+      grupos.push([f]);
+    });
+    if(grupos.length<2) return;
+    var det = grupos.map(function(g){
+      var emp = g.map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
+      return "«"+g[0].nombre+"» ("+emp.join(", ")+")";
+    });
+    H("diff","cuentaDosNombres", "", "La cuenta "+c+" figura con nombres que no se parecen: "+det.join(" · ")+". O es el mismo beneficiario escrito de dos formas, o uno de los dos tiene la cuenta equivocada — confirmalo antes de pagar.", lista[0].donde);
+    lista.forEach(function(f){ f.enConflicto = true; });
+  });
+
+  var orden = { diff:0, aviso:1, informativo:2 };
+  hallazgos.sort(function(a,b){ return orden[a.clase]-orden[b.clase]; });
+  return { empresas:empresas, filas:filas, hallazgos:hallazgos };
+}
+
+/* ---- Pantalla del módulo ----
+   La plantilla se lee de uno o varios .txt y vive en memoria: es la misma regla del resto de la app
+   (los archivos se vuelven a subir en cada sesión). */
+// ¿El archivo tiene forma de plantilla? Alcanza con una línea "cuenta,texto": protege de subir un Excel
+// o cualquier otro archivo a esta casilla, que se leería como una plantilla vacía sin avisar.
+function ppPareceplantilla(texto){
+  return String(texto||"").split(/\r?\n/).some(function(l){ return /^\s*\d{5,}\s*,\s*\S/.test(l); });
+}
+function ppReleer(){
+  var m = STATE.mod4;
+  m.plantilla = m.archivos.length ? ppParsearPlantilla(m.archivos) : null;
+  if(!m.plantilla || m.plantilla.empresas.indexOf(m.empresa)===-1) m.empresa = "";
+}
+function ppSubirArchivos(fileList){
+  var files = Array.prototype.slice.call(fileList||[]), faltan = files.length, rechazados = [];
+  if(!faltan) return;
+  function listo(){
+    if(--faltan>0) return;
+    if(rechazados.length) alert("⚠ No parece una plantilla de pagos (se esperan líneas «cuenta,nombre,banco»):\n\n" + rechazados.join("\n"));
+    ppReleer(); renderModulo4();
+  }
+  files.forEach(function(file){
+    var reader = new FileReader();
+    reader.onload = function(e){
+      try{
+        var texto = decodificarTexto(new Uint8Array(e.target.result));
+        if(!ppPareceplantilla(texto)) rechazados.push(file.name);
+        else{
+          // Subir de nuevo un archivo con el mismo nombre lo REEMPLAZA: es la plantilla corregida.
+          STATE.mod4.archivos = STATE.mod4.archivos.filter(function(a){ return a.nombre!==file.name; });
+          STATE.mod4.archivos.push({ nombre:file.name, texto:texto });
+        }
+      }catch(err){ rechazados.push(file.name+" ("+err.message+")"); }
+      listo();
+    };
+    reader.onerror = function(){ rechazados.push(file.name); listo(); };
+    reader.readAsArrayBuffer(file);
+  });
+}
+var PP_GRUPOS = [
+  { clase:"diff",        titulo:"Hay que resolverlo antes de pagar", sub:"Son las líneas donde un pago puede salir a la cuenta equivocada, o no puede salir." },
+  { clase:"aviso",       titulo:"Conviene revisarlo",                sub:"La app tomó una decisión para poder leer la línea. Confirmá que sea la correcta." },
+  { clase:"informativo", titulo:"Se leyó igual",                     sub:"Desprolijidades del archivo que no cambian a quién se le paga." }
+];
+function ppHallazgosHtml(P){
+  var m = STATE.mod4;
+  return PP_GRUPOS.map(function(g){
+    var items = P.hallazgos.filter(function(h){ return h.clase===g.clase; });
+    if(!items.length) return "";
+    // Lo informativo arranca recogido: son decenas de líneas que no piden ninguna acción.
+    var plegado = m.plegados[g.clase]!==undefined ? m.plegados[g.clase] : g.clase==="informativo";
+    return '<div class="step-block pp-'+g.clase+(plegado?' plegado':'')+'">' +
+      '<div class="step-head" data-pp-plegar="'+g.clase+'" role="button" tabindex="0" aria-expanded="'+(plegado?"false":"true")+'">' +
+        '<div class="lado"><span class="chev">▼</span><h4>'+g.titulo+'</h4></div><span class="count">'+items.length+'</span></div>' +
+      '<div class="step-body"><p class="pp-sub">'+g.sub+'</p>' +
+      items.map(function(h){
+        return '<div class="finding"><div class="ftxt">'+(h.empresa?'<b>'+esc(h.empresa)+'</b> — ':'')+esc(h.texto)+
+          '<span class="src">'+esc(h.fuente)+'</span></div></div>';
+      }).join("") + '</div></div>';
+  }).join("");
+}
+function ppFilasVisibles(P){
+  var m = STATE.mod4, q = ppMayus(m.q);
+  return P.filas.filter(function(f){
+    if(m.empresa && f.empresa!==m.empresa) return false;
+    if(!q) return true;
+    return ppMayus(f.nombre).indexOf(q)!==-1 || f.cuenta.indexOf(q)!==-1;
+  });
+}
+function ppTablaHtml(P){
+  var m = STATE.mod4, filas = ppFilasVisibles(P), verEmpresa = !m.empresa;
+  if(!filas.length) return '<div class="empty-skip">Ninguna línea coincide con la búsqueda.</div>';
+  return '<table class="ret-tabla pp-tabla"><thead><tr>'+(verEmpresa?'<th>Empresa</th>':'')+
+    '<th>Cuenta</th><th>Nombre</th><th>Banco</th><th>Observación</th></tr></thead><tbody>' +
+    filas.map(function(f){
+      var obs = [];
+      if(f.noUsar) obs.push('<span class="pp-marca pp-bloq">NO USAR</span>');
+      if(f.enConflicto) obs.push('<span class="pp-marca pp-conf">cuenta por confirmar</span>');
+      if(f.nota) obs.push(esc(f.nota));
+      return '<tr class="'+(f.noUsar?'pp-fila-bloq':'')+'">'+(verEmpresa?'<td>'+esc(f.empresa)+'</td>':'')+
+        '<td class="pp-cta">'+esc(f.cuenta)+'</td><td>'+esc(f.nombre)+'</td><td>'+esc(f.banco)+'</td><td>'+obs.join(" ")+'</td></tr>';
+    }).join("") + '</tbody></table>';
+}
+function renderResultadosMod4(){
+  var area = document.getElementById("resultsArea4"); if(!area) return;
+  var m = STATE.mod4, P = m.plantilla;
+  if(!P){ area.innerHTML = ""; return; }
+  var rojas = P.hallazgos.filter(function(h){ return h.clase==="diff"; }).length;
+  var avisos = P.hallazgos.filter(function(h){ return h.clase==="aviso"; }).length;
+  var cuentas = {}; P.filas.forEach(function(f){ cuentas[f.cuenta] = 1; });
+  area.innerHTML =
+    '<div class="results-head"><h2>Plantilla madre</h2>' +
+      (P.hallazgos.length?'<button class="btn-export" id="exportBtn4">Descargar hallazgos (Excel)</button>':'')+'</div>' +
+    '<div class="summary-bar">' +
+      '<span class="chip">'+P.empresas.length+' empresas</span>' +
+      '<span class="chip">'+P.filas.length+' líneas de pago</span>' +
+      '<span class="chip">'+Object.keys(cuentas).length+' cuentas distintas</span>' +
+      (rojas?'<span class="chip alert">'+rojas+' por resolver</span>':'<span class="chip ok">Sin cuentas en conflicto</span>') +
+      (avisos?'<span class="chip warn">'+avisos+' por revisar</span>':'') +
+    '</div>' +
+    ppHallazgosHtml(P) +
+    '<div class="step-block"><div class="step-body">' +
+      '<div class="pp-filtros">' +
+        '<select id="ppEmpresa" class="cg-inp"><option value="">Todas las empresas ('+P.filas.length+')</option>' +
+          P.empresas.map(function(e){
+            var n = P.filas.filter(function(f){ return f.empresa===e; }).length;
+            return '<option value="'+esc(e)+'"'+(m.empresa===e?' selected':'')+'>'+esc(e)+' ('+n+')</option>';
+          }).join("") + '</select>' +
+        '<input id="ppBuscar" class="cg-inp" type="search" placeholder="Buscar por nombre o cuenta" value="'+esc(m.q)+'">' +
+      '</div><div id="ppTabla">'+ppTablaHtml(P)+'</div>' +
+    '</div></div>';
+  var eb = document.getElementById("exportBtn4"); if(eb) eb.onclick = exportarHallazgosPlantilla;
+  var se = document.getElementById("ppEmpresa");
+  if(se) se.addEventListener("change", function(){ m.empresa = se.value; document.getElementById("ppTabla").innerHTML = ppTablaHtml(P); });
+  // Al teclear solo se redibuja la tabla: redibujar todo el bloque le quitaría el foco al buscador.
+  var bq = document.getElementById("ppBuscar");
+  if(bq) bq.addEventListener("input", function(){ m.q = bq.value; document.getElementById("ppTabla").innerHTML = ppTablaHtml(P); });
+  area.querySelectorAll(".step-head[data-pp-plegar]").forEach(function(h){
+    function alternar(){
+      var k = h.getAttribute("data-pp-plegar"), bloque = h.parentNode;
+      var plegado = !(bloque.className.indexOf("plegado")!==-1);
+      m.plegados[k] = plegado; renderResultadosMod4();
+    }
+    h.addEventListener("click", alternar);
+    h.addEventListener("keydown", function(e){ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); alternar(); } });
+  });
+}
+function renderModulo4(){
+  var m = STATE.mod4;
+  var lista = m.archivos.map(function(a, i){
+    return '<span class="pp-archivo">'+esc(a.nombre)+'<button data-pp-quitar="'+i+'" title="Quitar este archivo">✕</button></span>';
+  }).join("");
+  app.innerHTML = headerHtml() +
+    '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
+    '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> A quién se le paga, por empresa</h3>' +
+    '<p class="desc">Subí los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga. Podés subir varios archivos a la vez. La app revisa que cada cuenta tenga un solo dueño antes de que se use para armar un pago.</p>' +
+    '<div class="dropzones"><div class="dz'+(m.archivos.length?' filled':'')+'" id="ppDz">' +
+      '<div class="ico">'+(m.archivos.length?"✓":"📄")+'</div>' +
+      '<div class="info"><div class="lbl">Plantillas de pago</div>' +
+        '<div class="expected">Archivo esperado: <b>.txt con las líneas «cuenta,PAGO DE PROVEEDOR nombre,banco»</b></div>' +
+        '<details class="dz-ayuda"><summary>¿Cómo tiene que venir el archivo?</summary><div>Es el mismo bloc de notas que ya usás para armar los pagos. El nombre de la empresa va solo en una línea y debajo sus beneficiarios. Si un archivo es de una sola empresa y no trae ese encabezado, la app toma el nombre del archivo y te avisa.</div></details>' +
+        '<div class="sub">'+(m.archivos.length?(m.archivos.length+" archivo(s) cargado(s)"):"Sin subir · arrastrá los .txt aquí o usá el botón")+'</div>' +
+      '</div>' +
+      '<label class="btn-sel">'+(m.archivos.length?"Agregar":"Subir")+'<input type="file" accept=".txt,text/plain" multiple id="ppFile"></label>' +
+    '</div></div>' +
+    (lista?'<div class="pp-archivos">'+lista+'<button class="btn-plegar" id="ppLimpiar">Quitar todos</button></div>':'') +
+    '<p class="cg-note pp-nota">La plantilla no se guarda todavía: al cerrar la pestaña hay que volver a subirla.</p>' +
+    '</div><div id="resultsArea4"></div>';
+  document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
+  var inp = document.getElementById("ppFile");
+  if(inp) inp.addEventListener("change", function(e){ ppSubirArchivos(e.target.files); });
+  var dz = document.getElementById("ppDz");
+  if(dz){
+    dz.addEventListener("dragover", function(e){ e.preventDefault(); dz.classList.add("dragover"); });
+    dz.addEventListener("dragleave", function(){ dz.classList.remove("dragover"); });
+    dz.addEventListener("drop", function(e){ e.preventDefault(); dz.classList.remove("dragover"); ppSubirArchivos(e.dataTransfer.files); });
+  }
+  app.querySelectorAll("[data-pp-quitar]").forEach(function(b){
+    b.onclick = function(){ m.archivos.splice(parseInt(b.getAttribute("data-pp-quitar"),10), 1); ppReleer(); renderModulo4(); };
+  });
+  var lim = document.getElementById("ppLimpiar");
+  if(lim) lim.onclick = function(){ m.archivos = []; ppReleer(); renderModulo4(); };
+  renderResultadosMod4();
+}
+function exportarHallazgosPlantilla(){
+  var P = STATE.mod4.plantilla; if(!P) return;
+  var estado = { diff:"Resolver antes de pagar", aviso:"Revisar", informativo:"Se leyó igual" };
+  var rows = [["Estado","Empresa","Hallazgo","Fuente","Corregido"]];
+  P.hallazgos.forEach(function(h){ rows.push([estado[h.clase], h.empresa, h.texto, h.fuente, ""]); });
+  var ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:24},{wch:22},{wch:90},{wch:60},{wch:10}];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
+  XLSX.writeFile(wb, "plantilla_de_pagos_hallazgos.xlsx");
+}
+
+
 function render(){
   if(STATE.view==="menu") return renderMenu();
   if(STATE.view==="modulo1") return renderModulo1();
   if(STATE.view==="modulo2") return renderModulo2();
+  if(STATE.view==="modulo4") return renderModulo4();
 }
 
 function headerHtml(){
@@ -7506,7 +7985,11 @@ function renderMenu(){
     {id:"modulo3", nombre:"Conciliador de auxiliares",
       desc:"Compara el diario contra el auxiliar y enumera las diferencias entre ambas fuentes.",
       enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tag:TAG_CONCILIATORIO,
-      tagText:"2 archivos", action:"Próximamente"}
+      tagText:"2 archivos", action:"Próximamente"},
+    {id:"modulo4", nombre:"Plantilla de pagos",
+      desc:"La plantilla madre de beneficiarios por empresa: cuenta, nombre y banco. Revisa que cada cuenta tenga un solo dueño antes de armar un pago.",
+      enabled:true, icon:"🏦", iconBg:"var(--accent-green-bg)", tag:TAG_REVISION,
+      tagText:"plantillas .txt", action:"Abrir"}
   ];
   mods.forEach(function(m){
     var el = document.createElement("div");

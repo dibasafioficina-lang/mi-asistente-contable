@@ -6145,6 +6145,207 @@ test("un afiliado reclamado por dos cuentas no se mapea", () => {
   eq(r.hojasFuera.length, 1);
 });
 
+/* =========================================================================
+   PLANTILLA DE PAGOS — LA PLANTILLA MADRE
+   Las cuentas de estas pruebas son FICTICIAS (conservan la forma de las reales): las de los
+   beneficiarios no se guardan en el repositorio.
+   ========================================================================= */
+grupo("Plantilla de pagos — lectura de una línea");
+
+// La forma limpia: cuenta, prefijo + nombre, banco.
+test("línea limpia: cuenta, nombre sin el prefijo y banco", () => {
+  const f = ppParsearLinea("0430000000001,PAGO DE PROVEEDOR Kenyi Graell,BG");
+  eq(f.cuenta, "0430000000001"); eq(f.nombre, "Kenyi Graell"); eq(f.banco, "Banco General");
+});
+// Hallazgo: SUFECHI trae la coma ANTES del nombre ("PAGO DE PROVEEDOR,PEDRO MORALES"). Leído por posición,
+// el nombre quedaba en el campo del banco y la línea salía sin nombre.
+test("la coma antes del nombre no deja el nombre en el campo del banco", () => {
+  const f = ppParsearLinea("0472000000002,PAGO DE PROVEEDOR,PEDRO MORALES");
+  eq(f.nombre, "PEDRO MORALES"); eq(f.banco, "");
+});
+test("el banco pegado al nombre con un espacio se despega", () => {
+  const f = ppParsearLinea("0395000000003,PAGO DE PROVEEDOR,IMPADOEL BG");
+  eq(f.nombre, "IMPADOEL"); eq(f.banco, "Banco General");
+  const g = ppParsearLinea("88137000004,PAGO DE PROVEEDOR CARMEN ROSA ARABA GLOBAL BANK");
+  eq(g.nombre, "CARMEN ROSA ARABA"); eq(g.banco, "Global Bank");
+});
+// Solo del FINAL: en el medio no hay forma de saber si es el banco o parte del nombre.
+test("un banco en el medio del nombre no se toca", () => {
+  const f = ppParsearLinea("0430000000005,PAGO DE PROVEEDOR DANIEL MENDOZA BG INDUSTRIAS DNL");
+  eq(f.nombre, "DANIEL MENDOZA BG INDUSTRIAS DNL"); eq(f.banco, "");
+});
+// Hallazgo: "PAGO DE PROVEEDOR BAC,6667.89" es un pago AL banco. Despegar "BAC" dejaba la línea sin nombre.
+test("despegar el banco nunca deja el nombre vacío", () => {
+  const f = ppParsearLinea("217000006,PAGO DE PROVEEDOR BAC,6667.89");
+  eq(f.nombre, "BAC"); eq(f.montoViejo, "6667.89");
+});
+// En un traspaso el banco ES el concepto: sin el prefijo de proveedor no se despega nada.
+test("sin «PAGO DE PROVEEDOR» el texto se conserva tal cual", () => {
+  const f = ppParsearLinea("1200000007,TRASPASO A CALIZAS A CANAL BANK,5000.00 CALIZAS");
+  eq(f.nombre, "TRASPASO A CALIZAS A CANAL BANK"); eq(f.conPrefijo, false); eq(f.montoViejo, "5000.00");
+});
+test("variantes del prefijo: «PAGO A», «PAGO, DE», doble coma y prefijo pegado al nombre", () => {
+  eq(ppParsearLinea("0395000000008,PAGO A PROVEEDOR \tDISTRIBUIDORA IMPERIO BG").nombre, "DISTRIBUIDORA IMPERIO");
+  eq(ppParsearLinea("104000009,PAGO, DE PROVEEDOR VENTAS Y MERCADEO,BAC").nombre, "VENTAS Y MERCADEO");
+  eq(ppParsearLinea("104000010,,PAGO DE PROVEEDOR ADIPAN,BAC").nombre, "ADIPAN");
+  eq(ppParsearLinea("010000000011, PAGO A PROVEEDOR GRUPO LIANA SA,BN").banco, "Banco Nacional");
+  eq(ppParsearLinea("0100000012,PAGO DE PROVEEDOREL RANCHERITO S A,BANIS").nombre, "EL RANCHERITO S A");
+});
+// Hallazgo: REALTY trae "10000339780PAGO DE PROVEEDOR SERGIO GONZALEZ" — sin coma tras la cuenta.
+test("la cuenta pegada al texto se lee y se avisa", () => {
+  const f = ppParsearLinea("10000000013PAGO DE PROVEEDOR SERGIO GONZALEZ,BN NOTARIA");
+  eq(f.cuenta, "10000000013"); eq(f.nombre, "SERGIO GONZALEZ"); eq(f.banco, "Banco Nacional"); eq(f.nota, "NOTARIA");
+  eq(f.avisos.indexOf("cuentaPegada") !== -1, true);
+});
+// Hallazgo: 43 líneas traían el monto de una corrida anterior, pegado a cualquier cosa.
+test("el monto de una corrida anterior se aparta, venga pegado a lo que venga", () => {
+  const a = ppParsearLinea("0395000000014,PAGO DE PROVEEDOR ASOCIACION APEX,85.00BG");
+  eq(a.nombre, "ASOCIACION APEX"); eq(a.montoViejo, "85.00"); eq(a.banco, "Banco General");
+  const b = ppParsearLinea("0357000000015,PAGO DE PROVEEDOR,48.22VIVERO SARA CELY");
+  eq(b.nombre, "VIVERO SARA CELY"); eq(b.montoViejo, "48.22");
+  const c = ppParsearLinea("0330000000016,PAGO DE PROVEEDOR AGRO PRO PANAMA SA,16666.67");
+  eq(c.nombre, "AGRO PRO PANAMA SA"); eq(c.montoViejo, "16666.67");
+});
+// La factura vieja al final del nombre: la app le va a pegar la del pago nuevo, y saldrían las dos.
+test("la factura de una corrida anterior no queda en el nombre", () => {
+  const a = ppParsearLinea("0442000000017,PAGO DE PROVEEDOR ALEXIS MONTENEGRO fact 605,BG");
+  eq(a.nombre, "ALEXIS MONTENEGRO"); eq(a.facturaVieja, true);
+  const b = ppParsearLinea("0430000000018,PAGO DE PROVEEDOR ANTHONY CHEN FACT,BG");
+  eq(b.nombre, "ANTHONY CHEN"); eq(b.facturaVieja, true);
+  eq(ppParsearLinea("0430000000019,PAGO DE PROVEEDOR FACTORY OUTLET,BG").facturaVieja, false);
+});
+test("«NO USAR» y «NO UTILIZAR ESTA CUENTA» bloquean la línea", () => {
+  const a = ppParsearLinea("10500000020,PAGO DE PROVEEDOR MULTIBANK,6667.89 NO USAR");
+  eq(a.noUsar, true); eq(a.nombre, "MULTIBANK");
+  const b = ppParsearLinea("0342000000021,PAGO DE PROVEEDOR,ZAROSA BG NO UTILIZAR ESTA CUENTA");
+  eq(b.noUsar, true); eq(b.nombre, "ZAROSA"); eq(b.banco, "Banco General");
+});
+test("el correo va a la nota, no al nombre", () => {
+  const f = ppParsearLinea("0345000000022,PAGO DE PROVEEDOR PRESTA PANAMA KENIA GONZALEZ,BG COBROS@PRESTAPANAMA.COM...");
+  eq(f.nombre, "PRESTA PANAMA KENIA GONZALEZ"); eq(f.banco, "Banco General"); eq(f.nota, "COBROS@PRESTAPANAMA.COM");
+});
+// "GENERAL", "CANAL", "MULTI" son palabras comunes: solo valen como banco cuando ocupan SOLAS su campo.
+test("una forma ambigua del banco solo vale sola en su campo", () => {
+  eq(ppParsearLinea("0312000000023,PAGO DE PROVEEDOR INTERMEDIC, GENERAL").banco, "Banco General");
+  const f = ppParsearLinea("0312000000024,PAGO DE PROVEEDOR SERVICIOS EN GENERAL");
+  eq(f.nombre, "SERVICIOS EN GENERAL"); eq(f.banco, "");
+});
+// El nombre va a un archivo separado por comas: una coma adentro le agregaría un campo.
+test("el nombre nunca conserva una coma", () => {
+  const f = ppParsearLinea("104000025,PAGO A PROVEEDOR Management Information System, S.A. BAC");
+  eq(f.nombre, "Management Information System S.A"); eq(f.banco, "BAC");
+  eq(f.nombre.indexOf(","), -1);
+});
+// Hallazgo: los .txt traen espacios duros (U+00A0) dentro de los nombres; comparados tal cual,
+// "ETIPLAST DE PANAMA S A" eran dos proveedores distintos.
+test("el espacio duro cuenta como espacio", () => {
+  eq(ppParsearLinea("100000026,PAGO DE PROVEEDOR ETIPLAST DE PANAMA S A BAC").nombre, "ETIPLAST DE PANAMA S A");
+});
+// Lo que hay después de la última coma y no es un banco no se adivina: queda como nota y se reporta.
+test("un último campo que no es banco queda fuera del nombre y marcado", () => {
+  const f = ppParsearLinea("0442000000027,PAGO DE PROVEEDOR CC SERVICES,SA");
+  eq(f.nombre, "CC SERVICES"); eq(f.sinReconocer, "SA");
+});
+test("lo que no empieza con una cuenta no es una línea de pago", () => eq(ppParsearLinea("SUFECHI"), null));
+
+grupo("Plantilla de pagos — el archivo completo");
+
+const ppArch = (nombre, lineas) => ({ nombre, texto: lineas.join("\r\n") });
+const ppTipos = (r, tipo) => r.hallazgos.filter(h => h.tipo === tipo);
+
+test("las empresas salen de los encabezados y cada línea queda en la suya", () => {
+  const r = ppParsearPlantilla([ppArch("PLANTILLAS.txt", [
+    "SUFECHI", "0752000000001,PAGO DE PROVEEDOR OVIDIO NUNEZ,BG", "", "",
+    "SON IMPORT", "4010000002,PAGO DE PROVEEDOR GRUPO FOSTER CREDICORP BANK"])]);
+  eq(r.empresas.join("|"), "SUFECHI|SON IMPORT");
+  eq(r.filas.length, 2); eq(r.filas[1].empresa, "SON IMPORT"); eq(r.filas[1].banco, "Credicorp Bank");
+  eq(r.hallazgos.length, 0, "un archivo limpio no reporta nada");
+});
+// Hallazgo: la plantilla de SUPER1 no trae encabezado. Sin esto sus 215 líneas no tenían empresa.
+test("sin encabezado, la empresa sale del nombre del archivo y se avisa", () => {
+  const r = ppParsearPlantilla([ppArch("PLANTILLA DE SUPER1 ACTUALIZADA.txt", ["104000003,PAGO DE PROVEEDOR NUTRIAMERICAS SA, BAC"])]);
+  eq(r.filas[0].empresa, "SUPER1");
+  eq(ppTipos(r, "empresaDeArchivo").length, 1);
+  eq(ppEmpresaDeArchivo("22aaf866-PLANTILLA_DE_FARMACIA.txt").indexOf("FARMACIA") !== -1, true);
+});
+// Hallazgo: AP FARY termina en "0457000027", una línea cortada. No hay a quién pagarle.
+test("una línea cortada (cuenta sin nombre) es una diferencia, no una fila", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", ["AP FARY", "0457000004"])]);
+  eq(r.filas.length, 0); eq(ppTipos(r, "sinNombre").length, 1); eq(r.hallazgos[0].clase, "diff");
+});
+/* Hallazgo: EMPRESAS CARBONE figura con 0313… en una empresa y 0312… en otra, y JOSUE MCPHEE con y sin el
+   cero inicial. Al buscar por nombre habría que elegir una cuenta, y no hay con qué. */
+test("el mismo nombre con dos cuentas es una diferencia, y dice en qué difieren", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", [
+    "SUFECHI",  "0313000000005,PAGO DE PROVEEDOR,EMPRESAS CARBONE SA",
+    "SHOPPING", "0312000000005,PAGO DE PROVEEDOR EMPRESAS CARBONE,BG",
+    "SUPER1",   "118000006,PAGO DE PROVEEDOR JOSUE MCPHEE,", "0118000006,PAGO DE PROVEEDOR JOSUE MCPHEE,BANISTMO"])]);
+  const h = ppTipos(r, "nombreDosCuentas");
+  eq(h.length, 2);
+  eq(h[0].texto.indexOf("un solo dígito") !== -1, true, "Carbone");
+  eq(h[1].texto.indexOf("ceros a la izquierda") !== -1, true, "McPhee");
+  eq(r.filas.every(f => f.enConflicto), true, "las cuatro líneas quedan marcadas");
+});
+// Hallazgo: la cuenta de FELIPE MOTTA figura también como AVICOLAS ATHENAS. Uno de los dos está mal.
+test("la misma cuenta con dos nombres que no se parecen es una diferencia", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", ["SUPER1",
+    "0302000000007,PAGO DE PROVEEDOR,FELIPE MOTTA BG", "0302000000007,PAGO DE PROVEEDOR AVICOLAS ATHENAS,"])]);
+  eq(ppTipos(r, "cuentaDosNombres").length, 1);
+});
+/* ...pero una cuenta con varias PERSONAS es normal: PRESTA PANAMA cobra en una sola cuenta lo de ocho
+   empleados, y el texto dice de quién es cada pago. Reportarlo taparía los conflictos de verdad. */
+test("una financiera con varias personas en la misma cuenta no es un conflicto", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", [
+    "SHOPPING", "0345000000008,PAGO DE PROVEEDOR PRESTA PANAMA ALBERTO MONTEZUMA,",
+    "BLVD",     "0345000000008,PAGO DE PROVEEDOR PRESTA PANAMA ARELYS SALDANA,BG",
+    "BOUTI",    "0345000000008,PAGO DE PROVEEDOR PRESTA PANAMA KENIA GONZALEZ,BG"])]);
+  eq(r.filas.length, 3, "las tres líneas se conservan: el nombre identifica a la persona");
+  eq(r.hallazgos.length, 0);
+});
+test("«REPRICO», «REPRICO SA» y «REPRICO S A» son el mismo proveedor", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", [
+    "FARMACIA", "0324000000009,PAGO DE PROVEEDOR REPRICO, GENERAL",
+    "SUPER1",   "0324000000009,PAGO DE PROVEEDOR REPRICO SA,BG",
+    "BLVD",     "0324000000009,PAGO DE PROVEEDOR REPRICO S A,BG"])]);
+  eq(r.hallazgos.length, 0);
+});
+test("la misma línea dos veces en una empresa queda una sola, y se dice", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", ["SUPER1",
+    "0402000000010,PAGO DE PROVEEDOR DISTRIBUIDORA LEVEL SA,BG", "0402000000010,PAGO DE PROVEEDOR DISTRIBUIDORA LEVEL SA,BG"])]);
+  eq(r.filas.length, 1); eq(ppTipos(r, "duplicada").length, 1);
+});
+// Hallazgo: SON IMPORT y SOLDEMI aparecen dos veces como encabezado en el mismo archivo.
+test("una empresa que aparece dos veces se junta y se avisa", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", [
+    "SOLDEMI", "0472000000011,PAGO DE PROVEEDOR JESUS LEDEZMA BEEPERS,BG",
+    "REALTY",  "10000000012,PAGO DE PROVEEDOR,JUAN SILVERA BN",
+    "SOLDEMI", "0301000000013,PAGO DE PROVEEDOR SEGURO SURAMERICAN SA"])]);
+  eq(r.empresas.length, 2);
+  eq(r.filas.filter(f => f.empresa === "SOLDEMI").length, 2);
+  eq(ppTipos(r, "empresaRepetida").length, 1);
+});
+test("las diferencias van primero en la lista de hallazgos", () => {
+  const r = ppParsearPlantilla([ppArch("P.txt", ["GANADERA",
+    "0342000000014,PAGO DE PROVEEDOR,ZAROSA BG NO UTILIZAR ESTA CUENTA",
+    "0317000000015,PAGO DE PROVEEDOR Cemento Bayano SA,829.24",
+    "0457000016"])]);
+  eq(r.hallazgos.map(h => h.clase).join(","), "diff,aviso,informativo");
+});
+// Protege de subir un Excel o cualquier otro archivo a la casilla: se leería como plantilla vacía.
+test("un archivo que no es una plantilla se reconoce", () => {
+  eq(ppPareceplantilla("SUFECHI\r\n0752000000001,PAGO DE PROVEEDOR OVIDIO NUNEZ,BG"), true);
+  eq(ppPareceplantilla("PK\u0003\u0004 esto es un xlsx\nFecha,Monto\n"), false);
+});
+test("la pantalla del módulo dibuja la plantilla y escapa lo que viene del archivo", () => {
+  STATE.mod4.archivos = [ppArch("P.txt", ["SUFECHI", "0752000000001,PAGO DE PROVEEDOR <b>OVIDIO</b>,BG", "0457000016"])];
+  ppReleer(); renderModulo4();
+  const h = store.resultsArea4.innerHTML;
+  eq(h.indexOf("&lt;b&gt;OVIDIO&lt;/b&gt;") !== -1, true, "el nombre se muestra escapado");
+  eq(h.indexOf("<b>OVIDIO</b>"), -1);
+  eq(h.indexOf("1 por resolver") !== -1, true);
+  STATE.mod4.archivos = []; ppReleer();
+});
+
 /* --- resumen --- */
 console.log("\n" + "=".repeat(52));
 console.log("  " + ok + " pasaron, " + fail + " fallaron");
