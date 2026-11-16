@@ -245,6 +245,12 @@
   .pp-tabla tr.pp-fila-bloq td:last-child{text-decoration:none}
   .pp-marca{display:inline-block;font-size:11px;font-weight:800;border-radius:999px;padding:2px 8px;white-space:nowrap}
   .pp-bloq{background:var(--alert-bg);color:var(--alert)}
+  .pp-tabla td.pp-acc{white-space:nowrap;text-align:right}
+  .pp-tabla tr.pp-editando td{background:#FBF7F9;vertical-align:top}
+  .pp-tabla tr.pp-editando .cg-inp{width:150px;text-align:left;font-weight:700}
+  .pp-tabla tr.pp-editando .pp-ed-nombre{width:100%;min-width:220px}
+  .pp-alta{margin:4px 0 12px}
+  .pp-vacia{padding-top:16px}
   .pp-form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:8px}
   .pp-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:800;color:var(--slate)}
   .pp-form .cg-inp{width:150px;text-align:left;font-weight:700}
@@ -558,7 +564,8 @@ var STATE = {
     retenciones:null
   },
   mod2:{ result:null, saldoIni:null, saldoIniDetalle:null, libroQ:"", libroDest:"", verIgual:false },
-  mod4:{ archivos:[], plantilla:null, empresa:"", q:"", plegados:{}, pagos:null, descargas:{}, errorForm:"", fotos:[], minis:{}, leyendo:false,
+  mod4:{ filas:null, plantilla:undefined, importe:null, editando:null, sinGuardar:false, empresa:"", q:"", plegados:{},
+         alta:{ abierta:false, empresa:"", cuenta:"", nombre:"", banco:"", error:"" }, pagos:null, descargas:{}, errorForm:"", fotos:[], minis:{}, leyendo:false,
          form:{ empresa:"", benef:"", factura:"", monto:"", todas:false } },
   parsed:{},
   // Ventana de 7 DÍAS HÁBILES del banco (ver distanciaBancaria): cubre el rezago real con el que el banco
@@ -592,7 +599,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.4";
+var APP_VERSION = "2026.11.5";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -7599,7 +7606,7 @@ var PP_BANCOS = [
   { banco:"Mercantil",       seguro:/^BANCO MERCANTIL$/,                                    suelto:/^MERCANTIL$/ },
   { banco:"Canal Bank",      seguro:/^CANAL BANK$/,                                         suelto:/^CANAL$/ },
   { banco:"Banco Aliado",    seguro:/^BANCO ALIADO$/,                                       suelto:null },
-  { banco:"Davivienda",      seguro:/^(?:DAVIBANK|DAVIDBAN|DAVIANK)(?: CORR)?$/,            suelto:null },
+  { banco:"Davibank",        seguro:/^(?:DAVIBANK|DAVIDBAN|DAVIANK)(?: CORR)?$/,            suelto:null },
   { banco:"St. Georges",     seguro:/^ST GEORGES$/,                                         suelto:null }
 ];
 function ppLimpio(s){
@@ -7727,6 +7734,59 @@ function ppDiferenciaCuentas(a, b){
   return "son dos cuentas distintas";
 }
 
+function ppDonde(f){ return f.donde || ("Plantilla de "+f.empresa); }
+/* ---- Controles de la plantilla ----
+   Se recalculan sobre TODAS las líneas cada vez que la plantilla cambia (al importar, al agregar o al
+   editar): la cuenta es lo único que mueve plata, así que son los controles que importan. Marcan cada
+   línea involucrada con `enConflicto`. */
+function ppControlesDePlantilla(filas){
+  var hallazgos = [];
+  function H(clase, tipo, empresa, texto, fuente){
+    hallazgos.push({ clase:clase, tipo:tipo, empresa:empresa||"", texto:texto, fuente:fuente||"" });
+  }
+  filas.forEach(function(f){
+    f.enConflicto = false;
+    if(f.noUsar) H("aviso","noUsar", f.empresa, f.nombre+" (cuenta "+f.cuenta+") está marcada como NO USAR en la plantilla. La línea queda bloqueada: no se puede elegir para un pago.", ppDonde(f)+(f.original?" · "+f.original:""));
+  });
+  // 1) El mismo nombre con dos cuentas: al buscar por nombre habría que elegir una, y no hay con qué.
+  var cuentasDe = {};
+  filas.forEach(function(f){
+    var k = ppClaveNombre(f.nombre); if(!k) return;
+    (cuentasDe[k] = cuentasDe[k] || {})[f.cuenta] = (cuentasDe[k][f.cuenta]||[]).concat(f);
+  });
+  Object.keys(cuentasDe).forEach(function(k){
+    var ctas = Object.keys(cuentasDe[k]); if(ctas.length<2) return;
+    var det = ctas.map(function(c){
+      var emp = cuentasDe[k][c].map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
+      return c+" ("+emp.join(", ")+")";
+    });
+    var pista = ctas.length===2 ? " Las dos "+ppDiferenciaCuentas(ctas[0], ctas[1])+"." : "";
+    H("diff","nombreDosCuentas", "", cuentasDe[k][ctas[0]][0].nombre+" figura con "+ctas.length+" cuentas distintas: "+det.join(" · ")+"."+pista+" Hasta que se defina cuál es la buena, un pago a este nombre puede salir a la cuenta equivocada.", ppDonde(cuentasDe[k][ctas[0]][0]));
+    ctas.forEach(function(c){ cuentasDe[k][c].forEach(function(f){ f.enConflicto = true; }); });
+  });
+  // 2) La misma cuenta con dos nombres que no se parecen: uno de los dos tiene la cuenta de otro.
+  //    Que una cuenta sirva a varias personas es normal (una financiera cobra por cuenta de cada
+  //    empleado: "PRESTA PANAMA ..."), y ahí los textos comparten el nombre del acreedor.
+  var nombresDe = {};
+  filas.forEach(function(f){ (nombresDe[f.cuenta] = nombresDe[f.cuenta] || []).push(f); });
+  Object.keys(nombresDe).forEach(function(c){
+    var lista = nombresDe[c], grupos = [];
+    lista.forEach(function(f){
+      for(var g=0; g<grupos.length; g++){
+        if(ppClaveNombre(grupos[g][0].nombre)===ppClaveNombre(f.nombre) || ppSeParecen(grupos[g][0].nombre, f.nombre)){ grupos[g].push(f); return; }
+      }
+      grupos.push([f]);
+    });
+    if(grupos.length<2) return;
+    var det = grupos.map(function(g){
+      var emp = g.map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
+      return "«"+g[0].nombre+"» ("+emp.join(", ")+")";
+    });
+    H("diff","cuentaDosNombres", "", "La cuenta "+c+" figura con nombres que no se parecen: "+det.join(" · ")+". O es el mismo beneficiario escrito de dos formas, o uno de los dos tiene la cuenta equivocada — confirmalo antes de pagar.", ppDonde(lista[0]));
+    lista.forEach(function(f){ f.enConflicto = true; });
+  });
+  return hallazgos;
+}
 /* Lee uno o varios archivos de plantilla → { empresas, filas, hallazgos }.
    archivos: [{ nombre, texto }]. Varias empresas pueden venir en un mismo archivo, cada una bajo su
    encabezado (una línea sin número de cuenta y sin coma). */
@@ -7787,7 +7847,6 @@ function ppParsearPlantilla(archivos){
   filas = unicas;
 
   filas.forEach(function(f){
-    if(f.noUsar) H("aviso","noUsar", f.empresa, f.nombre+" (cuenta "+f.cuenta+") está marcada como NO USAR en la plantilla. La línea queda bloqueada: no se puede elegir para un pago.", f.donde+" · "+f.original);
     if(f.montoViejo || f.facturaVieja){
       var restos = [f.montoViejo ? "el monto "+f.montoViejo : "", f.facturaVieja ? "un número de factura" : ""].filter(Boolean).join(" y ");
       H("informativo","restos", f.empresa, f.nombre+" trae "+restos+" de un pago anterior, sin borrar. Se ignora: el monto y la factura de cada pago se cargan aparte.", f.donde+" · "+f.original);
@@ -7795,84 +7854,175 @@ function ppParsearPlantilla(archivos){
     if(f.sinReconocer) H("aviso","campoFinal", f.empresa, "Después de la última coma dice «"+f.sinReconocer+"», que no es un banco que la app reconozca. Quedó como nota, fuera del nombre «"+f.nombre+"». Si es parte del nombre, quitá esa coma en el archivo.", f.donde+" · "+f.original);
     if(f.avisos.indexOf("cuentaPegada")!==-1) H("informativo","cuentaPegada", f.empresa, "La cuenta "+f.cuenta+" viene pegada al texto, sin coma. Se leyó igual — verificá que el número esté completo.", f.donde+" · "+f.original);
   });
-
-  /* ---- Controles cruzados entre empresas ----
-     La cuenta es lo único que mueve plata, así que son los dos controles que importan. */
-  // 1) El mismo nombre con dos cuentas: al buscar por nombre habría que elegir una, y no hay con qué.
-  var cuentasDe = {};
-  filas.forEach(function(f){
-    var k = ppClaveNombre(f.nombre); if(!k) return;
-    (cuentasDe[k] = cuentasDe[k] || {})[f.cuenta] = (cuentasDe[k][f.cuenta]||[]).concat(f);
-  });
-  Object.keys(cuentasDe).forEach(function(k){
-    var ctas = Object.keys(cuentasDe[k]); if(ctas.length<2) return;
-    var det = ctas.map(function(c){
-      var emp = cuentasDe[k][c].map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
-      return c+" ("+emp.join(", ")+")";
-    });
-    var pista = ctas.length===2 ? " Las dos "+ppDiferenciaCuentas(ctas[0], ctas[1])+"." : "";
-    H("diff","nombreDosCuentas", "", cuentasDe[k][ctas[0]][0].nombre+" figura con "+ctas.length+" cuentas distintas: "+det.join(" · ")+"."+pista+" Hasta que se defina cuál es la buena, un pago a este nombre puede salir a la cuenta equivocada.", cuentasDe[k][ctas[0]][0].donde);
-    ctas.forEach(function(c){ cuentasDe[k][c].forEach(function(f){ f.enConflicto = true; }); });
-  });
-  // 2) La misma cuenta con dos nombres que no se parecen: uno de los dos tiene la cuenta de otro.
-  //    Que una cuenta sirva a varias personas es normal (una financiera cobra por cuenta de cada
-  //    empleado: "PRESTA PANAMA ..."), y ahí los textos comparten el nombre del acreedor.
-  var nombresDe = {};
-  filas.forEach(function(f){ (nombresDe[f.cuenta] = nombresDe[f.cuenta] || []).push(f); });
-  Object.keys(nombresDe).forEach(function(c){
-    var lista = nombresDe[c], grupos = [];
-    lista.forEach(function(f){
-      for(var g=0; g<grupos.length; g++){
-        if(ppClaveNombre(grupos[g][0].nombre)===ppClaveNombre(f.nombre) || ppSeParecen(grupos[g][0].nombre, f.nombre)){ grupos[g].push(f); return; }
-      }
-      grupos.push([f]);
-    });
-    if(grupos.length<2) return;
-    var det = grupos.map(function(g){
-      var emp = g.map(function(f){ return f.empresa; }).filter(function(e,i,a){ return a.indexOf(e)===i; });
-      return "«"+g[0].nombre+"» ("+emp.join(", ")+")";
-    });
-    H("diff","cuentaDosNombres", "", "La cuenta "+c+" figura con nombres que no se parecen: "+det.join(" · ")+". O es el mismo beneficiario escrito de dos formas, o uno de los dos tiene la cuenta equivocada — confirmalo antes de pagar.", lista[0].donde);
-    lista.forEach(function(f){ f.enConflicto = true; });
-  });
+  hallazgos = hallazgos.concat(ppControlesDePlantilla(filas));
 
   var orden = { diff:0, aviso:1, informativo:2 };
   hallazgos.sort(function(a,b){ return orden[a.clase]-orden[b.clase]; });
   return { empresas:empresas, filas:filas, hallazgos:hallazgos };
 }
 
-/* ---- Pantalla del módulo ----
-   La plantilla se lee de uno o varios .txt y vive en memoria: es la misma regla del resto de la app
-   (los archivos se vuelven a subir en cada sesión). */
+/* ---- La plantilla madre guardada ----
+   La plantilla ya no se sube en cada sesión: queda guardada y se mantiene desde la app. Los .txt son
+   solo la forma de cargarla la primera vez (o de sumarle líneas); después se agrega y se edita acá.
+   Se guarda en el navegador (clave `plantillaMadreMod4`) y se puede bajar como .txt de respaldo. */
+var PP_PLANTILLA_KEY = "plantillaMadreMod4";
+var PP_TIPOS_DE_CONTROL = { noUsar:1, nombreDosCuentas:1, cuentaDosNombres:1 };
+function ppNuevoId(){ return "b"+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
+function ppFilaGuardable(f){
+  return { id:f.id||ppNuevoId(), empresa:f.empresa, cuenta:f.cuenta, nombre:f.nombre, banco:f.banco||"", nota:f.nota||"", noUsar:!!f.noUsar };
+}
+function ppFilas(){
+  var m = STATE.mod4;
+  if(!m.filas){
+    var g = leerPrefs()[PP_PLANTILLA_KEY];
+    m.filas = (Array.isArray(g) ? g : []).filter(function(f){ return f && f.empresa && f.cuenta && f.nombre; }).map(ppFilaGuardable);
+  }
+  return m.filas;
+}
+// Guarda y COMPRUEBA que quedó guardado: guardarPref se traga el error cuando el navegador no deja
+// escribir (modo privado, almacenamiento lleno), y acá perder lo editado sin aviso no es aceptable.
+function ppGuardarFilas(){
+  var m = STATE.mod4, filas = (m.filas||[]).map(ppFilaGuardable);
+  guardarPref(PP_PLANTILLA_KEY, filas);
+  var g = leerPrefs()[PP_PLANTILLA_KEY];
+  m.sinGuardar = !(Array.isArray(g) && g.length===filas.length);
+}
+// Recalcula todo lo que se deriva de las líneas: empresas, controles de cuenta y hallazgos.
+function ppReleer(){
+  var m = STATE.mod4, filas = ppFilas();
+  if(!filas.length){ m.plantilla = null; m.empresa = ""; return; }
+  var empresas = [];
+  filas.forEach(function(f){ if(empresas.indexOf(f.empresa)===-1) empresas.push(f.empresa); });
+  var orden = { diff:0, aviso:1, informativo:2 };
+  var hallazgos = ppControlesDePlantilla(filas).concat(m.importe ? m.importe.hallazgos : [])
+    .sort(function(a,b){ return orden[a.clase]-orden[b.clase]; });
+  m.plantilla = { empresas:empresas, filas:filas, hallazgos:hallazgos };
+  if(empresas.indexOf(m.empresa)===-1) m.empresa = "";
+}
+/* Suma a la plantilla guardada las líneas de los archivos que todavía no estén → { nuevas, repetidas }.
+   No borra ni pisa nada: una línea que ya está (misma empresa, cuenta y nombre) queda como está, con lo
+   que se le haya editado en la app. */
+function ppImportar(archivos){
+  var m = STATE.mod4, filas = ppFilas(), leido = ppParsearPlantilla(archivos), ya = {}, nuevas = 0, repetidas = 0;
+  filas.forEach(function(f){ ya[f.empresa+"|"+ppClaveBenef(f)] = 1; });
+  leido.filas.forEach(function(f){
+    var k = f.empresa+"|"+ppClaveBenef(f);
+    if(ya[k]){ repetidas++; return; }
+    ya[k] = 1; nuevas++;
+    filas.push(ppFilaGuardable({ empresa:f.empresa, cuenta:f.cuenta, nombre:f.nombre, banco:f.banco, nota:f.nota, noUsar:f.noUsar }));
+  });
+  // Los hallazgos de LECTURA (línea cortada, monto viejo sin borrar…) son del archivo y se muestran hasta
+  // la próxima importación. Los de cuenta se recalculan siempre sobre toda la plantilla.
+  m.importe = { nuevas:nuevas, repetidas:repetidas, hallazgos: leido.hallazgos.filter(function(h){ return !PP_TIPOS_DE_CONTROL[h.tipo]; }) };
+  ppGuardarFilas(); ppReleer();
+  return m.importe;
+}
+function ppVaciarPlantilla(){
+  var m = STATE.mod4;
+  m.filas = []; m.importe = null; m.editando = null;
+  ppGuardarFilas(); ppReleer();
+}
+/* Revisa los datos de un beneficiario escritos a mano → { fila } normalizada o { error }.
+   La cuenta lleva solo números; el nombre no puede llevar coma (va a un archivo separado por comas). */
+function ppValidarBeneficiario(filas, d, idEditado){
+  var empresa = ppMayus(d.empresa), cuenta = ppLimpio(d.cuenta), nombre = ppRecortar(String(d.nombre||"").replace(/,/g," "));
+  if(!empresa) return { error:"Falta la empresa." };
+  if(/^\d/.test(empresa) || empresa.indexOf(",")!==-1) return { error:"El nombre de la empresa no puede empezar con un número ni llevar coma." };
+  if(!/^\d{5,20}$/.test(cuenta)) return { error:"La cuenta lleva solo números (entre 5 y 20), sin espacios ni guiones." };
+  if(!nombre) return { error:"Falta el nombre del beneficiario." };
+  var banco = ppLimpio(String(d.banco||"").replace(/,/g," "));
+  var fila = { empresa:empresa, cuenta:cuenta, nombre:nombre, banco: ppBancoDe(banco, false) || banco, nota:ppLimpio(d.nota||""), noUsar:!!d.noUsar };
+  var k = ppClaveBenef(fila);
+  for(var i=0;i<filas.length;i++){
+    if(filas[i].id!==idEditado && filas[i].empresa===empresa && ppClaveBenef(filas[i])===k) return { error:nombre+" ya está en la lista de "+empresa+" con esa cuenta." };
+  }
+  return { fila:fila };
+}
+function ppAgregarBeneficiario(d){
+  var filas = ppFilas(), r = ppValidarBeneficiario(filas, d, null);
+  if(r.error) return r;
+  filas.push(ppFilaGuardable(r.fila));
+  ppGuardarFilas(); ppReleer();
+  return r;
+}
+/* Qué arrastra corregir la cuenta de una línea → { otras, pagos }.
+   Un proveedor tiene una sola cuenta, así que la misma línea (cuenta + nombre) en las demás empresas
+   es el mismo dato repetido y se corrige junto. Y los pagos pendientes a esas líneas guardan la cuenta
+   con la que se cargaron: si no se actualizan, saldrían a la cuenta que se acaba de corregir. */
+function ppAlcanceDeCuenta(vieja){
+  var k = ppClaveBenef(vieja);
+  var otras = ppFilas().filter(function(f){ return f.id!==vieja.id && ppClaveBenef(f)===k; });
+  var empresas = [vieja.empresa].concat(otras.map(function(f){ return f.empresa; }));
+  var pagos = ppPagos().filter(function(p){ return p.cuenta===vieja.cuenta && ppClaveNombre(p.nombre)===ppClaveNombre(vieja.nombre) && empresas.indexOf(p.empresa)!==-1; });
+  return { otras:otras, pagos:pagos };
+}
+function ppEditarBeneficiario(id, d){
+  var filas = ppFilas(), vieja = filas.filter(function(f){ return f.id===id; })[0];
+  if(!vieja) return { error:"Esa línea ya no está en la plantilla." };
+  var r = ppValidarBeneficiario(filas, { empresa:vieja.empresa, cuenta:d.cuenta, nombre:d.nombre, banco:d.banco, nota:vieja.nota, noUsar:d.noUsar }, id);
+  if(r.error) return r;
+  var alcance = { otras:[], pagos:[] };
+  if(r.fila.cuenta!==vieja.cuenta){
+    alcance = ppAlcanceDeCuenta(vieja);
+    alcance.otras.forEach(function(f){ f.cuenta = r.fila.cuenta; });
+    // Un pago que cambia de cuenta deja de estar confirmado: lo que se confirmó era la cuenta anterior.
+    alcance.pagos.forEach(function(p){ p.cuenta = r.fila.cuenta; p.confirmado = false; });
+    if(alcance.pagos.length) ppGuardarPagos();
+  }
+  vieja.cuenta = r.fila.cuenta; vieja.nombre = r.fila.nombre; vieja.banco = r.fila.banco; vieja.noUsar = r.fila.noUsar;
+  ppGuardarFilas(); ppReleer();
+  return { fila:vieja, otras:alcance.otras.length, pagos:alcance.pagos.length };
+}
+function ppQuitarBeneficiario(id){
+  var filas = ppFilas(), f = filas.filter(function(x){ return x.id===id; })[0];
+  if(!f) return false;
+  filas.splice(filas.indexOf(f), 1);
+  ppGuardarFilas(); ppReleer();
+  return true;
+}
+/* La plantilla como .txt, para respaldo: el nombre de la empresa en una línea y debajo sus beneficiarios
+   (cuenta,nombre,banco). Va SIN el prefijo «PAGO DE PROVEEDOR» para que al volver a importarla el nombre
+   se lea tal cual (con el prefijo, un banco al final del nombre se despegaría). */
+function ppPlantillaComoTexto(filas){
+  var empresas = [];
+  filas.forEach(function(f){ if(empresas.indexOf(f.empresa)===-1) empresas.push(f.empresa); });
+  return empresas.map(function(e){
+    return e + "\r\n" + filas.filter(function(f){ return f.empresa===e; }).map(function(f){
+      return f.cuenta + "," + f.nombre + "," + (f.banco||"") + (f.noUsar ? " NO USAR" : "");
+    }).join("\r\n");
+  }).join("\r\n\r\n") + "\r\n";
+}
+
+/* ---- Pantalla del módulo ---- */
 // ¿El archivo tiene forma de plantilla? Alcanza con una línea "cuenta,texto": protege de subir un Excel
 // o cualquier otro archivo a esta casilla, que se leería como una plantilla vacía sin avisar.
 function ppPareceplantilla(texto){
   return String(texto||"").split(/\r?\n/).some(function(l){ return /^\s*\d{5,}\s*,\s*\S/.test(l); });
 }
-function ppReleer(){
-  var m = STATE.mod4;
-  m.plantilla = m.archivos.length ? ppParsearPlantilla(m.archivos) : null;
-  if(!m.plantilla || m.plantilla.empresas.indexOf(m.empresa)===-1) m.empresa = "";
+// Redibuja el módulo sin mover la pantalla: al guardar una línea de la tabla no se vuelve arriba.
+function ppRedibujar(){
+  var y = (typeof window!=="undefined" && typeof window.scrollY==="number") ? window.scrollY : null;
+  renderModulo4();
+  if(y!==null && typeof window.scrollTo==="function") window.scrollTo(0, y);
 }
 function ppSubirArchivos(fileList){
-  var files = Array.prototype.slice.call(fileList||[]), faltan = files.length, rechazados = [];
+  var files = Array.prototype.slice.call(fileList||[]), faltan = files.length, rechazados = [], leidos = [];
   if(!faltan) return;
   function listo(){
     if(--faltan>0) return;
     if(rechazados.length) alert("⚠ No parece una plantilla de pagos (se esperan líneas «cuenta,nombre,banco»):\n\n" + rechazados.join("\n"));
-    ppReleer(); renderModulo4();
+    // En el orden en que se eligieron, no en el que terminaron de leerse: el orden de las empresas sale de acá.
+    leidos = leidos.filter(Boolean);
+    if(leidos.length) ppImportar(leidos);
+    renderModulo4();
   }
-  files.forEach(function(file){
+  files.forEach(function(file, i){
     var reader = new FileReader();
     reader.onload = function(e){
       try{
         var texto = decodificarTexto(new Uint8Array(e.target.result));
         if(!ppPareceplantilla(texto)) rechazados.push(file.name);
-        else{
-          // Subir de nuevo un archivo con el mismo nombre lo REEMPLAZA: es la plantilla corregida.
-          STATE.mod4.archivos = STATE.mod4.archivos.filter(function(a){ return a.nombre!==file.name; });
-          STATE.mod4.archivos.push({ nombre:file.name, texto:texto });
-        }
+        else leidos[i] = { nombre:file.name, texto:texto };
       }catch(err){ rechazados.push(file.name+" ("+err.message+")"); }
       listo();
     };
@@ -7911,23 +8061,87 @@ function ppFilasVisibles(P){
   });
 }
 function ppTablaHtml(P){
-  var m = STATE.mod4, filas = ppFilasVisibles(P), verEmpresa = !m.empresa;
+  var m = STATE.mod4, filas = ppFilasVisibles(P), verEmpresa = !m.empresa, ed = m.editando;
   if(!filas.length) return '<div class="empty-skip">Ninguna línea coincide con la búsqueda.</div>';
   return '<table class="ret-tabla pp-tabla"><thead><tr>'+(verEmpresa?'<th>Empresa</th>':'')+
-    '<th>Cuenta</th><th>Nombre</th><th>Banco</th><th>Observación</th></tr></thead><tbody>' +
+    '<th>Cuenta</th><th>Nombre</th><th>Banco</th><th>Observación</th><th></th></tr></thead><tbody>' +
     filas.map(function(f){
+      if(ed && ed.id===f.id){
+        return '<tr class="pp-editando">'+(verEmpresa?'<td>'+esc(f.empresa)+'</td>':'')+
+          '<td><input class="cg-inp pp-ed" data-f="cuenta" inputmode="numeric" autocomplete="off" value="'+esc(ed.cuenta)+'"></td>' +
+          '<td><input class="cg-inp pp-ed pp-ed-nombre" data-f="nombre" autocomplete="off" value="'+esc(ed.nombre)+'"></td>' +
+          '<td><input class="cg-inp pp-ed" data-f="banco" list="ppBancosLista" autocomplete="off" value="'+esc(ed.banco)+'"></td>' +
+          '<td><label class="pp-ok"><input type="checkbox" id="ppEdNoUsar"'+(ed.noUsar?' checked':'')+'> NO USAR</label>' +
+            (ed.error?'<span class="pp-problema">'+esc(ed.error)+'</span>':'')+'</td>' +
+          '<td class="pp-acc"><button class="btn-plegar" id="ppEdGuardar">Guardar</button> <button class="btn-plegar" id="ppEdCancelar">Cancelar</button></td></tr>';
+      }
       var obs = [];
       if(f.noUsar) obs.push('<span class="pp-marca pp-bloq">NO USAR</span>');
       if(f.enConflicto) obs.push('<span class="pp-marca pp-conf">cuenta por confirmar</span>');
       if(f.nota) obs.push(esc(f.nota));
       return '<tr class="'+(f.noUsar?'pp-fila-bloq':'')+'">'+(verEmpresa?'<td>'+esc(f.empresa)+'</td>':'')+
-        '<td class="pp-cta">'+esc(f.cuenta)+'</td><td>'+esc(f.nombre)+'</td><td>'+esc(f.banco)+'</td><td>'+obs.join(" ")+'</td></tr>';
+        '<td class="pp-cta">'+esc(f.cuenta)+'</td><td>'+esc(f.nombre)+'</td><td>'+esc(f.banco)+'</td><td>'+obs.join(" ")+'</td>' +
+        '<td class="pp-acc"><button class="btn-plegar pp-editar" data-id="'+esc(f.id)+'">Editar</button> ' +
+          '<button class="sidet-del2 pp-borrar" data-id="'+esc(f.id)+'" title="Quitar de la plantilla">✕</button></td></tr>';
     }).join("") + '</tbody></table>';
+}
+function ppAltaHtml(P){
+  var a = STATE.mod4.alta;
+  if(!a.abierta) return '<button class="btn-export" id="ppAltaAbrir">＋ Agregar beneficiario</button>';
+  return '<div class="pp-alta"><div class="pp-form">' +
+    '<label>Empresa<input id="ppAltaEmpresa" class="cg-inp" list="ppEmpresasLista" autocomplete="off" value="'+esc(a.empresa)+'" placeholder="Existente o nueva"></label>' +
+    '<label>Cuenta<input id="ppAltaCuenta" class="cg-inp" inputmode="numeric" autocomplete="off" value="'+esc(a.cuenta)+'" placeholder="Solo números"></label>' +
+    '<label class="pp-f-benef">Nombre<input id="ppAltaNombre" class="cg-inp" autocomplete="off" value="'+esc(a.nombre)+'"></label>' +
+    '<label>Banco<input id="ppAltaBanco" class="cg-inp" list="ppBancosLista" autocomplete="off" value="'+esc(a.banco)+'" placeholder="Opcional"></label>' +
+    '<button class="btn-export" id="ppAltaGuardar">Guardar</button><button class="btn-plegar" id="ppAltaCerrar">Cancelar</button></div>' +
+    (a.error?'<div class="pp-error">'+esc(a.error)+'</div>':'') + '</div>';
+}
+function ppBindTabla(){
+  var m = STATE.mod4, cont = document.getElementById("ppTabla"); if(!cont) return;
+  function fila(id){ return ppFilas().filter(function(f){ return f.id===id; })[0]; }
+  function soloTabla(){ cont.innerHTML = ppTablaHtml(m.plantilla); ppBindTabla(); }
+  cont.querySelectorAll(".pp-editar").forEach(function(b){
+    b.onclick = function(){ var f = fila(b.getAttribute("data-id")); if(!f) return;
+      m.editando = { id:f.id, cuenta:f.cuenta, nombre:f.nombre, banco:f.banco, noUsar:f.noUsar, error:"" }; soloTabla(); };
+  });
+  cont.querySelectorAll(".pp-borrar").forEach(function(b){
+    b.onclick = function(){ var f = fila(b.getAttribute("data-id")); if(!f) return;
+      if(typeof confirm==="function" && !confirm("Se va a quitar a "+f.nombre+" (cuenta "+f.cuenta+") de la lista de "+f.empresa+". ¿Continuar?")) return;
+      ppQuitarBeneficiario(f.id); ppRedibujar(); };
+  });
+  var ed = m.editando;
+  cont.querySelectorAll(".pp-ed").forEach(function(i){ i.addEventListener("input", function(){ if(ed) ed[i.getAttribute("data-f")] = i.value; }); });
+  var nu = document.getElementById("ppEdNoUsar"); if(nu) nu.addEventListener("change", function(){ if(ed) ed.noUsar = nu.checked; });
+  var no = document.getElementById("ppEdCancelar"); if(no) no.onclick = function(){ m.editando = null; soloTabla(); };
+  var ok = document.getElementById("ppEdGuardar");
+  if(ok) ok.onclick = function(){
+    var vieja = fila(ed.id); if(!vieja){ m.editando = null; soloTabla(); return; }
+    var prueba = ppValidarBeneficiario(ppFilas(), { empresa:vieja.empresa, cuenta:ed.cuenta, nombre:ed.nombre, banco:ed.banco, noUsar:ed.noUsar }, ed.id);
+    if(prueba.error){ ed.error = prueba.error; soloTabla(); return; }
+    // Cambiar una cuenta es lo más delicado que se puede hacer acá: se dice qué arrastra antes de hacerlo.
+    if(prueba.fila.cuenta!==vieja.cuenta && typeof confirm==="function"){
+      var al = ppAlcanceDeCuenta(vieja);
+      var msg = "Vas a cambiar la cuenta de "+vieja.nombre+":\n\n  "+vieja.cuenta+"  →  "+prueba.fila.cuenta+"\n" +
+        (al.otras.length ? "\nLa misma línea está en "+al.otras.length+" empresa(s) más ("+al.otras.map(function(f){ return f.empresa; }).join(", ")+"): se corrige en todas." : "") +
+        (al.pagos.length ? "\nHay "+al.pagos.length+" pago(s) pendiente(s) con la cuenta anterior: pasan a la nueva y hay que volver a confirmarlos." : "") +
+        "\n\n¿Continuar?";
+      if(!confirm(msg)) return;
+    }
+    var r = ppEditarBeneficiario(ed.id, ed);
+    if(r.error){ ed.error = r.error; soloTabla(); return; }
+    m.editando = null; ppRedibujar();
+  };
 }
 function renderResultadosMod4(){
   var area = document.getElementById("resultsArea4"); if(!area) return;
   var m = STATE.mod4, P = m.plantilla;
-  if(!P){ area.innerHTML = ""; return; }
+  var listas = '<datalist id="ppBancosLista">'+PP_BANCOS.map(function(b){ return '<option value="'+esc(b.banco)+'"></option>'; }).join("")+'</datalist>' +
+    '<datalist id="ppEmpresasLista">'+(P?P.empresas:[]).map(function(e){ return '<option value="'+esc(e)+'"></option>'; }).join("")+'</datalist>';
+  if(!P){
+    // Sin plantilla todavía se puede empezar una a mano, sin ningún .txt.
+    area.innerHTML = '<div class="step-block"><div class="step-body pp-vacia">'+ppAltaHtml(P)+'</div></div>'+listas;
+    ppBindAlta(); return;
+  }
   var rojas = P.hallazgos.filter(function(h){ return h.clase==="diff"; }).length;
   var avisos = P.hallazgos.filter(function(h){ return h.clase==="aviso"; }).length;
   var cuentas = {}; P.filas.forEach(function(f){ cuentas[f.cuenta] = 1; });
@@ -7950,14 +8164,15 @@ function renderResultadosMod4(){
             return '<option value="'+esc(e)+'"'+(m.empresa===e?' selected':'')+'>'+esc(e)+' ('+n+')</option>';
           }).join("") + '</select>' +
         '<input id="ppBuscar" class="cg-inp" type="search" placeholder="Buscar por nombre o cuenta" value="'+esc(m.q)+'">' +
-      '</div><div id="ppTabla">'+ppTablaHtml(P)+'</div>' +
-    '</div></div>';
+      '</div>' + ppAltaHtml(P) + '<div id="ppTabla">'+ppTablaHtml(P)+'</div>' +
+    '</div></div>' + listas;
   var eb = document.getElementById("exportBtn4"); if(eb) eb.onclick = exportarHallazgosPlantilla;
+  function soloTabla(){ document.getElementById("ppTabla").innerHTML = ppTablaHtml(P); ppBindTabla(); }
   var se = document.getElementById("ppEmpresa");
-  if(se) se.addEventListener("change", function(){ m.empresa = se.value; document.getElementById("ppTabla").innerHTML = ppTablaHtml(P); });
+  if(se) se.addEventListener("change", function(){ m.empresa = se.value; soloTabla(); });
   // Al teclear solo se redibuja la tabla: redibujar todo el bloque le quitaría el foco al buscador.
   var bq = document.getElementById("ppBuscar");
-  if(bq) bq.addEventListener("input", function(){ m.q = bq.value; document.getElementById("ppTabla").innerHTML = ppTablaHtml(P); });
+  if(bq) bq.addEventListener("input", function(){ m.q = bq.value; soloTabla(); });
   area.querySelectorAll(".step-head[data-pp-plegar]").forEach(function(h){
     function alternar(){
       var k = h.getAttribute("data-pp-plegar"), bloque = h.parentNode;
@@ -7967,27 +8182,46 @@ function renderResultadosMod4(){
     h.addEventListener("click", alternar);
     h.addEventListener("keydown", function(e){ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); alternar(); } });
   });
+  ppBindAlta(); ppBindTabla();
+}
+function ppBindAlta(){
+  var m = STATE.mod4, a = m.alta;
+  var abrir = document.getElementById("ppAltaAbrir");
+  if(abrir) abrir.onclick = function(){ a.abierta = true; a.error = ""; if(!a.empresa) a.empresa = m.empresa || ""; renderResultadosMod4(); };
+  [["ppAltaEmpresa","empresa"],["ppAltaCuenta","cuenta"],["ppAltaNombre","nombre"],["ppAltaBanco","banco"]].forEach(function(par){
+    var el = document.getElementById(par[0]); if(el) el.addEventListener("input", function(){ a[par[1]] = el.value; });
+  });
+  var cerrar = document.getElementById("ppAltaCerrar"); if(cerrar) cerrar.onclick = function(){ a.abierta = false; a.error = ""; renderResultadosMod4(); };
+  var guardar = document.getElementById("ppAltaGuardar");
+  if(guardar) guardar.onclick = function(){
+    var r = ppAgregarBeneficiario(a);
+    if(r.error){ a.error = r.error; renderResultadosMod4(); return; }
+    // La empresa queda puesta: se suelen cargar varios beneficiarios seguidos de la misma.
+    a.cuenta = ""; a.nombre = ""; a.banco = ""; a.error = ""; a.empresa = r.fila.empresa;
+    ppRedibujar();
+  };
 }
 function renderModulo4(){
   var m = STATE.mod4;
-  var lista = m.archivos.map(function(a, i){
-    return '<span class="pp-archivo">'+esc(a.nombre)+'<button data-pp-quitar="'+i+'" title="Quitar este archivo">✕</button></span>';
-  }).join("");
+  if(m.plantilla===undefined) ppReleer();
+  var filas = ppFilas(), hay = filas.length>0, imp = m.importe;
   app.innerHTML = headerHtml() +
     '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
     '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> A quién se le paga, por empresa</h3>' +
-    '<p class="desc">Subí los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga. Podés subir varios archivos a la vez. La app revisa que cada cuenta tenga un solo dueño antes de que se use para armar un pago.</p>' +
-    '<div class="dropzones"><div class="dz'+(m.archivos.length?' filled':'')+'" id="ppDz">' +
-      '<div class="ico">'+(m.archivos.length?"✓":"📄")+'</div>' +
-      '<div class="info"><div class="lbl">Plantillas de pago</div>' +
-        '<div class="expected">Archivo esperado: <b>.txt con las líneas «cuenta,PAGO DE PROVEEDOR nombre,banco»</b></div>' +
-        '<details class="dz-ayuda"><summary>¿Cómo tiene que venir el archivo?</summary><div>Es el mismo bloc de notas que ya usás para armar los pagos. El nombre de la empresa va solo en una línea y debajo sus beneficiarios. Si un archivo es de una sola empresa y no trae ese encabezado, la app toma el nombre del archivo y te avisa.</div></details>' +
-        '<div class="sub">'+(m.archivos.length?(m.archivos.length+" archivo(s) cargado(s)"):"Sin subir · arrastrá los .txt aquí o usá el botón")+'</div>' +
+    '<p class="desc">'+(hay ? 'La plantilla queda guardada: no hace falta subirla cada vez. Agregá o corregí beneficiarios en la tabla de abajo, o importá un <b>.txt</b> para sumarle líneas.'
+      : 'Importá los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga — o empezá cargando beneficiarios a mano más abajo. Queda guardada para las próximas veces.')+'</p>' +
+    '<div class="dropzones"><div class="dz'+(hay?' filled':'')+'" id="ppDz">' +
+      '<div class="ico">'+(hay?"✓":"📄")+'</div>' +
+      '<div class="info"><div class="lbl">'+(hay ? filas.length+' beneficiarios guardados' : 'Plantillas de pago')+'</div>' +
+        '<div class="expected">Para importar: <b>.txt con las líneas «cuenta,PAGO DE PROVEEDOR nombre,banco»</b></div>' +
+        '<details class="dz-ayuda"><summary>¿Cómo tiene que venir el archivo?</summary><div>Es el mismo bloc de notas que ya usás para armar los pagos. El nombre de la empresa va solo en una línea y debajo sus beneficiarios. Si un archivo es de una sola empresa y no trae ese encabezado, la app toma el nombre del archivo y te avisa. Importar <b>suma</b> las líneas que falten: no borra ni pisa lo que ya está.</div></details>' +
+        '<div class="sub">'+(imp ? 'Última importación: '+imp.nuevas+' línea(s) nueva(s)'+(imp.repetidas?', '+imp.repetidas+' que ya estaban':'')+'.' : (hay ? 'Arrastrá un .txt aquí para sumar líneas' : 'Sin plantilla · arrastrá los .txt aquí o usá el botón'))+'</div>' +
       '</div>' +
-      '<label class="btn-sel">'+(m.archivos.length?"Agregar":"Subir")+'<input type="file" accept=".txt,text/plain" multiple id="ppFile"></label>' +
+      '<label class="btn-sel">Importar<input type="file" accept=".txt,text/plain" multiple id="ppFile"></label>' +
     '</div></div>' +
-    (lista?'<div class="pp-archivos">'+lista+'<button class="btn-plegar" id="ppLimpiar">Quitar todos</button></div>':'') +
-    '<p class="cg-note pp-nota">La plantilla no se guarda todavía: al cerrar la pestaña hay que volver a subirla.</p>' +
+    (hay?'<div class="pp-archivos"><button class="btn-export" id="ppBajarMadre">Descargar la plantilla (.txt)</button><button class="btn-plegar" id="ppLimpiar">Vaciar la plantilla</button></div>':'') +
+    (m.sinGuardar?'<div class="pp-error">Este navegador no dejó guardar la plantilla (modo privado o almacenamiento lleno). Lo que ves se pierde al cerrar la pestaña: descargala como .txt.</div>':'') +
+    '<p class="cg-note pp-nota">La plantilla se guarda en este navegador. En otro equipo o navegador hay que importarla de nuevo; descargala como .txt para tener respaldo.</p>' +
     '</div><div id="pagosArea4"></div><div id="resultsArea4"></div>';
   document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
   var inp = document.getElementById("ppFile");
@@ -7998,11 +8232,13 @@ function renderModulo4(){
     dz.addEventListener("dragleave", function(){ dz.classList.remove("dragover"); });
     dz.addEventListener("drop", function(e){ e.preventDefault(); dz.classList.remove("dragover"); ppSubirArchivos(e.dataTransfer.files); });
   }
-  app.querySelectorAll("[data-pp-quitar]").forEach(function(b){
-    b.onclick = function(){ m.archivos.splice(parseInt(b.getAttribute("data-pp-quitar"),10), 1); ppReleer(); renderModulo4(); };
-  });
+  var bm = document.getElementById("ppBajarMadre");
+  if(bm) bm.onclick = function(){ guardarArchivo("plantilla madre de pagos.txt", ppPlantillaComoTexto(ppFilas()), "text/plain;charset=utf-8"); };
   var lim = document.getElementById("ppLimpiar");
-  if(lim) lim.onclick = function(){ m.archivos = []; ppReleer(); renderModulo4(); };
+  if(lim) lim.onclick = function(){
+    if(typeof confirm==="function" && !confirm("Se van a borrar los "+filas.length+" beneficiarios guardados en este navegador. Los pagos pendientes no se tocan. ¿Continuar?")) return;
+    ppVaciarPlantilla(); renderModulo4();
+  };
   renderPagosMod4();
   renderResultadosMod4();
 }

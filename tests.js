@@ -6344,13 +6344,13 @@ test("un archivo que no es una plantilla se reconoce", () => {
   eq(ppPareceplantilla("PK\u0003\u0004 esto es un xlsx\nFecha,Monto\n"), false);
 });
 test("la pantalla del módulo dibuja la plantilla y escapa lo que viene del archivo", () => {
-  STATE.mod4.archivos = [ppArch("P.txt", ["SUFECHI", "0752000000001,PAGO DE PROVEEDOR <b>OVIDIO</b>,BG", "0457000016"])];
-  ppReleer(); renderModulo4();
+  ppVaciarPlantilla(); ppImportar([ppArch("P.txt", ["SUFECHI", "0752000000001,PAGO DE PROVEEDOR <b>OVIDIO</b>,BG", "0457000016"])]);
+   renderModulo4();
   const h = store.resultsArea4.innerHTML;
   eq(h.indexOf("&lt;b&gt;OVIDIO&lt;/b&gt;") !== -1, true, "el nombre se muestra escapado");
   eq(h.indexOf("<b>OVIDIO</b>"), -1);
   eq(h.indexOf("1 por resolver") !== -1, true);
-  STATE.mod4.archivos = []; ppReleer();
+  ppVaciarPlantilla();
 });
 
 grupo("Plantilla de pagos — el archivo de pago");
@@ -6412,7 +6412,7 @@ test("el nombre del archivo lleva la empresa y la fecha del día", () => {
   eq(ppNombreArchivo("COMPRA/VENTA: DIBA", new Date(2026, 10, 16)), "pago proveedores COMPRA VENTA DIBA 16 de noviembre 2026.txt");
 });
 test("con pagos confirmados en varias empresas se ofrece bajar una plantilla por cada una", () => {
-  STATE.mod4.archivos = []; ppReleer();
+  ppVaciarPlantilla();
   STATE.mod4.pagos = [ppPago({ factura: "1" }), ppPago({ factura: "2", empresa: "SUFECHI" }), ppPago({ factura: "3", empresa: "CALIZAS", confirmado: false })];
   renderModulo4();
   eq(store.pagosArea4.innerHTML.indexOf("Descargar las 2 plantillas") !== -1, true, "CALIZAS no cuenta: no tiene nada confirmado");
@@ -6458,7 +6458,7 @@ test("marcar la plantilla como generada borra solo lo que entró al archivo", ()
   STATE.mod4.pagos = [];
 });
 test("la pantalla de pagos dibuja el archivo y no habilita «generada» sin haberlo descargado", () => {
-  STATE.mod4.archivos = [ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])];
+  ppVaciarPlantilla(); ppImportar([ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])]);
   STATE.mod4.pagos = [ppPago()]; STATE.mod4.descargas = {};
   ppReleer(); renderModulo4();
   let h = store.pagosArea4.innerHTML;
@@ -6468,7 +6468,7 @@ test("la pantalla de pagos dibuja el archivo y no habilita «generada» sin habe
   eq(/pp-generada"[^>]*disabled/.test(store.pagosArea4.innerHTML), false, "con la descarga al día, sí");
   STATE.mod4.pagos[0].monto = "16.00"; renderPagosMod4();
   eq(/pp-generada"[^>]*disabled/.test(store.pagosArea4.innerHTML), true, "si el pago cambió después de bajar el archivo, otra vez no");
-  STATE.mod4.archivos = []; STATE.mod4.pagos = []; STATE.mod4.descargas = {}; ppReleer();
+  STATE.mod4.pagos = []; STATE.mod4.descargas = {}; ppVaciarPlantilla();
 });
 
 grupo("Plantilla de pagos — lectura de facturas");
@@ -6583,8 +6583,8 @@ test("las dudas del modelo y la factura repetida llegan como avisos", () => {
 const ppConLector = (json) => { global.claude = { use: n => Promise.resolve(n === "sample" ? Object.assign(() => {}, { json }) : null) }; };
 testAsync("leer una foto: lo propuesto queda para revisar, no entra solo a los pendientes", async () => {
   let pedido = null;
-  STATE.mod4.archivos = [ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])];
-  ppReleer(); STATE.mod4.pagos = [];
+  ppVaciarPlantilla(); ppImportar([ppArch("P.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR"])]);
+   STATE.mod4.pagos = [];
   STATE.mod4.lector = { tipos: ["image/jpeg"], sample: { json: (prompt, opts) => { pedido = { prompt, opts }; return Promise.resolve({
     proveedor: "TRANSPORTE KALIR SMILE", numero: "3404", cliente: "BLVD Quinta Ave", lineas: [{ descripcion: "a", total: 3 }, { descripcion: "b", total: 12 }], total: 15, manuscrito: true, dudas: [] }); } } };
   const it = { id: "f1", nombre: "factura.jpg", file: { name: "factura.jpg" }, mini: "", estado: "en cola", form: null };
@@ -6607,7 +6607,136 @@ testAsync("si Claude no puede leer la foto, se dice por qué y no se propone nad
   STATE.mod4.lector = { tipos: [], sample: { json: () => Promise.reject({ code: "not_granted", message: "x" }) } };
   it.estado = "en cola"; await ppLeerFoto(it);
   eq(STATE.mod4.lector, false, "sin permiso, la lectura se apaga para toda la vista");
-  STATE.mod4.fotos = []; STATE.mod4.archivos = []; STATE.mod4.lector = false; ppReleer();
+  STATE.mod4.fotos = []; STATE.mod4.lector = false; ppVaciarPlantilla();
+});
+
+grupo("Plantilla de pagos — la plantilla guardada y editable");
+
+const ppBase = () => { ppVaciarPlantilla(); STATE.mod4.pagos = []; return ppImportar([ppArch("P.txt", [
+  "SUFECHI",  "0313000000005,PAGO DE PROVEEDOR,EMPRESAS CARBONE SA", "0447000000001,PAGO DE PROVEEDOR,ROSY MIRANDA TRANSPORTE KALIR",
+  "SHOPPING", "0312000000005,PAGO DE PROVEEDOR EMPRESAS CARBONE,BG", "0447000000001,PAGO DE PROVEEDOR,ROSY MIRANDA TRANSPORTE KALIR",
+              "0345000000008,PAGO DE PROVEEDOR PRESTA PANAMA ALBERTO MONTEZUMA,",
+  "BLVD",     "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR", "0345000000008,PAGO DE PROVEEDOR PRESTA PANAMA ARELYS SALDANA,BG",
+              "0457000016"])]); };
+const ppDe = (empresa, patron) => ppFilas().filter(f => f.empresa === empresa && patron.test(f.nombre))[0];
+
+// Pedido de Diba: la plantilla madre tiene que estar siempre, sin subirla en cada sesión.
+test("la plantilla queda guardada: al volver a abrir el módulo está ahí", () => {
+  const imp = ppBase();
+  eq(imp.nuevas, 7);
+  STATE.mod4.filas = null; STATE.mod4.plantilla = undefined; STATE.mod4.importe = null;   // como al recargar la página
+  renderModulo4();
+  eq(STATE.mod4.plantilla.filas.length, 7);
+  eq(STATE.mod4.plantilla.empresas.join("|"), "SUFECHI|SHOPPING|BLVD");
+  eq(store.resultsArea4.innerHTML.indexOf("ROSY MIRANDA TRANSPORTE KALIR") !== -1, true);
+  eq(STATE.mod4.sinGuardar, false);
+});
+// Importar SUMA: no borra ni pisa. Si pisara, cada reimportación desharía lo corregido en la app.
+test("importar de nuevo suma lo que falta y no pisa lo editado", () => {
+  ppBase();
+  ppEditarBeneficiario(ppDe("BLVD", /KALIR/).id, { cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", banco: "BG", noUsar: false });
+  const imp = ppImportar([ppArch("P2.txt", ["BLVD", "0447000000001,PAGO DE PROVEEDOR ROSY MIRANDA TRANSPORTE KALIR", "0430000000077,PAGO DE PROVEEDOR JORGE ARAUZ,BG"])]);
+  eq(imp.nuevas, 1); eq(imp.repetidas, 1);
+  eq(ppDe("BLVD", /KALIR/).banco, "Banco General", "el banco que se le puso a mano sigue ahí");
+  eq(ppFilas().length, 8);
+});
+// Los hallazgos de LECTURA son del archivo; los de cuenta se recalculan siempre sobre toda la plantilla.
+test("los controles de cuenta se recalculan al cambiar la plantilla", () => {
+  ppBase();
+  const tipos = () => STATE.mod4.plantilla.hallazgos.map(h => h.tipo).sort().join(",");
+  eq(tipos(), "nombreDosCuentas,sinNombre", "Carbone con dos cuentas + la línea cortada del archivo");
+  eq(ppDe("SHOPPING", /CARBONE/).enConflicto, true);
+  // corregir el dígito de la cuenta de Shopping cierra el conflicto
+  ppEditarBeneficiario(ppDe("SHOPPING", /CARBONE/).id, { cuenta: "0313000000005", nombre: "EMPRESAS CARBONE", banco: "BG", noUsar: false });
+  eq(tipos(), "sinNombre");
+  eq(ppDe("SHOPPING", /CARBONE/).enConflicto, false);
+  // y agregar el mismo nombre con otra cuenta lo abre de nuevo
+  ppAgregarBeneficiario({ empresa: "blvd", cuenta: "0999000000005", nombre: "Empresas Carbone", banco: "" });
+  eq(tipos(), "nombreDosCuentas,sinNombre");
+});
+test("un beneficiario escrito a mano se valida antes de guardarse", () => {
+  ppBase();
+  const v = (d) => ppValidarBeneficiario(ppFilas(), Object.assign({ empresa: "BLVD", cuenta: "0430000000077", nombre: "JORGE ARAUZ", banco: "" }, d), null);
+  eq(/solo números/.test(v({ cuenta: "0430-0000-77" }).error), true, "sin guiones");
+  eq(/solo números/.test(v({ cuenta: "04300000007A" }).error), true);
+  eq(/solo números/.test(v({ cuenta: "123" }).error), true, "demasiado corta");
+  eq(/Falta el nombre/.test(v({ nombre: " , " }).error), true);
+  eq(/Falta la empresa/.test(v({ empresa: "" }).error), true);
+  eq(/ya está en la lista de BLVD/.test(v({ cuenta: "0447000000001", nombre: "Rosy Miranda Transporte Kalir S.A." }).error), true, "la misma línea no entra dos veces");
+  const ok = v({ empresa: " tejar ", nombre: "Arauz, Jorge", banco: "bg" }).fila;
+  eq(ok.empresa, "TEJAR", "una empresa nueva se puede crear al cargar su primer beneficiario");
+  eq(ok.nombre, "Arauz Jorge", "el nombre nunca conserva una coma"); eq(ok.banco, "Banco General");
+});
+/* Corregir una cuenta es lo más delicado de esta pantalla. Un proveedor tiene una sola cuenta, así que la
+   misma línea en las demás empresas se corrige junto — y los pagos pendientes, que guardan la cuenta con
+   la que se cargaron, pasan a la nueva y vuelven a pedir confirmación. Sin eso, el pago que ya estaba
+   cargado saldría a la cuenta que se acaba de corregir. */
+test("corregir una cuenta la corrige en todas las empresas y en los pagos pendientes", () => {
+  ppBase();
+  STATE.mod4.pagos = [ppPago({ empresa: "SUFECHI", factura: "9", confirmado: true }), ppPago({ empresa: "BLVD", factura: "3404", confirmado: true }),
+    ppPago({ empresa: "BLVD", cuenta: "0345000000008", nombre: "PRESTA PANAMA ARELYS SALDANA", factura: "1", confirmado: true })];
+  const al = ppAlcanceDeCuenta(ppDe("BLVD", /KALIR/));
+  eq(al.otras.length, 2); eq(al.pagos.length, 2);
+  const r = ppEditarBeneficiario(ppDe("BLVD", /KALIR/).id, { cuenta: "0447000000999", nombre: "ROSY MIRANDA TRANSPORTE KALIR", banco: "", noUsar: false });
+  eq(r.otras, 2); eq(r.pagos, 2);
+  eq(ppFilas().filter(f => /KALIR/.test(f.nombre)).every(f => f.cuenta === "0447000000999"), true, "las tres empresas");
+  eq(STATE.mod4.pagos.filter(p => /KALIR/.test(p.nombre)).every(p => p.cuenta === "0447000000999" && !p.confirmado), true, "los dos pagos, sin confirmar");
+  const presta = STATE.mod4.pagos[2];
+  eq(presta.cuenta + "|" + presta.confirmado, "0345000000008|true", "un pago a otra línea no se toca");
+  STATE.mod4.pagos = [];
+});
+// Una cuenta con varias personas: cambiar la de una NO arrastra a las demás, que son otras líneas.
+test("cambiar la cuenta de una línea no toca a otra persona que compartía la cuenta", () => {
+  ppBase();
+  ppEditarBeneficiario(ppDe("BLVD", /ARELYS/).id, { cuenta: "0345000000777", nombre: "PRESTA PANAMA ARELYS SALDANA", banco: "BG", noUsar: false });
+  eq(ppDe("SHOPPING", /MONTEZUMA/).cuenta, "0345000000008");
+});
+test("marcar NO USAR desde la app bloquea la línea para pagos; quitarla la saca de la lista", () => {
+  ppBase();
+  const k = ppDe("BLVD", /KALIR/);
+  ppEditarBeneficiario(k.id, { cuenta: k.cuenta, nombre: k.nombre, banco: "", noUsar: true });
+  eq(ppBeneficiarios(STATE.mod4.plantilla, "BLVD", false).some(f => /KALIR/.test(f.nombre)), false);
+  eq(STATE.mod4.plantilla.hallazgos.some(h => h.tipo === "noUsar"), true);
+  eq(ppQuitarBeneficiario(k.id), true);
+  eq(ppFilas().length, 6); eq(ppDe("BLVD", /KALIR/), undefined);
+});
+/* El respaldo tiene que volver igual. Va sin el prefijo «PAGO DE PROVEEDOR»: con él, al reimportar se le
+   despegaría el banco a un nombre que termina en uno ("TRASPASO A CALIZAS A CANAL BANK"). */
+test("la plantilla descargada como .txt se vuelve a importar idéntica", () => {
+  ppBase();
+  ppAgregarBeneficiario({ empresa: "CALIZAS", cuenta: "1200000007", nombre: "TRASPASO A CALIZAS A CANAL BANK", banco: "" });
+  ppAgregarBeneficiario({ empresa: "CALIZAS", cuenta: "0342000000021", nombre: "ZAROSA", banco: "BG", noUsar: true });
+  const foto = () => ppFilas().map(f => [f.empresa, f.cuenta, f.nombre, f.banco, f.noUsar].join("|")).join("\n");
+  const antes = foto(), txt = ppPlantillaComoTexto(ppFilas());
+  eq(/PAGO DE PROVEEDOR/.test(txt), false);
+  ppVaciarPlantilla();
+  eq(ppImportar([{ nombre: "plantilla madre de pagos.txt", texto: txt }]).nuevas, 9);
+  eq(foto(), antes);
+});
+// Hallazgo de diseño: guardarPref se traga el error si el navegador no deja escribir. Acá se avisa.
+test("si el navegador no deja guardar, se dice en vez de perderlo en silencio", () => {
+  ppBase();
+  const orig = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error("QuotaExceeded"); };
+  try { ppAgregarBeneficiario({ empresa: "BLVD", cuenta: "0430000000077", nombre: "JORGE ARAUZ", banco: "" }); } finally { localStorage.setItem = orig; }
+  eq(STATE.mod4.sinGuardar, true);
+  renderModulo4();
+  eq(/no dejó guardar la plantilla/.test(global.app.innerHTML), true);
+  ppGuardarFilas(); eq(STATE.mod4.sinGuardar, false);
+});
+test("sin plantilla se puede empezar una a mano, y la tabla ofrece editar cada línea", () => {
+  ppVaciarPlantilla();
+  renderModulo4();
+  eq(store.resultsArea4.innerHTML.indexOf("ppAltaAbrir") !== -1, true, "el alta está aunque no haya ningún .txt");
+  ppAgregarBeneficiario({ empresa: "BLVD", cuenta: "0430000000077", nombre: "<i>JORGE</i>", banco: "" });
+  STATE.mod4.editando = null; renderModulo4();
+  const h = store.resultsArea4.innerHTML;
+  eq(h.indexOf("pp-editar") !== -1 && h.indexOf("pp-borrar") !== -1, true);
+  eq(h.indexOf("<i>JORGE</i>"), -1, "lo escrito a mano también se escapa");
+  STATE.mod4.editando = { id: ppFilas()[0].id, cuenta: "0430000000077", nombre: "JORGE", banco: "", noUsar: false, error: "" };
+  renderResultadosMod4();
+  eq(store.resultsArea4.innerHTML.indexOf("ppEdGuardar") !== -1, true);
+  STATE.mod4.editando = null; ppVaciarPlantilla();
 });
 
 /* Hallazgo: dentro de claude.ai el visor ignora los enlaces de descarga, así que el botón no hacía nada —

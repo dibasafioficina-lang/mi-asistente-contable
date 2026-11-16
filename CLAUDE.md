@@ -57,7 +57,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
-| 4 | Plantilla de pagos | En construcción — plantilla madre, generador del archivo y lectura de facturas desde fotos listos; falta que las fotos lleguen solas desde WhatsApp y compartir los pendientes. Ver abajo |
+| 4 | Plantilla de pagos | En construcción — plantilla madre guardada y editable, generador del archivo y lectura de facturas desde fotos listos; falta que las fotos lleguen solas desde WhatsApp y compartir plantilla y pendientes entre usuarios. Ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -77,7 +77,7 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 
 ### Módulo 4 — Plantilla de pagos
 
-Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos el cargador de la plantilla madre y el generador del archivo**; los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, clave `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
+Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba y va a pedir backend (Supabase: tabla de pendientes + Edge Function para leer facturas). **Hoy están construidos la plantilla madre (guardada y editable) y el generador del archivo**; la plantilla y los pagos pendientes se guardan solo en el navegador de quien los carga (`localStorage`, claves `plantillaMadreMod4` y `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
 
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
@@ -90,6 +90,8 @@ Arma el archivo de pagos que se sube al banco, **uno por razón social** (la ofi
 - Las fotos viven en `storage.letsbot.net`: una sesión de Claude solo las abre si corre en el entorno `mi-asistente-contable`, que permite ese host.
 - Un monto leído de una foto **nunca** entra al archivo sin que una persona lo confirme.
 - La lista de beneficiarios es compartida entre empresas y **un proveedor tiene una sola cuenta**.
+- **La plantilla madre tiene que estar siempre**, sin subirla en cada sesión, y poder agregarse y editarse desde la app.
+- **El equipo usa la app dentro de claude.ai**, no en GitHub Pages. Eso define el camino para lo que falta: la base de datos de la propia página (permiso `db`) para compartir plantilla y pendientes, y una sesión programada de Claude que lea LetsBot para que las fotos entren solas. No hace falta Supabase ni claves de API.
 
 **La plantilla madre** son los mismos `.txt` que hoy se editan a mano: el nombre de la empresa solo en una línea y debajo sus beneficiarios (`cuenta,PAGO DE PROVEEDOR nombre,banco`). Medidos el 16-nov-2026: 876 líneas, 22 empresas, 631 cuentas. Se digitan a mano y traen todas las variantes — `ppParsearLinea()` las lee y `ppParsearPlantilla()` reporta lo que encontró:
 
@@ -107,6 +109,15 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 | La misma cuenta con nombres que no se parecen | la cuenta de `FELIPE MOTTA` figura también como `AVICOLAS ATHENAS` |
 
 **Una cuenta con varias personas NO es un conflicto**: `PRESTA PANAMA` cobra en una sola cuenta lo de ocho empleados y el texto dice de quién es cada pago (igual `CASA FUNERALES`, Caja de Ahorros, Banco Nacional). Por eso la clave de un beneficiario es **la línea** (cuenta + nombre), no el proveedor, y por eso el segundo control solo dispara cuando los nombres no comparten ninguna palabra significativa (`ppSeParecen`). Sin esa distinción salían 47 "conflictos" y los 5 de verdad quedaban tapados.
+
+**La plantilla guardada** (`ppFilas`, `ppImportar`, `ppEditarBeneficiario`). Los `.txt` son solo la forma de cargarla la primera vez; después vive en la app:
+
+- **Importar suma, no pisa.** Una línea que ya está (misma empresa, cuenta y nombre) queda como está. Si pisara, cada reimportación desharía lo corregido a mano.
+- **Los hallazgos son de dos clases.** Los de *lectura* (línea cortada, monto viejo sin borrar) son del archivo y se muestran hasta la próxima importación. Los de *cuenta* (`ppControlesDePlantilla`) se recalculan sobre toda la plantilla en cada cambio.
+- **Corregir una cuenta arrastra** (`ppAlcanceDeCuenta`): la misma línea en las demás empresas se corrige junto —un proveedor tiene una sola cuenta— y los pagos pendientes a esa línea pasan a la cuenta nueva **y se desconfirman**. Sin eso, el pago ya cargado saldría a la cuenta que se acaba de corregir. Otra persona que comparte la cuenta (`PRESTA PANAMA …`) es otra línea y no se toca.
+- **El alta a mano se valida**: la cuenta lleva solo números, el nombre no conserva comas, la misma línea no entra dos veces en una empresa.
+- **Guardar se comprueba** (`m.sinGuardar`): `guardarPref` se traga el error cuando el navegador no deja escribir, y acá perder lo editado en silencio no es aceptable.
+- **El respaldo `.txt` va sin el prefijo `PAGO DE PROVEEDOR`**: con él, al reimportar se le despegaría el banco a un nombre que termina en uno (`TRASPASO A CALIZAS A CANAL BANK`). Hay una prueba de ida y vuelta.
 
 **El generador** (`ppNuevoPago`, `ppLineaDePago`, `ppArchivoDePago`) arma el archivo a partir de los pagos pendientes. Sus guards, todos por la misma razón — acá un error es plata mal enviada:
 
