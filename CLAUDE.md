@@ -84,7 +84,7 @@ Arma el archivo de pagos que se sube al banco, **uno por razón social** (la ofi
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
 - El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8 sin BOM y sin salto al final.
-- **Una plantilla por empresa**, con su nombre y la fecha del día: `pago proveedores BLVD 16 de noviembre 2026.txt`.
+- **Una plantilla por empresa**, con su nombre y la fecha del día: `pago proveedores STG BLVD 16 de noviembre 2026.txt` (el «STG» lo pidió Diba al renombrar el módulo).
 - Cuando se confirma que la plantilla se generó, sus pagos **se borran** de los pendientes. No hay historial.
 - El número de una **guía de entrega** vale como número de factura.
 - La cuenta y el nombre salen de la **plantilla madre**; el banco de la plantilla es referencia y no viaja.

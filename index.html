@@ -601,7 +601,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.8";
+var APP_VERSION = "2026.11.9";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8544,11 +8544,11 @@ function ppArchivoDePago(pagos){
   return (pagos||[]).map(ppLineaDePago).filter(Boolean).join("\r\n");
 }
 // Un archivo por empresa, con su nombre y la fecha del día en que se genera:
-// "pago proveedores BLVD 16 de noviembre 2026.txt".
+// "pago proveedores STG BLVD 16 de noviembre 2026.txt" (STG: el archivo es solo para St. Georges Bank).
 var PP_MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 function ppNombreArchivo(empresa, fecha){
   var d = fecha || new Date();
-  return "pago proveedores " + ppLimpio(String(empresa||"").replace(/[\\\/:*?"<>|]/g," ")) + " " +
+  return "pago proveedores STG " + ppLimpio(String(empresa||"").replace(/[\\\/:*?"<>|]/g," ")) + " " +
     d.getDate() + " de " + PP_MESES[d.getMonth()] + " " + d.getFullYear() + ".txt";
 }
 // La misma factura a la misma cuenta ya está pendiente: casi siempre es el mismo pago cargado dos veces.

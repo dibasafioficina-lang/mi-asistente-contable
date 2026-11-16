@@ -6406,10 +6406,11 @@ test("al archivo solo entra lo confirmado, y solo lo de esa empresa", () => {
   eq(ppPagosListos(pagos, "SUFECHI").length, 1);
 });
 // Pedido de Diba: una plantilla por empresa, con su nombre — "pago proveedores BLVD 16 de noviembre 2026".
+// Después pidió que el nombre diga STG (16-nov-2026): el archivo es solo para St. Georges Bank.
 test("el nombre del archivo lleva la empresa y la fecha del día", () => {
-  eq(ppNombreArchivo("BLVD", new Date(2026, 10, 16)), "pago proveedores BLVD 16 de noviembre 2026.txt");
-  eq(ppNombreArchivo("SON IMPORT", new Date(2027, 0, 5)), "pago proveedores SON IMPORT 5 de enero 2027.txt");
-  eq(ppNombreArchivo("COMPRA/VENTA: DIBA", new Date(2026, 10, 16)), "pago proveedores COMPRA VENTA DIBA 16 de noviembre 2026.txt");
+  eq(ppNombreArchivo("BLVD", new Date(2026, 10, 16)), "pago proveedores STG BLVD 16 de noviembre 2026.txt");
+  eq(ppNombreArchivo("SON IMPORT", new Date(2027, 0, 5)), "pago proveedores STG SON IMPORT 5 de enero 2027.txt");
+  eq(ppNombreArchivo("COMPRA/VENTA: DIBA", new Date(2026, 10, 16)), "pago proveedores STG COMPRA VENTA DIBA 16 de noviembre 2026.txt");
 });
 test("con pagos confirmados en varias empresas se ofrece bajar una plantilla por cada una", () => {
   ppVaciarPlantilla();
@@ -6752,7 +6753,7 @@ testAsync("el archivo se ofrece por el permiso de descargas, con su nombre y su 
   ppConVisor(req => { pedido = req; return Promise.resolve({ status: "saved" }); });
   STATE.mod4.pagos = [ppPago()]; STATE.mod4.descargas = {};
   eq(await ppBajarPlantilla("BLVD"), true);
-  eq(/^pago proveedores BLVD \d+ de [a-z]+ \d{4}\.txt$/.test(pedido.filename), true, pedido.filename);
+  eq(/^pago proveedores STG BLVD \d+ de [a-z]+ \d{4}\.txt$/.test(pedido.filename), true, pedido.filename);
   eq(pedido.data, "0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404,15.00");
   eq(STATE.mod4.descargas.BLVD, pedido.data, "la descarga queda anotada");
 });
