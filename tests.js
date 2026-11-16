@@ -6541,6 +6541,30 @@ test("un beneficiario que solo figura en otra empresa se toma de ahí, sin aviso
   eq(r.fila.cuenta, "0752000000034"); eq(r.deOtraLista, true);
   eq(/no está en la lista/.test(r.avisos.join("|")), false);
 });
+/* Caso real (16-nov-2026): la factura 729 de ALDO MARTÍNEZ a SHOPPING. En la lista de SHOPPING el único
+   MARTINEZ era «DIEGO MARTINEZ M TECHNOLOGY» y, como se buscaba primero ahí, se proponía a él aunque
+   «ALDO MARTINEZ» estuviera completo en COMPRA Y VENTA DIBA. El pago terminó confirmado a otra cuenta. */
+test("el nombre completo de otra lista le gana a una sola palabra en la propia", () => {
+  const P = ppParsearPlantilla([ppArch("P.txt", [
+    "SHOPPING",
+      "0301000000041,PAGO DE PROVEEDOR DIEGO MARTINEZ M TECHNOLOGY",
+      "0301000000042,PAGO DE PROVEEDOR ASSA COMPANIA DE SEGUROS SA",
+    "COMPRA Y VENTA DIBA",
+      "0472000000043,PAGO DE PROVEEDOR ALDO MARTINEZ"])]);
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "ALDO MARTÍNEZ", cliente: "Shopping Center" }), P, []);
+  eq(r.empresa, "SHOPPING");
+  eq(r.fila && r.fila.nombre, "ALDO MARTINEZ"); eq(r.fila.cuenta, "0472000000043"); eq(r.deOtraLista, true);
+  // Si Aldo no estuviera en ninguna lista, «DIEGO MARTINEZ» sigue siendo el único parecido: ahí sí se
+  // propone, porque la regla de un solo candidato no cambió (es la que cruza el caso Kalir).
+});
+// Con dos parecidos por una sola palabra, uno en cada lista, ya no hay uno solo: no se elige.
+test("una palabra en la propia y otra en otra lista: no se elige", () => {
+  const P = ppParsearPlantilla([ppArch("P.txt", [
+    "SHOPPING", "0301000000041,PAGO DE PROVEEDOR DIEGO MARTINEZ M TECHNOLOGY",
+    "SUPER1",   "0302000000044,PAGO DE PROVEEDOR DARIO MARTINEZ"])]);
+  const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "ALDO MARTÍNEZ", cliente: "Shopping" }), P, []);
+  eq(r.fila, null); eq(r.candidatos.length, 2);
+});
 test("un proveedor que no se parece a ninguna línea queda sin beneficiario", () => {
   const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "FERRETERIA EL CLAVO" }), ppPlantillaBLVD(), []);
   eq(r.fila, null); eq(r.candidatos.length, 0);

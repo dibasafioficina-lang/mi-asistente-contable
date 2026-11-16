@@ -603,7 +603,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.10";
+var APP_VERSION = "2026.11.11";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8881,15 +8881,14 @@ function ppCruzarFactura(L, P, pagos, empresaForzada){
   else r.avisos.push(L.cliente ? "El destinatario («"+L.cliente+"») no nombra a ninguna empresa de la plantilla: elegí cuál paga."
                                : "No se leyó a quién va dirigida la factura: elegí la empresa que paga.");
   if(r.empresa){
-    var propios = ppCandidatosBenef(L.proveedor, ppBeneficiarios(P, r.empresa, false));
-    r.candidatos = propios; r.fila = ppElegirCandidato(propios);
-    if(!propios.length){
-      // La lista de beneficiarios es compartida: si no está en la de esta empresa, puede estar en otra.
-      // Sin aviso (decidido con Diba): cualquier línea de la plantilla sirve para cualquier empresa, aunque
-      // el encabezado diga otra, así que tomarla de ahí no es una duda que confirmar.
-      var ajenos = ppCandidatosBenef(L.proveedor, ppBeneficiarios(P, r.empresa, true));
-      r.candidatos = ajenos; r.fila = ppElegirCandidato(ajenos); r.deOtraLista = !!r.fila;
-    }
+    /* La lista de beneficiarios es compartida (decidido con Diba): cualquier línea sirve para cualquier
+       empresa, así que se busca en TODAS a la vez, sin aviso. Las de la empresa van primero y ganan los
+       empates. Buscar primero solo en la propia proponía a quien compartiera una palabra con el membrete
+       aunque en otra lista estuviera el nombre completo: la factura 729 de ALDO MARTÍNEZ a SHOPPING salía
+       para «DIEGO MARTINEZ M TECHNOLOGY», el único MARTINEZ de esa lista. */
+    var todos = ppCandidatosBenef(L.proveedor, ppBeneficiarios(P, r.empresa, true));
+    r.candidatos = todos; r.fila = ppElegirCandidato(todos);
+    r.deOtraLista = !!r.fila && r.fila.empresa!==r.empresa;
     if(!r.fila) r.avisos.push(!L.proveedor ? "No se leyó quién emite la factura: elegí el beneficiario."
       : r.candidatos.length ? "Hay "+r.candidatos.length+" líneas que se parecen a «"+L.proveedor+"»: elegí el beneficiario."
       : "Ninguna línea de la plantilla se parece a «"+L.proveedor+"»: elegí el beneficiario, o agregalo a la plantilla madre.");
