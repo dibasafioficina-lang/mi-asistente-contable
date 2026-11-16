@@ -49,6 +49,13 @@ function cerca(a, b, msg, tol) {
   if (Math.abs(a - b) > (tol || 0.02)) throw new Error((msg ? msg + ": " : "") + "esperaba ~" + b + ", obtuvo " + a);
 }
 function grupo(n) { console.log("\n" + n); }
+// Pruebas con promesas: se encadenan y el resumen espera a que terminen todas.
+let asincronas = Promise.resolve();
+function testAsync(nombre, fn) {
+  asincronas = asincronas.then(fn).then(
+    () => { ok++; console.log("  \u2713 " + nombre); },
+    e => { fail++; fails.push(nombre + " → " + e.message); console.log("  \u2717 " + nombre + "\n      " + e.message); });
+}
 
 /* =========================================================================
    1. PARSEO DE MONTOS Y LÍNEAS
@@ -6464,9 +6471,50 @@ test("la pantalla de pagos dibuja el archivo y no habilita «generada» sin habe
   STATE.mod4.archivos = []; STATE.mod4.pagos = []; STATE.mod4.descargas = {}; ppReleer();
 });
 
+/* Hallazgo: dentro de claude.ai el visor ignora los enlaces de descarga, así que el botón no hacía nada —
+   y aun así se anotaba la descarga y quedaba habilitado «Plantilla generada». Se podían borrar los pagos
+   sin tener el archivo. Ahora la descarga se anota solo si el archivo de verdad se entregó. */
+grupo("Plantilla de pagos — la descarga dentro de claude.ai");
+const ppConVisor = (save) => { global.claude = { use: n => Promise.resolve(n === "downloads" ? { save } : null) }; };
+testAsync("el archivo se ofrece por el permiso de descargas, con su nombre y su contenido", async () => {
+  let pedido = null;
+  ppConVisor(req => { pedido = req; return Promise.resolve({ status: "saved" }); });
+  STATE.mod4.pagos = [ppPago()]; STATE.mod4.descargas = {};
+  eq(await ppBajarPlantilla("BLVD"), true);
+  eq(/^pago proveedores BLVD \d+ de [a-z]+ \d{4}\.txt$/.test(pedido.filename), true, pedido.filename);
+  eq(pedido.data, "0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404,15.00");
+  eq(STATE.mod4.descargas.BLVD, pedido.data, "la descarga queda anotada");
+});
+testAsync("si se cancela el guardado, la descarga NO se anota y «generada» sigue deshabilitada", async () => {
+  ppConVisor(() => Promise.reject({ code: "declined", message: "" }));
+  STATE.mod4.pagos = [ppPago()]; STATE.mod4.descargas = {};
+  eq(await ppBajarPlantilla("BLVD"), false);
+  eq(STATE.mod4.descargas.BLVD, undefined);
+  renderModulo4();
+  eq(/pp-generada"[^>]*disabled/.test(store.pagosArea4.innerHTML), true);
+});
+testAsync("un Excel también sale por el permiso de descargas dentro de claude.ai", async () => {
+  let pedido = null;
+  ppConVisor(req => { pedido = req; return Promise.resolve({ status: "saved" }); });
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["a", 1]]), "H");
+  eq(await guardarLibro(wb, "prueba.xlsx"), true);
+  eq(pedido.filename, "prueba.xlsx");
+  eq(XLSX.read(pedido.data, { type: "array" }).SheetNames[0], "H", "lo que se entrega es un libro válido");
+});
+testAsync("fuera de claude.ai el Excel sigue saliendo por XLSX.writeFile", async () => {
+  delete global.claude;
+  const orig = XLSX.writeFile; let nombre = null;
+  XLSX.writeFile = (wb, n) => { nombre = n; };
+  try { eq(await guardarLibro(XLSX.utils.book_new(), "igual.xlsx"), true); } finally { XLSX.writeFile = orig; }
+  eq(nombre, "igual.xlsx");
+  STATE.mod4.pagos = []; STATE.mod4.descargas = {};
+});
+
 /* --- resumen --- */
-console.log("\n" + "=".repeat(52));
-console.log("  " + ok + " pasaron, " + fail + " fallaron");
-if (fail) { console.log("\nFallos:"); fails.forEach(f => console.log("  - " + f)); }
-console.log("=".repeat(52));
-process.exit(fail ? 1 : 0);
+asincronas.then(() => {
+  console.log("\n" + "=".repeat(52));
+  console.log("  " + ok + " pasaron, " + fail + " fallaron");
+  if (fail) { console.log("\nFallos:"); fails.forEach(f => console.log("  - " + f)); }
+  console.log("=".repeat(52));
+  process.exit(fail ? 1 : 0);
+});

@@ -8,6 +8,15 @@ Herramienta interna del equipo contable para cuadrar un sistema contable poco am
 - **Lectura de Excel**: SheetJS (`xlsx.full.min.js` vía CDN, con `integrity` SRI — si se cambia de versión hay que recalcular el hash).
 - **Texto que viene de un archivo se escapa con `esc()`** antes de entrar en `innerHTML`; las cifras que se muestran pasan por `fmt()` (formato `1,000.00`).
 
+## Descargas: la app corre en dos lugares
+
+Abierta como página suelta (GitHub Pages, o el `.html` en el disco) un archivo se baja con un enlace. **Dentro de claude.ai el visor ignora esos enlaces**: el botón no hace nada y no da error. Ahí el archivo se ofrece con el permiso `downloads`, que muestra una confirmación y **puede ser rechazada**.
+
+- `guardarArchivo()` / `guardarLibro()` son la **única** salida de archivos (los cuatro Excel y el `.txt` de pagos). Devuelven una promesa con `true` solo si el archivo se entregó.
+- Al republicar la página hay que **declarar `capabilities: {downloads: true}`**; sin eso, dentro de claude.ai se cae al enlace, que no hace nada.
+- Quien llama no puede dar la descarga por hecha: «Plantilla generada» se habilitaba aunque el archivo nunca se hubiera guardado, y se podían borrar los pagos sin tener la plantilla. La descarga se anota **después** de que la promesa resuelve `true`.
+- Varias descargas van **de a una**: dentro de claude.ai solo puede haber una confirmación abierta.
+
 ## Pruebas
 
 ```bash

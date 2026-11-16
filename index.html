@@ -569,7 +569,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.2";
+var APP_VERSION = "2026.11.3";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -822,6 +822,40 @@ function decodificarTexto(bytes){
 function leerLibro(bytes){
   if(esLibroHtml(bytes)) return XLSX.read(decodificarTexto(bytes).trim(), {type:"string", cellDates:true});
   return XLSX.read(bytes, {type:"array", cellDates:true});
+}
+/* ---- Guardar un archivo generado ----
+   La app corre en dos lugares y cada uno entrega archivos distinto. Abierta como página suelta (GitHub
+   Pages, o el .html en el disco) alcanza un enlace de descarga. Dentro de claude.ai el visor IGNORA esos
+   enlaces: ahí el archivo se ofrece con el permiso de descargas, que le muestra una confirmación a quien
+   lo pidió — y puede decir que no.
+   Por eso devuelve una promesa con true/false: quien llama tiene que saber si el archivo de verdad se
+   entregó antes de dar nada por hecho (ver «Plantilla generada»). */
+function guardarArchivo(nombre, datos, mime){
+  function porEnlace(){
+    var blob = datos instanceof Blob ? datos : new Blob([datos], { type: mime || "application/octet-stream" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = nombre;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+    return true;
+  }
+  var c = typeof window!=="undefined" ? window.claude : null;
+  if(!c || typeof c.use!=="function") return Promise.resolve(porEnlace());
+  return c.use("downloads").then(function(d){
+    if(!d) return porEnlace();
+    return d.save({ filename:nombre, data:datos }).then(function(){ return true; }, function(err){
+      // "declined" es quien usa la app diciendo que no: no es un error y no se insiste.
+      if(!err || err.code!=="declined") alert("No se pudo guardar «"+nombre+"»"+(err && err.message ? ": "+err.message : "")+".");
+      return false;
+    });
+  }, function(){ return porEnlace(); });
+}
+// Un libro de Excel. Fuera de claude.ai sigue saliendo por XLSX.writeFile, como siempre.
+function guardarLibro(wb, nombre){
+  var c = typeof window!=="undefined" ? window.claude : null;
+  if(!c || typeof c.use!=="function"){ XLSX.writeFile(wb, nombre); return Promise.resolve(true); }
+  return guardarArchivo(nombre, XLSX.write(wb, { bookType:"xlsx", type:"array" }),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 }
 function readWorkbook(file, cb){
   var reader = new FileReader();
@@ -7472,7 +7506,7 @@ function exportarRetenciones(){
     var ws2=XLSX.utils.aoa_to_sheet(sr); ws2['!cols']=[{wch:18},{wch:24},{wch:22},{wch:30},{wch:12},{wch:14}];
     XLSX.utils.book_append_sheet(wb,ws2,"Hallazgos de pago");
   }
-  XLSX.writeFile(wb,"retenciones_pendientes_por_pagar.xlsx");
+  guardarLibro(wb,"retenciones_pendientes_por_pagar.xlsx");
 }
 
 /* ---- Aviso de versión nueva ----
@@ -7958,7 +7992,7 @@ function exportarHallazgosPlantilla(){
   ws['!cols'] = [{wch:24},{wch:22},{wch:90},{wch:60},{wch:10}];
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
-  XLSX.writeFile(wb, "plantilla_de_pagos_hallazgos.xlsx");
+  guardarLibro(wb, "plantilla_de_pagos_hallazgos.xlsx");
 }
 
 
@@ -8064,12 +8098,16 @@ function ppPagos(){
   return m.pagos;
 }
 function ppGuardarPagos(){ guardarPref(PP_PAGOS_KEY, STATE.mod4.pagos||[]); }
-function ppDescargarTxt(nombre, texto){
-  var blob = new Blob([texto], { type:"text/plain;charset=utf-8" });
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = nombre;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+/* Baja la plantilla de una empresa → promesa con true si el archivo se entregó.
+   Recién ahí se anota la descarga, que es lo que habilita «Plantilla generada»: si quien la pidió canceló
+   el guardado, no hay archivo, y borrar los pagos dejaría la plata sin plantilla y sin pendiente. */
+function ppBajarPlantilla(empresa){
+  var m = STATE.mod4, texto = ppArchivoDePago(ppPagosListos(ppPagos(), empresa));
+  if(!texto) return Promise.resolve(false);
+  return guardarArchivo(ppNombreArchivo(empresa), texto, "text/plain;charset=utf-8").then(function(ok){
+    if(ok) m.descargas[empresa] = texto;
+    return ok;
+  });
 }
 function ppFormHtml(P){
   var fo = STATE.mod4.form;
@@ -8170,22 +8208,21 @@ function renderPagosMod4(){
     b.onclick = function(){ var p = pago(b.getAttribute("data-id")); if(p){ pagos.splice(pagos.indexOf(p), 1); redibujar(); } };
   });
   area.querySelectorAll(".pp-bajar").forEach(function(b){
-    b.onclick = function(){
-      var emp = b.getAttribute("data-emp"), texto = ppArchivoDePago(ppPagosListos(pagos, emp));
-      if(!texto) return;
-      ppDescargarTxt(ppNombreArchivo(emp), texto);
-      m.descargas[emp] = texto; renderPagosMod4();
-    };
+    b.onclick = function(){ ppBajarPlantilla(b.getAttribute("data-emp")).then(renderPagosMod4); };
   });
   var bt = document.getElementById("ppBajarTodas");
   if(bt) bt.onclick = function(){
-    conArchivo.forEach(function(emp, i){
-      var texto = ppArchivoDePago(ppPagosListos(pagos, emp));
-      m.descargas[emp] = texto;
-      // Escalonadas: varias descargas en el mismo instante el navegador las puede descartar.
-      setTimeout(function(){ ppDescargarTxt(ppNombreArchivo(emp), texto); }, i*350);
-    });
-    renderPagosMod4();
+    // De a una: varias descargas en el mismo instante el navegador las puede descartar, y dentro de
+    // claude.ai solo puede haber una confirmación abierta a la vez. Si una no se guarda, se corta ahí.
+    var cola = conArchivo.slice();
+    (function siguiente(){
+      var emp = cola.shift();
+      if(!emp){ renderPagosMod4(); return; }
+      ppBajarPlantilla(emp).then(function(ok){
+        if(!ok){ renderPagosMod4(); return; }
+        setTimeout(siguiente, 350);
+      });
+    })();
   };
   area.querySelectorAll(".pp-generada").forEach(function(b){
     b.onclick = function(){
@@ -8789,7 +8826,7 @@ function exportarChecklist(){
   ws['!cols'] = [{wch:8},{wch:12},{wch:10},{wch:12},{wch:18},{wch:70},{wch:40},{wch:10}];
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Hallazgos");
-  XLSX.writeFile(wb, "checklist_conciliacion_caja_general.xlsx");
+  guardarLibro(wb, "checklist_conciliacion_caja_general.xlsx");
 }
 
 /* ---------------- Resumen de partidas en tránsito (para el Paso 0 del próximo mes) ---------------- */
@@ -10280,7 +10317,7 @@ function exportarEnTransito(){
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "En transito");
   var mes = (STATE.saldoCajaGeneral && STATE.saldoCajaGeneral.fechaFinal) ? STATE.saldoCajaGeneral.fechaFinal.slice(0,7) : "mes";
-  XLSX.writeFile(wb, "en_transito_" + mes + ".xlsx");
+  guardarLibro(wb, "en_transito_" + mes + ".xlsx");
 }
 // Lee un resumen de partidas en tránsito exportado (para el Paso 0 del mes siguiente).
 /* ---- Fechas invertidas en el resumen en transito ----
