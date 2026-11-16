@@ -6531,11 +6531,14 @@ test("el candidato que comparte más palabras gana solo si comparte al menos dos
   const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "MIRANDA" }), P, []);
   eq(r.fila, null, "«MIRANDA» sola calza con dos líneas"); eq(r.candidatos.length, 2);
 });
-// La lista de beneficiarios es compartida: si no está en la de la empresa, se busca en las demás y se avisa.
-test("un beneficiario que solo figura en otra empresa se toma de ahí, avisando", () => {
+/* La lista de beneficiarios es compartida: si no está en la de la empresa, se busca en las demás.
+   Antes se avisaba («no está en la lista de BLVD: confirmá que es el mismo beneficiario»). Diba lo sacó
+   (16-nov-2026): las líneas de la plantilla sirven para todas las empresas aunque el encabezado diga otra,
+   así que el aviso salía en cada factura de Aldo Martínez sin que hubiera nada que confirmar. */
+test("un beneficiario que solo figura en otra empresa se toma de ahí, sin aviso", () => {
   const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "OVIDIO NUNEZ" }), ppPlantillaBLVD(), []);
   eq(r.fila.cuenta, "0752000000034"); eq(r.deOtraLista, true);
-  eq(/no está en la lista de BLVD/.test(r.avisos.join("|")), true);
+  eq(/no está en la lista/.test(r.avisos.join("|")), false);
 });
 test("un proveedor que no se parece a ninguna línea queda sin beneficiario", () => {
   const r = ppCruzarFactura(ppLecturaKalir({ proveedor: "FERRETERIA EL CLAVO" }), ppPlantillaBLVD(), []);

@@ -160,7 +160,7 @@ Lo que devuelve el modelo es **un dato sin confianza** y pasa por `ppNormalizarL
 | Beneficiario | hay **una** línea de esa empresa que comparte palabras significativas con el membrete; con varias, gana una solo si comparte **dos o más** y le saca ventaja a la segunda (`PRESTA PANAMA` tiene una línea por persona: el membrete no dice de quién es) |
 | Monto | el total **cuadra con el detalle** de la propia factura: renglones (o subtotal) más el ITBMS si figura aparte. Si no cuadra, alguno se leyó mal y no hay forma de saber cuál |
 
-- Si el beneficiario no está en la lista de la empresa se busca en las demás (la lista es compartida) y se avisa.
+- Si el beneficiario no está en la lista de la empresa se busca en las demás (la lista es compartida), **sin aviso**: decidido con Diba, una línea de la plantilla sirve para cualquier empresa aunque el encabezado diga otra (Aldo Martínez figura solo en COMPRA Y VENTA DIBA y le facturan a Shopping, Super Market y Son Import).
 - Las dudas que declara el modelo, el total manuscrito y la factura repetida salen como avisos junto a la foto.
 - Lo propuesto entra a los pendientes **sin confirmar**, marcado como leído de foto y con lo que decía el membrete, para compararlo con la línea de la plantilla al confirmar.
 
