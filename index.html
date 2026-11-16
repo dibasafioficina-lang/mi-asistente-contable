@@ -601,7 +601,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.7";
+var APP_VERSION = "2026.11.8";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8426,7 +8426,7 @@ function renderModulo4(){
   if(!ppBaseLista()){
     // Con base compartida no se muestra ni se deja tocar nada hasta haberla recibido.
     app.innerHTML = headerHtml() +
-      '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
+      '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos STG</span></div>' +
       '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> Conectando con la base compartida…</h3>' +
       '<p class="desc">'+(B.error ? esc(B.error) : B.lento ? 'La base compartida todavía no responde. Puede ser la conexión: la página sigue intentando sola, no hace falta recargar.'
         : 'Un momento: se está trayendo la plantilla y los pagos pendientes que comparte el equipo.')+'</p></div>';
@@ -8437,7 +8437,7 @@ function renderModulo4(){
   if(m.plantilla===undefined) ppReleer();
   var filas = ppFilas(), hay = filas.length>0, imp = m.importe;
   app.innerHTML = headerHtml() +
-    '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos</span></div>' +
+    '<div class="crumb"><button id="backBtn4">← Menú</button><span>/</span><span>Plantilla de pagos STG</span></div>' +
     '<div class="stage"><h3><span class="tag">PLANTILLA MADRE</span> A quién se le paga, por empresa</h3>' +
     '<p class="desc">'+(hay ? 'La plantilla queda guardada'+(compartida?' y es la misma para todo el equipo':'')+': no hace falta subirla cada vez. Agregá o corregí beneficiarios en la tabla de abajo, o importá un <b>.txt</b> para sumarle líneas.'
       : 'Importá los <b>.txt</b> de las plantillas — una línea por beneficiario (<b>cuenta,nombre,banco</b>), agrupadas bajo el nombre de la empresa que paga — o empezá cargando beneficiarios a mano más abajo. Queda guardada para las próximas veces.')+'</p>' +
@@ -9137,8 +9137,8 @@ function renderMenu(){
       desc:"Compara el diario contra el auxiliar y enumera las diferencias entre ambas fuentes.",
       enabled:false, icon:"📊", iconBg:"var(--accent-green-bg)", tag:TAG_CONCILIATORIO,
       tagText:"2 archivos", action:"Próximamente"},
-    {id:"modulo4", nombre:"Plantilla de pagos",
-      desc:"Arma el archivo de pagos de cada empresa a partir de la plantilla madre de beneficiarios: cuenta, nombre, factura y monto.",
+    {id:"modulo4", nombre:"Plantilla de pagos STG",
+      desc:"Arma el archivo de pagos a St. Georges Bank de cada empresa a partir de la plantilla madre de beneficiarios: cuenta, nombre, factura y monto.",
       enabled:true, icon:"🏦", iconBg:"var(--accent-green-bg)", tag:TAG_REVISION,
       tagText:"plantillas .txt", action:"Abrir"}
   ];

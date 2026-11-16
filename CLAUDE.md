@@ -57,7 +57,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 1 | Conciliador Caja y Banco | Construido — ver PRD específico abajo |
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
-| 4 | Plantilla de pagos | Construido — plantilla madre compartida y editable, generador del archivo, lectura de facturas desde fotos y entrada automática desde WhatsApp. Ver abajo |
+| 4 | Plantilla de pagos STG | Construido — plantilla madre compartida y editable, generador del archivo, lectura de facturas desde fotos y entrada automática desde WhatsApp. Ver abajo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 
@@ -75,7 +75,9 @@ Valida en una sola pasada que la venta reportada manualmente por las cajeras lle
 
 **Pendiente de validar con datos de producción** (ver PRD del módulo): Paso 1 no probado aún con montos reales (el reporte de prueba compartido traía ceros); y si algún día el diario de Caja General no trae línea de débito separada por banco/método, el hallazgo del Paso 2 no se detectaría — asunción a confirmar.
 
-### Módulo 4 — Plantilla de pagos
+### Módulo 4 — Plantilla de pagos STG
+
+Solo aplica a **St. Georges Bank**: el archivo `.txt` es el que se sube a la banca en línea de St. Georges (decidido con Diba, 16-nov-2026). Por eso el nombre del módulo lleva «STG».
 
 Arma el archivo de pagos que se sube al banco, **uno por razón social** (la oficina lleva 22 empresas). Es el primer módulo pensado para **compartir datos entre usuarios**: los pagos pendientes de elevar los ve todo el equipo y se borran al generar la plantilla (sin historial). Eso contradice el "trabajo 100% independiente por usuario" de arriba, y es a propósito. Dentro de claude.ai la plantilla y los pagos pendientes viven en la **base compartida de la página** (permiso `db`, ver más abajo); como página suelta siguen en el navegador de cada quien (`localStorage`, claves `plantillaMadreMod4` y `pagosPendientesMod4`) y la factura y el monto se digitan a mano o salen de la foto de la factura (solo dentro de claude.ai).
 
