@@ -226,6 +226,11 @@
   .saldo-ctx .saldo-line{font-size:13.5px;font-weight:700;color:#3C5670}
   .saldo-ctx .saldo-sub{font-size:12.5px;color:#5B6472;margin-top:3px;line-height:1.5}
 
+  /* Ventana de aviso / confirmación propia (dialogo()): el visor de claude.ai bloquea confirm() y alert() */
+  .dlg-fondo{position:fixed;inset:0;background:rgba(74,59,65,.35);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
+  .dlg{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:520px;width:100%;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.18)}
+  .dlg-txt{white-space:pre-wrap;line-height:1.45;font-size:14px}
+  .dlg-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
   /* Plantilla de pagos */
   .pp-madre-carga p.desc{font-size:13.5px;color:var(--slate);margin:6px 0 16px}
   .pp-madre > .step-head h4{font-size:15px}
@@ -603,13 +608,42 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.12";
+var APP_VERSION = "2026.11.13";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
   if(s===null||s===undefined) return "";
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
+/* Ventana de aviso / confirmación dibujada por la propia página → Promise<boolean>.
+   Dentro de claude.ai la página corre en un iframe sin permiso de ventanas modales: confirm() devuelve
+   false sin mostrar nada y alert() no aparece. La X de una factura de WhatsApp no borraba (Diba, 17-nov-2026),
+   y por lo mismo «Plantilla generada», «Vaciar» y quitar un beneficiario no hacían nada. Nunca usar
+   confirm()/alert() directos: todo pasa por acá. Sin documento (pruebas) se cae al del navegador. */
+function dialogo(msg, conCancelar){
+  var fondo = (typeof document!=="undefined" && document.body && document.createElement) ? document.createElement("div") : null;
+  if(!fondo || typeof fondo.querySelector!=="function"){
+    if(conCancelar) return Promise.resolve(typeof confirm==="function" ? !!confirm(msg) : true);
+    if(typeof alert==="function") alert(msg);
+    return Promise.resolve(true);
+  }
+  return new Promise(function(resolve){
+    fondo.className = "dlg-fondo";
+    fondo.innerHTML = '<div class="dlg" role="dialog" aria-modal="true"><div class="dlg-txt"></div><div class="dlg-btns">' +
+      (conCancelar ? '<button class="btn-export dlg-no">Cancelar</button>' : '') +
+      '<button class="btn-export dlg-si">'+(conCancelar ? 'Continuar' : 'Entendido')+'</button></div></div>';
+    fondo.querySelector(".dlg-txt").textContent = String(msg);
+    function cerrar(v){ document.removeEventListener("keydown", tecla); fondo.remove(); resolve(v); }
+    function tecla(e){ if(e.key==="Escape") cerrar(!conCancelar); }
+    fondo.querySelector(".dlg-si").onclick = function(){ cerrar(true); };
+    var no = fondo.querySelector(".dlg-no"); if(no) no.onclick = function(){ cerrar(false); };
+    document.addEventListener("keydown", tecla);
+    document.body.appendChild(fondo);
+    fondo.querySelector(conCancelar ? ".dlg-no" : ".dlg-si").focus();
+  });
+}
+function confirmar(msg){ return dialogo(msg, true); }
+function avisar(msg){ return dialogo(msg, false); }
 // Formato de las cifras que se MUESTRAN: separador de miles + 2 decimales (1,000.00). Los cálculos y las
 // claves internas siguen usando el número crudo.
 // Valor para un <input type="number">: SIN separador de miles. Un value con coma ("2,517.82") es
@@ -879,7 +913,7 @@ function guardarArchivo(nombre, datos, mime){
     if(!d) return porEnlace();
     return d.save({ filename:nombre, data:datos }).then(function(){ return true; }, function(err){
       // "declined" es quien usa la app diciendo que no: no es un error y no se insiste.
-      if(!err || err.code!=="declined") alert("No se pudo guardar «"+nombre+"»"+(err && err.message ? ": "+err.message : "")+".");
+      if(!err || err.code!=="declined") avisar("No se pudo guardar «"+nombre+"»"+(err && err.message ? ": "+err.message : "")+".");
       return false;
     });
   }, function(){ return porEnlace(); });
@@ -902,7 +936,7 @@ function readWorkbook(file, cb){
       rows.hojas = {};
       wb.SheetNames.forEach(function(sn){ rows.hojas[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, raw:true, defval:null}); });
       cb(rows);
-    }catch(err){ alert("No se pudo leer el archivo: "+err.message); }
+    }catch(err){ avisar("No se pudo leer el archivo: "+err.message); }
   };
   reader.readAsArrayBuffer(file);
 }
@@ -7069,7 +7103,7 @@ function subirRetenciones(file){
   readWorkbook(file, function(rows){
     var err = null;
     try{ err = validarArchivoParaCasilla("retenciones", rows); }catch(e){ err = null; }
-    if(err){ alert("⚠ " + err + "\n\nArchivo: " + file.name); return; }
+    if(err){ avisar("⚠ " + err + "\n\nArchivo: " + file.name); return; }
     STATE.files.retenciones=file; STATE.mod2.saldoIni=null; STATE.mod2.verIgual=false;
     try{ STATE.mod2.saldoIni=parseRetenciones(rows).saldoInicial; }catch(e){}
     renderModulo2();
@@ -7165,7 +7199,7 @@ function bindSaldoIniDetalleMod2(){
   var file=document.getElementById("sidet2File"); if(file) file.addEventListener("change",function(e){
     if(!e.target.files[0]) return;
     readWorkbook(e.target.files[0], function(rows){
-      try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); guardarSaldoIniDetMod2(); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
+      try{ STATE.mod2.saldoIniDetalle=parseSaldoIniDetalle(rows); guardarSaldoIniDetMod2(); }catch(err){ avisar("No se pudo leer el detalle: "+err.message); }
       renderModulo2();
     });
   });
@@ -7333,7 +7367,7 @@ function bindSinDetalle(net){
   b.onclick=function(){
     var txt=sinDetalleTexto(net);
     try{ navigator.clipboard.writeText(txt).then(function(){ b.textContent="✓ Copiado"; setTimeout(function(){ b.textContent="📋 Copiar lista"; },1800); }); }
-    catch(e){ alert(txt); }
+    catch(e){ avisar(txt); }
   };
 }
 // Paneles de sobrepagos (alerta) y pagos adelantados (informativo). El neteo por acreedor abre "Banco /
@@ -8231,7 +8265,7 @@ function ppSubirArchivos(fileList){
   if(!faltan) return;
   function listo(){
     if(--faltan>0) return;
-    if(rechazados.length) alert("⚠ No parece una plantilla de pagos (se esperan líneas «cuenta,nombre,banco»):\n\n" + rechazados.join("\n"));
+    if(rechazados.length) avisar("⚠ No parece una plantilla de pagos (se esperan líneas «cuenta,nombre,banco»):\n\n" + rechazados.join("\n"));
     // En el orden en que se eligieron, no en el que terminaron de leerse: el orden de las empresas sale de acá.
     leidos = leidos.filter(Boolean);
     if(leidos.length) ppImportar(leidos);
@@ -8327,8 +8361,8 @@ function ppBindTabla(){
   });
   cont.querySelectorAll(".pp-borrar").forEach(function(b){
     b.onclick = function(){ var f = fila(b.getAttribute("data-id")); if(!f) return;
-      if(typeof confirm==="function" && !confirm("Se va a quitar a "+f.nombre+" (cuenta "+f.cuenta+") de la lista de "+f.empresa+". ¿Continuar?")) return;
-      ppQuitarBeneficiario(f.id); ppRedibujar(); };
+      confirmar("Se va a quitar a "+f.nombre+" (cuenta "+f.cuenta+") de la lista de "+f.empresa+". ¿Continuar?").then(function(ok){
+        if(ok){ ppQuitarBeneficiario(f.id); ppRedibujar(); } }); };
   });
   var ed = m.editando;
   cont.querySelectorAll(".pp-ed").forEach(function(i){ i.addEventListener("input", function(){ if(ed) ed[i.getAttribute("data-f")] = i.value; }); });
@@ -8340,17 +8374,21 @@ function ppBindTabla(){
     var prueba = ppValidarBeneficiario(ppFilas(), { empresa:vieja.empresa, cuenta:ed.cuenta, nombre:ed.nombre, banco:ed.banco, noUsar:ed.noUsar }, ed.id);
     if(prueba.error){ ed.error = prueba.error; soloTabla(); return; }
     // Cambiar una cuenta es lo más delicado que se puede hacer acá: se dice qué arrastra antes de hacerlo.
-    if(prueba.fila.cuenta!==vieja.cuenta && typeof confirm==="function"){
+    function guardar(){
+      var r = ppEditarBeneficiario(ed.id, ed);
+      if(r.error){ ed.error = r.error; soloTabla(); return; }
+      m.editando = null; ppRedibujar();
+    }
+    if(prueba.fila.cuenta!==vieja.cuenta){
       var al = ppAlcanceDeCuenta(vieja);
       var msg = "Vas a cambiar la cuenta de "+vieja.nombre+":\n\n  "+vieja.cuenta+"  →  "+prueba.fila.cuenta+"\n" +
         (al.otras.length ? "\nLa misma línea está en "+al.otras.length+" empresa(s) más ("+al.otras.map(function(f){ return f.empresa; }).join(", ")+"): se corrige en todas." : "") +
         (al.pagos.length ? "\nHay "+al.pagos.length+" pago(s) pendiente(s) con la cuenta anterior: pasan a la nueva y hay que volver a confirmarlos." : "") +
         "\n\n¿Continuar?";
-      if(!confirm(msg)) return;
+      confirmar(msg).then(function(ok){ if(ok) guardar(); });
+      return;
     }
-    var r = ppEditarBeneficiario(ed.id, ed);
-    if(r.error){ ed.error = r.error; soloTabla(); return; }
-    m.editando = null; ppRedibujar();
+    guardar();
   };
 }
 function renderResultadosMod4(){
@@ -8488,11 +8526,11 @@ function renderModulo4(){
   if(bm) bm.onclick = function(){ guardarArchivo("plantilla madre de pagos.txt", ppPlantillaComoTexto(ppFilas()), "text/plain;charset=utf-8"); };
   var lim = document.getElementById("ppLimpiar");
   if(lim) lim.onclick = function(){
-    if(typeof confirm==="function" && !confirm("Se van a borrar los "+filas.length+" beneficiarios guardados "+(compartida?"en la base compartida, PARA TODO EL EQUIPO":"en este navegador")+". Los pagos pendientes no se tocan. ¿Continuar?")) return;
-    ppVaciarPlantilla(); renderModulo4();
+    confirmar("Se van a borrar los "+filas.length+" beneficiarios guardados "+(compartida?"en la base compartida, PARA TODO EL EQUIPO":"en este navegador")+". Los pagos pendientes no se tocan. ¿Continuar?").then(function(ok){
+      if(ok){ ppVaciarPlantilla(); renderModulo4(); } });
   };
   var pc = document.getElementById("ppPasarCopia");
-  if(pc) pc.onclick = function(){ var r = ppPasarCopiaLocal(); alert("Se pasaron "+r.filas+" beneficiario(s) y "+r.pagos+" pago(s) que la base no tenía. Los pagos entran sin confirmar."); renderModulo4(); };
+  if(pc) pc.onclick = function(){ var r = ppPasarCopiaLocal(); avisar("Se pasaron "+r.filas+" beneficiario(s) y "+r.pagos+" pago(s) que la base no tenía. Los pagos entran sin confirmar."); renderModulo4(); };
   var oc = document.getElementById("ppOlvidarCopia");
   if(oc) oc.onclick = function(){ guardarPref("migradoMod4", true); renderModulo4(); };
   renderPagosMod4();
@@ -8625,7 +8663,7 @@ function ppBajarPlantilla(empresa){
   var m = STATE.mod4, texto = ppArchivoDePago(ppPagosListos(ppPagos(), empresa));
   if(!texto) return Promise.resolve(false);
   return ppTomarTurno(empresa).then(function(mio){
-    if(!mio){ alert("Otra persona está generando la plantilla de "+empresa+" en este momento. Para que el pago no salga dos veces, esperá a que termine: sus pagos van a desaparecer de esta lista."); return false; }
+    if(!mio){ avisar("Otra persona está generando la plantilla de "+empresa+" en este momento. Para que el pago no salga dos veces, esperá a que termine: sus pagos van a desaparecer de esta lista."); return false; }
     return guardarArchivo(ppNombreArchivo(empresa), texto, "text/plain;charset=utf-8").then(function(ok){
       if(ok) m.descargas[empresa] = texto;
       return ok;
@@ -8756,9 +8794,8 @@ function renderPagosMod4(){
     b.onclick = function(){
       var emp = b.getAttribute("data-emp"), listos = ppPagosListos(pagos, emp);
       if(!listos.length || m.descargas[emp]!==ppArchivoDePago(listos)) return;
-      if(typeof confirm==="function" && !confirm((listos.length===1 ? "Se va a borrar el pago de "+emp+" que está" : "Se van a borrar los "+listos.length+" pagos de "+emp+" que están")+" en el archivo descargado. No queda historial. ¿Continuar?")) return;
-      ppMarcarGenerada(emp);
-      redibujar();
+      confirmar((listos.length===1 ? "Se va a borrar el pago de "+emp+" que está" : "Se van a borrar los "+listos.length+" pagos de "+emp+" que están")+" en el archivo descargado. No queda historial. ¿Continuar?").then(function(ok){
+        if(ok){ ppMarcarGenerada(emp); redibujar(); } });
     };
   });
 }
@@ -9099,8 +9136,8 @@ function ppBindLector(area){
   });
   area.querySelectorAll(".pp-foto-quitar").forEach(function(b){
     b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(!it) return;
-      if(it.origen==="whatsapp" && typeof confirm==="function" && !confirm("Esta factura llegó por WhatsApp. Si la descartás desaparece para todo el equipo y no vuelve a entrar sola. ¿Continuar?")) return;
-      ppSacarFactura(it); renderPagosMod4(); };
+      (it.origen==="whatsapp" ? confirmar("Esta factura llegó por WhatsApp. Si la descartás desaparece para todo el equipo y no vuelve a entrar sola. ¿Continuar?") : Promise.resolve(true))
+        .then(function(ok){ if(ok){ ppSacarFactura(it); renderPagosMod4(); } }); };
   });
   area.querySelectorAll(".pp-foto-reintentar").forEach(function(b){
     b.onclick = function(){ var it = foto(b.getAttribute("data-id")); if(it){ it.estado = "en cola"; ppLeerEnCola(); } };
@@ -9326,7 +9363,7 @@ function renderModulo1(){
     readWorkbook(file, function(rows){
       var err = null;
       try{ err = validarArchivoParaCasilla(key, rows); }catch(e){ err = null; } // ante la duda, dejar pasar
-      if(err){ alert("⚠ " + err + "\n\nArchivo: " + file.name); return; }
+      if(err){ avisar("⚠ " + err + "\n\nArchivo: " + file.name); return; }
       STATE.files[key] = file;
       renderModulo1();
       if(STATE.results) renderResultados();
@@ -9358,7 +9395,7 @@ function renderModulo1(){
     if(isNaN(v) || v <= 0) v = 0.01;
     if(v > TOLERANCIA_MAX){
       v = TOLERANCIA_MAX;
-      alert("La tolerancia máxima es B/ " + fmt(TOLERANCIA_MAX) + "." + "\n\n" +
+      avisar("La tolerancia máxima es B/ " + fmt(TOLERANCIA_MAX) + "." + "\n\n" +
             "Por encima de eso el cotejo empieza a dar por buenas diferencias reales y a dejar partidas " +
             "fuera del resumen en tránsito, sin avisar.");
     }
@@ -11154,7 +11191,7 @@ function bindSaldoIniDetalle(){
   var file=document.getElementById("sidetFile"); if(file) file.addEventListener("change",function(e){
     if(!e.target.files[0]) return;
     readWorkbook(e.target.files[0], function(rows){
-      try{ STATE.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ alert("No se pudo leer el detalle: "+err.message); }
+      try{ STATE.saldoIniDetalle=parseSaldoIniDetalle(rows); }catch(err){ avisar("No se pudo leer el detalle: "+err.message); }
       renderResultados();
     });
   });
@@ -11185,10 +11222,15 @@ function exportarEnTransito(){
   var sinEstados = Array.isArray(p0) && p0.some(function(x){
     return x.clase==="aviso" && /sin estados de cuenta/i.test(x.concepto||"");
   });
-  if(sinEstados && typeof confirm === "function" &&
-     !confirm("El Paso 0 se corrió SIN estados de cuenta, así que ninguna partida pudo darse por compensada: " +
+  if(sinEstados){
+    confirmar("El Paso 0 se corrió SIN estados de cuenta, así que ninguna partida pudo darse por compensada: " +
               "el resumen va a arrastrar al mes siguiente partidas que ya cerraron.\n\n" +
-              "Subí los estados de cuenta y volvé a ejecutar.\n\n¿Descargar igual?")) return;
+              "Subí los estados de cuenta y volvé a ejecutar.\n\n¿Descargar igual?").then(function(ok){ if(ok) exportarEnTransitoSinPreguntar(); });
+    return;
+  }
+  exportarEnTransitoSinPreguntar();
+}
+function exportarEnTransitoSinPreguntar(){
   marcarChequesAcreditados();   // sin esto los cheques ya depositados saldrian como "pendiente"
   var items = recolectarEnTransito();
   var rows = filasTraza("Partidas en tránsito al cierre — insumo del Paso 0 del mes siguiente");
@@ -11835,7 +11877,7 @@ function bindAjusteCopy(c){
   b.onclick = function(){
     var txt = ajusteTexto(a);
     try{ navigator.clipboard.writeText(txt).then(function(){ b.textContent="✓ Copiado"; setTimeout(function(){ b.textContent="📋 Copiar el asiento"; },1800); }); }
-    catch(e){ alert(txt); }
+    catch(e){ avisar(txt); }
   };
 }
 function cuadreSaldoIniHtml(c){

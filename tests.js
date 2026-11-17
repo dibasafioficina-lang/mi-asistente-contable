@@ -6512,6 +6512,14 @@ test("la empresa: la más específica gana, y si no hay una sola no se elige", (
   eq(ppEmpresaDeTexto("Comercial La Estrella", E).empresa, null);
   eq(ppEmpresaDeTexto("BLVDS", E).empresa, null, "tiene que ser la palabra entera");
 });
+/* Dentro de claude.ai el iframe no permite ventanas modales: confirm() devuelve false sin mostrar nada
+   y alert() no aparece. La X de una factura de WhatsApp no borraba (Diba, 17-nov-2026). Todo aviso o
+   confirmación pasa por dialogo(), que dibuja la ventana en la propia página. */
+test("ninguna pantalla usa confirm() ni alert() del navegador: el visor de claude.ai los bloquea", () => {
+  const sinDialogo = script.replace(/\/\* Ventana de aviso[\s\S]*?\nfunction confirmar/, "");
+  eq(/(^|[^A-Za-z_.])confirm\(/.test(sinDialogo), false, "confirm() directo");
+  eq(/(^|[^A-Za-z_.])alert\(/.test(sinDialogo), false, "alert() directo");
+});
 // Las razones sociales que dio Diba (16-nov-2026) y cómo llegaron escritas en las primeras facturas de WhatsApp.
 test("la razón social de la factura lleva a la empresa de la plantilla, aunque venga mal escrita", () => {
   const E = ["BLVD", "GANADERA", "NATURAL", "SHOPPING", "SHOPPING MARKET", "SUFECHI", "SUFECHI BORDADOS"];

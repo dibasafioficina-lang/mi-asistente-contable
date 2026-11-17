@@ -17,6 +17,8 @@ Abierta como página suelta (GitHub Pages, o el `.html` en el disco) un archivo 
 - Quien llama no puede dar la descarga por hecha: «Plantilla generada» se habilitaba aunque el archivo nunca se hubiera guardado, y se podían borrar los pagos sin tener la plantilla. La descarga se anota **después** de que la promesa resuelve `true`.
 - Varias descargas van **de a una**: dentro de claude.ai solo puede haber una confirmación abierta.
 
+**Tampoco hay ventanas del navegador**: el iframe de claude.ai no permite modales, así que `confirm()` devuelve `false` sin mostrar nada y `alert()` no aparece. La X de una factura de WhatsApp no borraba (17-nov-2026), y por lo mismo «Plantilla generada», «Vaciar» y quitar un beneficiario no hacían nada. Todo aviso o confirmación pasa por `dialogo()` / `confirmar()` / `avisar()`, que dibujan la ventana en la propia página y devuelven una promesa. Una prueba falla si vuelve a aparecer un `confirm(` o `alert(` directo.
+
 ## Pruebas
 
 ```bash
