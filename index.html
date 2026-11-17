@@ -608,7 +608,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.13";
+var APP_VERSION = "2026.11.14";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -9085,7 +9085,9 @@ function ppFotoHtml(it){
 // Las facturas a revisar: primero las que llegaron por WhatsApp, después las fotos elegidas a mano.
 function ppItemsLector(){ var m = STATE.mod4; return (m.bandeja||[]).concat(m.fotos); }
 function ppLectorHtml(){
-  var m = STATE.mod4, bandeja = m.bandeja||[];
+  var m = STATE.mod4;
+  ppPodarBandeja();
+  var bandeja = m.bandeja||[];
   if(!m.plantilla) return bandeja.length ? '<div class="pp-error">Hay '+bandeja.length+' factura(s) que llegaron por WhatsApp esperando revisión. Cargá la plantilla madre para poder armar sus pagos.</div>' : "";
   // El cruce de una factura de WhatsApp se hace acá, con la plantilla ya cargada, y una sola vez.
   bandeja.forEach(function(it){ if(!it.form) ppRecruzar(it, ""); });
@@ -9094,10 +9096,42 @@ function ppLectorHtml(){
   var enCola = m.fotos.filter(function(f){ return f.estado==="en cola"; }).length;
   return '<div class="pp-lector"><div class="pp-lector-head"><b>Facturas por revisar</b>' +
       (bandeja.length ? '<span class="chip">'+bandeja.length+' de WhatsApp</span>' : '') +
+      (m.podadas ? '<span class="chip" title="Ya estaban en pagos pendientes o llegaron dos veces por WhatsApp">'+m.podadas+' repetida'+(m.podadas===1?'':'s')+' quitada'+(m.podadas===1?'':'s')+'</span>' : '') +
       (m.lector ? '<label class="btn-export pp-lector-btn">Elegir fotos<input type="file" id="ppFotos" multiple accept="'+esc(m.lector.tipos.join(","))+'"></label>' : '') +
       (enCola ? '<button class="btn-export" id="ppLeer"'+(m.leyendo?' disabled':'')+'>'+(m.leyendo?'Leyendo…':'Leer '+(enCola===1?'la foto':'las '+enCola+' fotos'))+'</button>' : '') +
       '<span class="pp-acc-nota">Claude propone el pago; vos lo revisás contra la foto y lo confirmás.</span></div>' +
     ppItemsLector().map(ppFotoHtml).join("") + '</div>';
+}
+/* ¿Esta factura de WhatsApp es un documento que ya se trabajó? → el motivo, o "".
+   Pedido de Diba (17-nov-2026): lo que ya pasó la verificación no se queda en «Facturas por revisar». Pasaba
+   con las reenviadas: la Fonchy 0000009646 y la Mirna Morales 185 llegaron dos veces; la primera pasó a
+   pendientes y la copia se quedaba en la lista, rechazada por repetida cada vez que se la quería pasar.
+   Contra un pago pendiente alcanza con proveedor y número: el monto del pago puede ser otro a propósito
+   (Abrego 22421 llegó por 2,006.00 y se pagó 1,976.54, descontada su nota de crédito de 29.46). Entre dos
+   facturas de la bandeja se exige además el mismo total. Sin número no se decide nada: dos notas de
+   crédito del mismo proveedor y monto pueden ser dos documentos distintos. */
+function ppRepetidaDe(it, pagos, anteriores){
+  var L = it.lectura||{};
+  function fac(x){ return ppMayus(x).replace(/[^A-Z0-9]/g,"").replace(/^0+/,""); }
+  var num = fac(L.numero), prov = ppClaveNombre(L.proveedor||""), mon = L.total!==null && L.total!==undefined ? ppMontoArchivo(String(L.total)) : null;
+  if(!num || !prov) return "";
+  var p = (pagos||[]).filter(function(q){ return fac(q.factura)===num && ppClaveNombre(q.enLaFoto||"")===prov; })[0];
+  if(p) return "ya está en los pagos pendientes de "+p.empresa;
+  if(mon===null) return "";
+  var o = (anteriores||[]).filter(function(x){ var M = x.lectura||{};
+    return x!==it && fac(M.numero)===num && ppClaveNombre(M.proveedor||"")===prov && M.total!==null && M.total!==undefined && ppMontoArchivo(String(M.total))===mon; })[0];
+  return o ? "llegó dos veces por WhatsApp" : "";
+}
+// Saca de la bandeja las facturas que ya se trabajaron (ver ppRepetidaDe) → cuántas sacó.
+function ppPodarBandeja(){
+  var m = STATE.mod4, vistas = [], sacadas = 0;
+  if(!ppBaseLista()) return 0;
+  (m.bandeja||[]).slice().forEach(function(it){
+    if(ppRepetidaDe(it, ppPagos(), vistas)){ ppSacarFactura(it); sacadas++; }
+    else vistas.push(it);
+  });
+  if(sacadas) m.podadas = (m.podadas||0) + sacadas;
+  return sacadas;
 }
 // Saca la factura de la lista: la de WhatsApp se borra de la base (para todos); la elegida a mano, de acá.
 function ppSacarFactura(it){

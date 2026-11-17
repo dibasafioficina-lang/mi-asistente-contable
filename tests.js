@@ -6994,7 +6994,9 @@ testAsync("una factura de WhatsApp aparece para revisar, con su foto y su propue
   eq(it.form.empresa + "|" + it.form.factura + "|" + it.form.monto, "BLVD|3404|15.00");
   eq(F.escrituras.length, 0, "verla no cambia nada");
   // otra persona la corrige mientras tanto: lo que yo estaba editando no se pierde
-  it.form.monto = "16.00"; F.deOtro("bandeja/wa-5", ppFacturaWA({ mensaje: 5, recibido: "2026-11-17 08:00:00" }));
+  // (otra factura: la misma reenviada saldría sola de la lista, ver la prueba de las repetidas)
+  it.form.monto = "16.00"; F.deOtro("bandeja/wa-5", ppFacturaWA({ mensaje: 5, recibido: "2026-11-17 08:00:00",
+    lectura: Object.assign({}, ppFacturaWA().lectura, { numero: "3405" }) }));
   eq(STATE.mod4.bandeja.length, 2); eq(STATE.mod4.bandeja[0].form.monto, "16.00");
   ppCerrarBase();
 });
@@ -7008,6 +7010,28 @@ testAsync("al pasarla a pendientes se lleva la foto y deja la bandeja; al genera
   eq(/Llegó por WhatsApp de Diba/.test(store.pagosArea4.innerHTML) && /\/_blob\/0123456789abcdef0123456789abcdef/.test(store.pagosArea4.innerHTML), true, "el pago pendiente muestra de dónde salió");
   STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
   eq([...F.docs.keys()].join(","), "plantilla/BLVD", "no queda historial");
+  ppCerrarBase();
+});
+/* Pedido de Diba (17-nov-2026): lo que ya pasó la verificación no se queda en «Facturas por revisar».
+   La Fonchy 0000009646 y la Mirna Morales 185 llegaron dos veces por WhatsApp: la primera pasó a pendientes
+   y la copia se quedaba en la lista, rechazada por repetida cada vez. */
+testAsync("una factura que ya está en pendientes, o que llegó dos veces, sale sola de la lista", async () => {
+  const otra = (n, o) => ppFacturaWA(Object.assign({ mensaje: n, lectura: Object.assign({}, ppFacturaWA().lectura, o || {}) }));
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "bandeja/wa-4": ppFacturaWA(),
+    "bandeja/wa-6": otra(6, { numero: "0000003404" }),                     // la misma, con los ceros del talonario
+    "bandeja/wa-7": otra(7, { numero: "3404", total: 16, lineas: [] }),     // mismo número, otro total: otro documento
+    "bandeja/wa-8": otra(8, { numero: null }),                              // sin número: no se decide nada
+    "bandeja/wa-9": otra(9, { numero: null }) });
+  await ppAbrirConBase(F);
+  eq(STATE.mod4.bandeja.map(x => x.id).join(","), "wa-4,wa-7,wa-8,wa-9", "la copia de wa-4 sale sola; las dudosas se quedan");
+  eq(F.docs.has("bandeja/wa-6"), false, "y sale para todos");
+  eq(/1 repetida quitada/.test(store.pagosArea4.innerHTML), true, "y se dice");
+  ppFacturaAPendientes(STATE.mod4.bandeja[0]); await ppTic();
+  F.deOtro("bandeja/wa-10", otra(10, { proveedor: "Transporte Kalir Smile, S.A." }));   // la reenvían después de pasarla
+  renderPagosMod4(); await ppTic();
+  eq(F.docs.has("bandeja/wa-10"), false, "la que ya está en pendientes no vuelve a la lista");
+  // contra un pago alcanza proveedor y número: Abrego 22421 llegó por 2,006.00 y se pagó 1,976.54 (nota de crédito)
+  eq(STATE.mod4.bandeja.map(x => x.id).join(","), "wa-8,wa-9", "wa-7 es la misma factura 3404 de Kalir, ya pendiente");
   ppCerrarBase();
 });
 testAsync("una factura de WhatsApp con datos raros no rompe la pantalla ni carga una imagen de afuera", async () => {
