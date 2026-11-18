@@ -87,7 +87,7 @@ Arma el archivo de pagos que se sube al banco, **uno por razón social** (la ofi
 
 - El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8 sin BOM y sin salto al final.
 - **Una plantilla por empresa**, con su nombre y la fecha del día: `pago proveedores STG BLVD 16 de noviembre 2026.txt` (el «STG» lo pidió Diba al renombrar el módulo).
-- Cuando se confirma que la plantilla se generó, sus pagos **se borran** de los pendientes. No hay historial.
+- Cuando se confirma que la plantilla se generó, sus pagos **se borran** de los pendientes. Desde el 18-nov-2026 queda solo una **ficha mínima** de cada uno en el registro de facturas pagadas (ver abajo), para no pagar dos veces la misma factura.
 - El número de una **guía de entrega** vale como número de factura.
 - La cuenta y el nombre salen de la **plantilla madre**; el banco de la plantilla es referencia y no viaja.
 - La factura y el monto llegan por **fotos de facturas por WhatsApp**. El número +507 6847-6207 ("mi asistente contable") está conectado a **LetsBot** por la API oficial: recibe fotos en chat directo, pero **no ve grupos** (la API oficial no entra a grupos existentes; LetsBot también admite conexión por QR, que sí los vería, con riesgo de suspensión del número). El proveedor y la empresa que paga vienen **en la misma factura**, así que alcanza la foto.
@@ -124,6 +124,7 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 | `bandeja/<id>` | una factura leída de WhatsApp, a la espera de que alguien la revise |
 | `turnos/<empresa>` | el turno de quien está generando la plantilla de esa empresa |
 | `config/whatsapp` | el cursor de la tarea que lee WhatsApp (`ultimo` por teléfono) y cuándo corrió por última vez |
+| `pagadas/f-<cuenta>-<factura>` | la ficha de una factura que salió en una plantilla generada: `{cuenta, factura, monto, empresa, nombre, proveedor, fecha, ts}`, sin foto; vence a los 12 meses |
 
 - Al republicar hay que declarar **`capabilities: {downloads: true, sample: {images: true}, db: {rules: [{path: "", read: "interact", write: "interact"}]}, assets: {}}`**. La regla sube la lectura a `interact`: son cuentas bancarias, y por defecto las leería cualquiera con un enlace público.
 - El resto del módulo **no sabe dónde se guarda**: cambia sus listas y llama a `ppGuardarFilas` / `ppGuardarPagos`. La capa compara cada documento con lo último que se supo de la base y escribe **solo lo que cambió**.
@@ -154,6 +155,13 @@ Los dos controles que importan son los de la **cuenta**, que es lo único que mu
 - **El monto es estricto** (`ppMontoArchivo`): `15.005` o `15 aprox` no se redondean ni se arreglan, se devuelven a quien los escribió. `20,00` es 20.00 (coma decimal), igual que en `money()`.
 - **La misma factura a la misma cuenta no se carga dos veces**, tampoco desde otra empresa.
 - **«Plantilla generada» solo se habilita si lo descargado es exactamente lo que hay en pantalla**: si se edita un pago después de bajar el archivo, hay que bajarlo de nuevo. Borra lo que entró al archivo; lo no confirmado se queda.
+- **Una factura ya pagada no se vuelve a cargar** (`ppPagadas`, `ppPagadaDe`, `ppAnotarPagadas`), pedido de Diba (18-nov-2026). Antes, al generarse la plantilla se borraba todo y la app olvidaba qué se había pagado: una factura reenviada días después entraba como nueva. Ahora `ppMarcarGenerada` anota una ficha por pago en `pagadas` y:
+  - `ppNuevoPago` la **bloquea** si la misma cuenta ya tiene pagada esa factura («ya se pagó el … en la plantilla de …»);
+  - la bandeja la **saca sola** (`ppRepetidaDe`), comparando el número y, además, el membrete o la cuenta que propuso el cruce — por eso el cruce corre **antes** de podar;
+  - el **monto no cuenta**: una factura se puede pagar descontada una nota de crédito (Abrego 22421);
+  - el número se compara sin los ceros del talonario (`ppClaveFactura`: `0000009646` es la `9646`), también contra los pendientes.
+- Las fichas **vencen a los 12 meses** (`PP_PAGADAS_DIAS`): no se cuentan y la primera pestaña que las ve las borra de la base. La base no se considera lista sin el registro (`ppBaseLista`): sin él, una ya pagada pasaría como nueva.
+- **«Facturas pagadas»**, plegada al fondo como la plantilla madre, sirve para consultar y para **quitar** una ficha cuando el pago no salió del banco: después la app deja cargarla de nuevo.
 
 **La lectura de facturas** (`ppLeerFoto`, `ppCruzarFactura`) funciona **solo dentro de claude.ai**: la página le da la foto a Claude con el permiso `sample` (declarar `capabilities: {downloads: true, sample: {images: true}}` al republicar; como página suelta la sección no aparece). Dos límites del visor que definen el diseño:
 

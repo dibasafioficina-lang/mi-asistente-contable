@@ -6863,12 +6863,12 @@ const ppTic = () => new Promise(r => setTimeout(r, 5));
 async function ppAbrirConBase(F) {
   ppBaseReiniciar();
   global.claude = { use: n => Promise.resolve(n === "db" ? F.db : null) };
-  Object.assign(STATE.mod4, { filas: null, pagos: null, plantilla: undefined, importe: null, editando: null, bandeja: [], fotos: [], descargas: {}, lector: false });
+  Object.assign(STATE.mod4, { filas: null, pagos: null, pagadas: null, plantilla: undefined, importe: null, editando: null, bandeja: [], fotos: [], descargas: {}, lector: false, podadas: 0 });
   STATE.view = "modulo4"; renderModulo4();
   await ppTic();
 }
 function ppCerrarBase() { delete global.claude; ppBaseReiniciar(); PP_BASE.iniciada = true; STATE.view = "menu";
-  Object.assign(STATE.mod4, { filas: null, pagos: null, plantilla: undefined, importe: null, bandeja: [], fotos: [] }); }
+  Object.assign(STATE.mod4, { filas: null, pagos: null, pagadas: null, plantilla: undefined, importe: null, bandeja: [], fotos: [], podadas: 0 }); }
 const ppDocBLVD = () => ({ empresa: "BLVD", orden: 0, filas: [
   { id: "b1", cuenta: "0447000000001", nombre: "ROSY MIRANDA TRANSPORTE KALIR", banco: "", nota: "", noUsar: false },
   { id: "b2", cuenta: "0430000000077", nombre: "JORGE ARAUZ", banco: "Banco General", nota: "", noUsar: false }] });
@@ -6912,12 +6912,13 @@ testAsync("cada cambio escribe solo el documento que cambió", async () => {
   eq(F.escrituras.length, 2, "guardar sin cambios no escribe");
   STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); await ppTic();
   eq(ppMarcarGenerada("BLVD"), 1); ppGuardarPagos(); await ppTic();
-  eq(F.escrituras.slice(2).join(","), "set pagos/" + r.pago.id + ",delete pagos/" + r.pago.id, "al generarse la plantilla, el pago se borra para todos");
+  // Desde el 18-nov-2026 (pedido de Diba) al generarse queda la ficha en «pagadas», para no pagarla dos veces.
+  eq(F.escrituras.slice(2).join(","), "set pagos/" + r.pago.id + ",set pagadas/f-0447000000001-3404,delete pagos/" + r.pago.id, "al generarse la plantilla, el pago se borra para todos y queda su ficha");
   eq(F.docs.has("pagos/" + r.pago.id), false);
   ppAgregarBeneficiario({ empresa: "TEJAR", cuenta: "0301000000020", nombre: "COCHEZ Y CIA", banco: "" }); await ppTic();
-  eq(F.escrituras[4], "set plantilla/TEJAR"); eq(F.docs.get("plantilla/TEJAR").orden, 2, "una empresa nueva va al final");
+  eq(F.escrituras[5], "set plantilla/TEJAR"); eq(F.docs.get("plantilla/TEJAR").orden, 2, "una empresa nueva va al final");
   ppQuitarBeneficiario(ppFilas().filter(f => f.empresa === "TEJAR")[0].id); await ppTic();
-  eq(F.escrituras[5], "delete plantilla/TEJAR", "una empresa sin beneficiarios deja de existir");
+  eq(F.escrituras[6], "delete plantilla/TEJAR", "una empresa sin beneficiarios deja de existir");
   ppCerrarBase();
 });
 testAsync("lo que cambia otra persona llega solo, y no se reescribe", async () => {
@@ -7009,7 +7010,9 @@ testAsync("al pasarla a pendientes se lleva la foto y deja la bandeja; al genera
   eq(d.origen + "|" + d.foto + "|" + d.de + "|" + d.recibido + "|" + d.confirmado, "whatsapp|0123456789abcdef0123456789abcdef|Diba|2026-11-16 23:28:13|false");
   eq(/Llegó por WhatsApp de Diba/.test(store.pagosArea4.innerHTML) && /\/_blob\/0123456789abcdef0123456789abcdef/.test(store.pagosArea4.innerHTML), true, "el pago pendiente muestra de dónde salió");
   STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
-  eq([...F.docs.keys()].join(","), "plantilla/BLVD", "no queda historial");
+  // Del pago no queda nada (ni foto ni de quién vino): solo la ficha mínima del registro de pagadas.
+  eq([...F.docs.keys()].join(","), "plantilla/BLVD,pagadas/f-0447000000001-3404", "del pago solo queda su ficha de pagada");
+  eq(Object.keys(F.docs.get("pagadas/f-0447000000001-3404")).sort().join(","), "cuenta,empresa,factura,fecha,id,monto,nombre,proveedor,ts", "sin foto");
   ppCerrarBase();
 });
 /* Pedido de Diba (17-nov-2026): lo que ya pasó la verificación no se queda en «Facturas por revisar».
@@ -7032,6 +7035,42 @@ testAsync("una factura que ya está en pendientes, o que llegó dos veces, sale 
   eq(F.docs.has("bandeja/wa-10"), false, "la que ya está en pendientes no vuelve a la lista");
   // contra un pago alcanza proveedor y número: Abrego 22421 llegó por 2,006.00 y se pagó 1,976.54 (nota de crédito)
   eq(STATE.mod4.bandeja.map(x => x.id).join(","), "wa-8,wa-9", "wa-7 es la misma factura 3404 de Kalir, ya pendiente");
+  ppCerrarBase();
+});
+/* Pedido de Diba (18-nov-2026): al generar la plantilla los pagos se borran y la app olvidaba qué se pagó;
+   una factura reenviada días después entraba como nueva y salía dos veces. Queda una ficha por 12 meses. */
+testAsync("una factura ya pagada no se vuelve a cargar: ni a mano, ni si la reenvían por WhatsApp", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(), "bandeja/wa-4": ppFacturaWA() });
+  await ppAbrirConBase(F);
+  ppFacturaAPendientes(STATE.mod4.bandeja[0]); await ppTic();
+  STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
+  eq(STATE.mod4.pagos.length, 0, "el pago se fue con la plantilla");
+  const fila = ppBeneficiarios(STATE.mod4.plantilla, "BLVD", true).filter(f => f.cuenta === "0447000000001")[0];
+  const r = ppNuevoPago(ppPagos(), "BLVD", fila, "0000003404", "15.00");
+  eq(/ya se pagó el \d{4}-\d{2}-\d{2} en la plantilla de BLVD por B\/ 15\.00/.test(r.error || ""), true, "a mano: bloqueada, aunque traiga los ceros del talonario");
+  eq(!!ppNuevoPago(ppPagos(), "BLVD", fila, "3405", "15.00").pago, true, "otra factura del mismo proveedor sí entra");
+  // la reenvían por WhatsApp, con otro monto (descontada una nota de crédito): sale sola de la lista
+  F.deOtro("bandeja/wa-9", ppFacturaWA({ mensaje: 9, lectura: Object.assign({}, ppFacturaWA().lectura, { total: 12, lineas: [] }) }));
+  await ppTic(); renderPagosMod4(); await ppTic();
+  eq(F.docs.has("bandeja/wa-9"), false, "la ya pagada no se queda para revisar");
+  // otra persona abre la página después: el registro viene de la base
+  ppCerrarBase(); await ppAbrirConBase(F);
+  eq(ppPagadas().length, 1); eq(!!ppPagadaDe("0447000000001", "3404"), true);
+  // si el pago no salió del banco, se quita el registro y se puede volver a cargar
+  ppQuitarPagada(ppPagadas()[0].id); await ppTic();
+  eq([...F.docs.keys()].filter(k => k.startsWith("pagadas/")).length, 0);
+  eq(!!ppNuevoPago(ppPagos(), "BLVD", fila, "3404", "15.00").pago, true);
+  ppCerrarBase();
+});
+testAsync("las fichas de pagadas vencen a los 12 meses y se borran solas", async () => {
+  const viejo = Date.now() - 366 * 86400000, nuevo = Date.now() - 10 * 86400000;
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD(),
+    "pagadas/f-0447000000001-1": { cuenta: "0447000000001", factura: "1", monto: "5.00", empresa: "BLVD", fecha: "2025-11-01", ts: viejo },
+    "pagadas/f-0447000000001-2": { cuenta: "0447000000001", factura: "2", monto: "5.00", empresa: "BLVD", fecha: "2026-11-08", ts: nuevo },
+    "pagadas/raro": { cuenta: "abc", factura: "" } });
+  await ppAbrirConBase(F); await ppTic();
+  eq(ppPagadas().map(r => r.factura).join(","), "2", "la vencida y la rara no cuentan");
+  eq(F.docs.has("pagadas/f-0447000000001-1"), false, "la vencida se borra de la base");
   ppCerrarBase();
 });
 testAsync("una factura de WhatsApp con datos raros no rompe la pantalla ni carga una imagen de afuera", async () => {

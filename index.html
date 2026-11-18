@@ -232,7 +232,11 @@
   .dlg-txt{white-space:pre-wrap;line-height:1.45;font-size:14px}
   .dlg-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
   /* Plantilla de pagos */
-  .pp-madre-carga p.desc{font-size:13.5px;color:var(--slate);margin:6px 0 16px}
+  .pp-madre-carga p.desc, .pp-pagadas .step-body p.desc{font-size:13.5px;color:var(--slate);margin:6px 0 16px}
+  .pp-pagadas{margin-top:14px}
+  .pp-pagadas > .step-head h4{font-size:15px}
+  .pp-pagadas-buscar{width:100%;max-width:420px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;margin:4px 0 10px;font:inherit}
+  .pp-pagadas-tbl .sub{font-size:11px;color:var(--slate)}
   .pp-madre > .step-head h4{font-size:15px}
   .pp-archivos{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
   .pp-archivo{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:var(--heading);
@@ -608,7 +612,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.14";
+var APP_VERSION = "2026.11.15";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8050,13 +8054,14 @@ function ppPlantillaComoTexto(filas){
    - Lo que llega de la base reemplaza lo local. La base es la verdad; esta pantalla, una vista. */
 var PP_BASE = null;
 function ppBaseReiniciar(){
-  PP_BASE = { iniciada:false, estado:"local", db:null, listo:{ plantilla:false, pagos:false }, sinc:{ plantilla:{}, pagos:{} },
+  PP_BASE = { iniciada:false, estado:"local", db:null, listo:{ plantilla:false, pagos:false, pagadas:false }, sinc:{ plantilla:{}, pagos:{} },
               orden:{}, cola:{}, error:"", lento:false, pestana:"t"+Date.now().toString(36)+Math.random().toString(36).slice(2,8) };
 }
 ppBaseReiniciar();
 function ppCompartida(){ return PP_BASE.estado==="compartida"; }
-// ¿Se puede trabajar? Como página suelta, siempre. Con base, recién cuando llegaron plantilla y pagos.
-function ppBaseLista(){ return PP_BASE.estado==="local" || (ppCompartida() && PP_BASE.listo.plantilla && PP_BASE.listo.pagos); }
+// ¿Se puede trabajar? Como página suelta, siempre. Con base, recién cuando llegaron plantilla, pagos y el
+// registro de pagadas: sin el registro, una factura ya pagada pasaría como nueva.
+function ppBaseLista(){ return PP_BASE.estado==="local" || (ppCompartida() && PP_BASE.listo.plantilla && PP_BASE.listo.pagos && PP_BASE.listo.pagadas); }
 function ppSlug(empresa){ return ppMayus(empresa).replace(/[^A-Z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "SIN-NOMBRE"; }
 function ppPagoGuardable(p){
   return { id:String(p.id), empresa:String(p.empresa||""), cuenta:String(p.cuenta||""), nombre:String(p.nombre||""), factura:String(p.factura||""),
@@ -8168,6 +8173,21 @@ function ppAlLlegarPagos(snap){
   if(!snap.metadata || snap.metadata.fromCache!==true) B.listo.pagos = true;
   ppAlCambiarBase();
 }
+// El registro de facturas pagadas (ver ppPagadas). Lo vencido se descarta al leer y se borra de la base.
+function ppAlLlegarPagadas(snap){
+  var B = PP_BASE, m = STATE.mod4, lista = [], vencidas = [];
+  snap.docs.forEach(function(d){
+    var r = ppRegistroGuardable(Object.assign({}, d.data()||{}, { id:d.id }));
+    if(!r) return;
+    if(ppPagadaVencida(r)) vencidas.push(d.id); else lista.push(r);
+  });
+  m.pagadas = lista;
+  if(!snap.metadata || snap.metadata.fromCache!==true){
+    B.listo.pagadas = true;
+    vencidas.forEach(function(id){ ppEscribir("pagadas/"+id, null); });
+  }
+  ppAlCambiarBase();
+}
 // Las facturas que dejó la tarea que lee WhatsApp. Lo que trae cada una es una LECTURA, igual de poco
 // confiable que la de una foto elegida a mano: pasa por ppNormalizarLectura y por el mismo cruce.
 function ppAlLlegarBandeja(snap){
@@ -8192,8 +8212,8 @@ function ppIniciarBase(){
   var c = typeof window!=="undefined" ? window.claude : null;
   if(!c || typeof c.use!=="function"){ B.estado = "local"; return; }
   // Mientras no se sepa si hay base, lo guardado en este navegador NO se muestra: si la hay, es una copia vieja.
-  B.estado = "conectando"; m.filas = []; m.pagos = []; m.plantilla = null;
-  function aLocal(){ B.estado = "local"; m.filas = null; m.pagos = null; m.plantilla = undefined; ppAlCambiarBase(); }
+  B.estado = "conectando"; m.filas = []; m.pagos = []; m.pagadas = []; m.plantilla = null;
+  function aLocal(){ B.estado = "local"; m.filas = null; m.pagos = null; m.pagadas = null; m.plantilla = undefined; ppAlCambiarBase(); }
   c.use("db").then(function(db){
     if(!db){ aLocal(); return; }
     B.db = db; B.estado = "compartida";
@@ -8201,6 +8221,7 @@ function ppIniciarBase(){
     db.collection("plantilla").onSnapshot(ppAlLlegarPlantilla, ppAlFallarBase);
     db.collection("pagos").onSnapshot(ppAlLlegarPagos, ppAlFallarBase);
     db.collection("bandeja").onSnapshot(ppAlLlegarBandeja, ppAlFallarBase);
+    db.collection("pagadas").onSnapshot(ppAlLlegarPagadas, ppAlFallarBase);
     // Cuándo pasó por última vez la tarea que lee WhatsApp: si hace mucho, las facturas no están entrando.
     // Es un dato de cortesía: si falla, el resto de la base tiene que seguir andando.
     try{
@@ -8506,8 +8527,9 @@ function renderModulo4(){
     (hay?'<div class="pp-archivos"><button class="btn-export" id="ppBajarMadre">Descargar la plantilla (.txt)</button><button class="btn-plegar" id="ppLimpiar">Vaciar la plantilla</button></div>':'') +
     '<p class="cg-note pp-nota">'+(compartida ? 'La plantilla y los pagos pendientes se guardan en la base compartida de esta página: los ve y los cambia todo el que tenga acceso para usarla.'
       : 'La plantilla se guarda en este navegador. En otro equipo o navegador hay que importarla de nuevo; descargala como .txt para tener respaldo.')+'</p>' +
-    '</div><div id="resultsArea4"></div></div></div>';
+    '</div><div id="resultsArea4"></div></div></div>' + ppPagadasHtml();
   document.getElementById("backBtn4").onclick = function(){ STATE.view="menu"; render(); };
+  ppBindPagadas();
   var mh = document.getElementById("ppMadreHead");
   if(mh){
     var alternarMadre = function(){ m.madreAbierta = !abierta; ppRedibujar(); };
@@ -8606,14 +8628,111 @@ function ppNombreArchivo(empresa, fecha){
   return "pago proveedores STG " + ppLimpio(String(empresa||"").replace(/[\\\/:*?"<>|]/g," ")) + " " +
     d.getDate() + " de " + PP_MESES[d.getMonth()] + " " + d.getFullYear() + ".txt";
 }
+// El número de factura para comparar: sin signos ni los ceros del talonario ("0000009646" es la 9646).
+function ppClaveFactura(x){ return ppMayus(x).replace(/[^A-Z0-9]/g,"").replace(/^0+/,""); }
 // La misma factura a la misma cuenta ya está pendiente: casi siempre es el mismo pago cargado dos veces.
 function ppPagoDuplicado(pagos, p){
-  var fac = ppMayus(p.factura);
+  var fac = ppClaveFactura(p.factura);
   for(var i=0;i<(pagos||[]).length;i++){
     var q = pagos[i];
-    if(q.id!==p.id && q.cuenta===p.cuenta && ppMayus(q.factura)===fac && fac) return q;
+    if(q.id!==p.id && q.cuenta===p.cuenta && ppClaveFactura(q.factura)===fac && fac) return q;
   }
   return null;
+}
+/* ---- Registro de facturas pagadas ----
+   Al marcar «Plantilla generada» los pagos se borran, y con ellos se olvidaba qué se había pagado: una
+   factura reenviada una semana después entraba como nueva y salía dos veces. Pedido de Diba (18-nov-2026):
+   queda una ficha mínima de cada pago (cuenta, factura, monto, empresa, proveedor, fecha), sin foto, por
+   12 meses. Se compara por cuenta y número de factura, como los pendientes: el monto no, porque una
+   factura puede pagarse descontada una nota de crédito (Abrego 22421: 2,006.00 pagada por 1,976.54). */
+var PP_PAGADAS_KEY = "pagadasMod4", PP_PAGADAS_DIAS = 365;
+function ppHoyISO(d){ d = d || new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function ppPagadaVencida(r, ahora){ return !(r.ts > 0) || ((ahora || Date.now()) - r.ts) > PP_PAGADAS_DIAS*86400000; }
+function ppIdPagada(cuenta, factura){ return ("f-"+String(cuenta||"").replace(/[^0-9]/g,"")+"-"+ppClaveFactura(factura)).slice(0, 120); }
+// Un registro que viene de la base o del navegador es dato de afuera: sin cuenta o sin factura no entra.
+function ppRegistroGuardable(x){
+  if(!x || typeof x!=="object") return null;
+  var r = { id:"", cuenta:String(x.cuenta||"").replace(/[^0-9]/g,""), factura:ppLimpio(x.factura||""), monto:ppLimpio(x.monto||""),
+            empresa:ppLimpio(x.empresa||""), nombre:ppLimpio(x.nombre||""), proveedor:ppLimpio(x.proveedor||""),
+            fecha:/^\d{4}-\d{2}-\d{2}$/.test(String(x.fecha||"")) ? String(x.fecha) : "", ts:Number(x.ts)||0 };
+  if(!r.cuenta || !ppClaveFactura(r.factura)) return null;
+  r.id = ppIdPagada(r.cuenta, r.factura);
+  return r;
+}
+function ppRegistroDePago(p, ahora){
+  return ppRegistroGuardable({ cuenta:p.cuenta, factura:p.factura, monto:p.monto, empresa:p.empresa, nombre:p.nombre,
+                               proveedor:p.enLaFoto||"", fecha:ppHoyISO(ahora ? new Date(ahora) : null), ts:ahora||Date.now() });
+}
+function ppPagadas(){
+  var m = STATE.mod4;
+  if(!m.pagadas){ var g = leerPrefs()[PP_PAGADAS_KEY];
+    m.pagadas = (Array.isArray(g) ? g : []).map(ppRegistroGuardable).filter(function(r){ return r && !ppPagadaVencida(r); }); }
+  return m.pagadas;
+}
+// ¿Esta factura a esta cuenta ya se pagó? → el registro, o null.
+function ppPagadaDe(cuenta, factura){
+  var fac = ppClaveFactura(factura);
+  if(!fac || !cuenta) return null;
+  return ppPagadas().filter(function(r){ return r.cuenta===cuenta && ppClaveFactura(r.factura)===fac; })[0] || null;
+}
+function ppTextoPagada(r){ return "ya se pagó el "+(r.fecha||"?")+" en la plantilla de "+r.empresa+(r.monto ? " por B/ "+fmt(r.monto) : ""); }
+// Anota los registros (los de la misma cuenta y factura se reemplazan) y los guarda.
+function ppAnotarPagadas(registros){
+  var lista = ppPagadas();
+  registros.forEach(function(r){
+    if(!r) return;
+    for(var i=lista.length-1;i>=0;i--) if(lista[i].id===r.id) lista.splice(i, 1);
+    lista.push(r);
+    if(ppCompartida()) ppEscribir("pagadas/"+r.id, r);
+  });
+  if(PP_BASE.estado==="local") guardarPref(PP_PAGADAS_KEY, lista);
+}
+// La sección «Facturas pagadas»: abajo y recogida, como la plantilla madre. Es para consultar, no para el día a día.
+function ppPagadasHtml(){
+  var m = STATE.mod4, lista = ppPagadas().slice(), abierta = !!m.pagadasAbierta, q = ppMayus(m.pagadasFiltro||"");
+  lista.sort(function(a,b){ return (b.ts-a.ts) || (a.id<b.id ? -1 : 1); });
+  var vis = q ? lista.filter(function(r){ return ppMayus([r.empresa, r.nombre, r.proveedor, r.factura, r.cuenta, r.fecha].join(" ")).indexOf(q)!==-1; }) : lista;
+  return '<div class="step-block pp-pagadas'+(abierta?'':' plegado')+'">' +
+    '<div class="step-head" id="ppPagadasHead" role="button" tabindex="0" aria-expanded="'+(abierta?"true":"false")+'">' +
+      '<div class="lado"><span class="chev">▼</span><h4>Facturas pagadas · últimos 12 meses</h4></div>' +
+      '<span class="count">'+lista.length+' factura'+(lista.length===1?'':'s')+'</span></div>' +
+    '<div class="step-body">' +
+      '<p class="desc">Cada factura que sale en una plantilla generada queda acá 12 meses. Si vuelve a llegar —por WhatsApp o a mano— la app no la deja cargar de nuevo. ' +
+      'Si un pago <b>no salió del banco</b>, quitalo de esta lista para poder cargarlo otra vez.</p>' +
+      (lista.length ? '<input class="pp-pagadas-buscar" id="ppPagadasBuscar" placeholder="Buscar por proveedor, factura, empresa o fecha" value="'+esc(m.pagadasFiltro||"")+'">' : '') +
+      (vis.length ? '<div class="lm-scroll"><table class="ret-tabla pp-tabla pp-pagadas-tbl"><thead><tr><th>Fecha</th><th>Empresa</th><th>Beneficiario</th><th>Factura</th><th>Monto</th><th></th></tr></thead><tbody>' +
+        vis.slice(0, 300).map(function(r){
+          return '<tr><td>'+esc(r.fecha)+'</td><td>'+esc(r.empresa)+'</td><td>'+esc(r.nombre)+(r.proveedor && ppClaveNombre(r.proveedor)!==ppClaveNombre(r.nombre) ? '<div class="sub">factura: '+esc(r.proveedor)+'</div>' : '')+'</td>' +
+            '<td>'+esc(r.factura)+'</td><td>'+(r.monto ? fmt(r.monto) : '')+'</td>' +
+            '<td><button class="sidet-del2 pp-pagada-quitar" data-id="'+esc(r.id)+'" title="El pago no salió del banco: quitarlo de la lista">✕</button></td></tr>';
+        }).join("") + '</tbody></table></div>' + (vis.length>300 ? '<p class="cg-note">Se muestran las 300 más recientes: usá la búsqueda para encontrar otras.</p>' : '')
+        : '<p class="cg-note">'+(lista.length ? 'Ninguna coincide con la búsqueda.' : 'Todavía no hay plantillas generadas.')+'</p>') +
+    '</div></div>';
+}
+function ppBindPagadas(){
+  var m = STATE.mod4, h = document.getElementById("ppPagadasHead");
+  if(h){
+    var alternar = function(){ m.pagadasAbierta = !m.pagadasAbierta; ppRedibujar(); };
+    h.addEventListener("click", alternar);
+    h.addEventListener("keydown", function(e){ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); alternar(); } });
+  }
+  var b = document.getElementById("ppPagadasBuscar");
+  if(b) b.addEventListener("change", function(){ m.pagadasFiltro = b.value; ppRedibujar(); });
+  var cont = typeof document.querySelectorAll==="function" ? document.querySelectorAll(".pp-pagada-quitar") : [];
+  Array.prototype.forEach.call(cont, function(x){
+    x.onclick = function(){
+      var id = x.getAttribute("data-id"), r = ppPagadas().filter(function(q){ return q.id===id; })[0]; if(!r) return;
+      confirmar("Se va a quitar la factura "+r.factura+" de "+r.nombre+" ("+r.empresa+", B/ "+fmt(r.monto)+") de las pagadas. Hacelo solo si el pago NO salió del banco: después la app la deja cargar de nuevo. ¿Continuar?")
+        .then(function(ok){ if(ok){ ppQuitarPagada(id); ppRedibujar(); } });
+    };
+  });
+}
+// Quita un registro: el pago no salió del banco y hay que volver a cargarlo.
+function ppQuitarPagada(id){
+  var lista = ppPagadas();
+  for(var i=lista.length-1;i>=0;i--) if(lista[i].id===id) lista.splice(i, 1);
+  if(ppCompartida()) ppEscribir("pagadas/"+id, null);
+  else guardarPref(PP_PAGADAS_KEY, lista);
 }
 // Arma un pago nuevo a partir de una línea de la plantilla → { pago } o { error }.
 function ppNuevoPago(pagos, empresa, fila, factura, monto){
@@ -8628,6 +8747,8 @@ function ppNuevoPago(pagos, empresa, fila, factura, monto){
   p.monto = ppMontoArchivo(p.monto);
   var dup = ppPagoDuplicado(pagos, p);
   if(dup) return { error:"La factura "+p.factura+" para la cuenta "+p.cuenta+" ya está pendiente en "+dup.empresa+" por B/ "+fmt(dup.monto)+". Si es otro pago, distinguí el número de factura." };
+  var pg = ppPagadaDe(p.cuenta, p.factura);
+  if(pg) return { error:"La factura "+p.factura+" para la cuenta "+p.cuenta+" "+ppTextoPagada(pg)+". Si el pago no salió del banco, quitala de «Facturas pagadas» y volvé a cargarla." };
   return { pago:p };
 }
 // Los beneficiarios que se pueden elegir: los de la empresa primero y, si se pide, los de todas (la lista
@@ -8801,7 +8922,8 @@ function renderPagosMod4(){
 }
 // Borra de los pendientes lo que entró al archivo de esa empresa. Lo no confirmado se queda.
 function ppMarcarGenerada(empresa){
-  var m = STATE.mod4, pagos = ppPagos(), listos = ppPagosListos(pagos, empresa);
+  var m = STATE.mod4, pagos = ppPagos(), listos = ppPagosListos(pagos, empresa), ahora = Date.now();
+  ppAnotarPagadas(listos.map(function(p){ return ppRegistroDePago(p, ahora); }));
   listos.forEach(function(p){ pagos.splice(pagos.indexOf(p), 1); });
   delete m.descargas[empresa];
   return listos.length;
@@ -8959,6 +9081,8 @@ function ppCruzarFactura(L, P, pagos, empresaForzada){
   if(r.fila && r.factura){
     var dup = ppPagoDuplicado(pagos, { id:null, cuenta:r.fila.cuenta, factura:r.factura });
     if(dup) r.avisos.push("La factura "+r.factura+" para esta cuenta ya está pendiente en "+dup.empresa+" por B/ "+fmt(dup.monto)+".");
+    var pg = ppPagadaDe(r.fila.cuenta, r.factura);
+    if(pg) r.avisos.push("La factura "+r.factura+" para esta cuenta "+ppTextoPagada(pg)+".");
   }
   return r;
 }
@@ -9086,6 +9210,8 @@ function ppFotoHtml(it){
 function ppItemsLector(){ var m = STATE.mod4; return (m.bandeja||[]).concat(m.fotos); }
 function ppLectorHtml(){
   var m = STATE.mod4;
+  // El cruce va antes de podar: la cuenta que propone ayuda a reconocer una factura ya pagada.
+  if(m.plantilla) (m.bandeja||[]).forEach(function(it){ if(!it.form) ppRecruzar(it, ""); });
   ppPodarBandeja();
   var bandeja = m.bandeja||[];
   if(!m.plantilla) return bandeja.length ? '<div class="pp-error">Hay '+bandeja.length+' factura(s) que llegaron por WhatsApp esperando revisión. Cargá la plantilla madre para poder armar sus pagos.</div>' : "";
@@ -9110,13 +9236,17 @@ function ppLectorHtml(){
    (Abrego 22421 llegó por 2,006.00 y se pagó 1,976.54, descontada su nota de crédito de 29.46). Entre dos
    facturas de la bandeja se exige además el mismo total. Sin número no se decide nada: dos notas de
    crédito del mismo proveedor y monto pueden ser dos documentos distintos. */
-function ppRepetidaDe(it, pagos, anteriores){
-  var L = it.lectura||{};
-  function fac(x){ return ppMayus(x).replace(/[^A-Z0-9]/g,"").replace(/^0+/,""); }
+function ppRepetidaDe(it, pagos, anteriores, pagadas){
+  var L = it.lectura||{}, fac = ppClaveFactura;
   var num = fac(L.numero), prov = ppClaveNombre(L.proveedor||""), mon = L.total!==null && L.total!==undefined ? ppMontoArchivo(String(L.total)) : null;
+  var cta = it.cruce && it.cruce.fila ? it.cruce.fila.cuenta : "";
   if(!num || !prov) return "";
-  var p = (pagos||[]).filter(function(q){ return fac(q.factura)===num && ppClaveNombre(q.enLaFoto||"")===prov; })[0];
+  // Es la misma factura si coincide el número y, además, el membrete o la cuenta que propuso el cruce.
+  function misma(numero, cuenta, enLaFoto){ return fac(numero)===num && ((enLaFoto && ppClaveNombre(enLaFoto)===prov) || (cta && cuenta===cta)); }
+  var p = (pagos||[]).filter(function(q){ return misma(q.factura, q.cuenta, q.enLaFoto); })[0];
   if(p) return "ya está en los pagos pendientes de "+p.empresa;
+  var r = (pagadas||[]).filter(function(q){ return misma(q.factura, q.cuenta, q.proveedor); })[0];
+  if(r) return ppTextoPagada(r);
   if(mon===null) return "";
   var o = (anteriores||[]).filter(function(x){ var M = x.lectura||{};
     return x!==it && fac(M.numero)===num && ppClaveNombre(M.proveedor||"")===prov && M.total!==null && M.total!==undefined && ppMontoArchivo(String(M.total))===mon; })[0];
@@ -9127,7 +9257,7 @@ function ppPodarBandeja(){
   var m = STATE.mod4, vistas = [], sacadas = 0;
   if(!ppBaseLista()) return 0;
   (m.bandeja||[]).slice().forEach(function(it){
-    if(ppRepetidaDe(it, ppPagos(), vistas)){ ppSacarFactura(it); sacadas++; }
+    if(ppRepetidaDe(it, ppPagos(), vistas, ppPagadas())){ ppSacarFactura(it); sacadas++; }
     else vistas.push(it);
   });
   if(sacadas) m.podadas = (m.podadas||0) + sacadas;
