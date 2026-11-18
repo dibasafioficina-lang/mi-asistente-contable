@@ -60,6 +60,7 @@ Tipos de módulo según espacios de carga: conciliatorios (2), revisión de pend
 | 2 | Revisión de movimientos pendientes | Pendiente de definir |
 | 3 | Conciliador de auxiliares | Pendiente de definir |
 | 4 | Plantilla de pagos STG | Construido — plantilla madre compartida y editable, generador del archivo, lectura de facturas desde fotos y entrada automática desde WhatsApp. Ver abajo |
+| 5 | Plantilla de pagos Banistmo | Creado en el menú como «Próximamente» (18-nov-2026), en espera del formato del archivo que se sube a Banistmo |
 
 ### Módulo 1 — Conciliador Caja y Banco
 

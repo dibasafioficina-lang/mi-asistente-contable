@@ -612,7 +612,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.15";
+var APP_VERSION = "2026.11.16";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -9378,7 +9378,12 @@ function renderMenu(){
     {id:"modulo4", nombre:"Plantilla de pagos STG",
       desc:"Arma el archivo de pagos a St. Georges Bank de cada empresa a partir de la plantilla madre de beneficiarios: cuenta, nombre, factura y monto.",
       enabled:true, icon:"🏦", iconBg:"var(--accent-green-bg)", tag:TAG_REVISION,
-      tagText:"plantillas .txt", action:"Abrir"}
+      tagText:"plantillas .txt", action:"Abrir"},
+    // Pedido de Diba (18-nov-2026): queda creado y en espera del formato del archivo que se sube a Banistmo.
+    {id:"modulo5", nombre:"Plantilla de pagos Banistmo",
+      desc:"Arma el archivo de pagos a Banistmo de cada empresa. En preparación: falta el formato del archivo que se sube a la banca en línea.",
+      enabled:false, icon:"🏦", iconBg:"var(--accent-purple-bg)", tag:TAG_REVISION,
+      tagText:"en preparación", action:"Próximamente"}
   ];
   mods.forEach(function(m){
     var el = document.createElement("div");
