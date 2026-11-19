@@ -87,6 +87,7 @@ Arma el archivo de pagos que se sube al banco, **uno por razón social** (la ofi
 **Lo decidido con Diba** (para no volver a preguntarlo):
 
 - El archivo de pago es un `.txt`, una línea por pago: `cuenta,nombre factura,monto`. **Sin** el prefijo `PAGO DE PROVEEDOR`, el monto **sin separador de miles** (`13130.00` — una coma partiría el campo), CRLF, UTF-8 sin BOM y sin salto al final.
+- **Varias facturas al mismo beneficiario van en un solo pago** (`ppAgruparPagos`), pedido de Diba (19-nov-2026): una línea con la suma y los números de factura uno detrás de otro — `0447…,ROSY MIRANDA TRANSPORTE KALIR 3404 3405,45.00`. El beneficiario es la **línea** de la plantilla (cuenta + nombre): PRESTA PANAMA cobra lo de ocho empleados en una cuenta y cada uno sigue siendo un pago aparte. En pendientes cada factura se carga y se confirma por separado; lo que se junta es solo la línea del archivo, y la pantalla avisa cuáles van juntas. En `pagadas` cada factura queda con su ficha y anota con cuáles salió (`junto`) y el total de la línea (`linea`).
 - **Una plantilla por empresa**, con su nombre y la fecha del día: `pago proveedores STG BLVD 16 de noviembre 2026.txt` (el «STG» lo pidió Diba al renombrar el módulo).
 - Cuando se confirma que la plantilla se generó, sus pagos **se borran** de los pendientes. Desde el 18-nov-2026 queda solo una **ficha mínima** de cada uno en el registro de facturas pagadas (ver abajo), para no pagar dos veces la misma factura.
 - El número de una **guía de entrega** vale como número de factura.

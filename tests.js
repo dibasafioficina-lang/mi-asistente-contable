@@ -7012,7 +7012,7 @@ testAsync("al pasarla a pendientes se lleva la foto y deja la bandeja; al genera
   STATE.mod4.pagos[0].confirmado = true; ppGuardarPagos(); ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
   // Del pago no queda nada (ni foto ni de quién vino): solo la ficha mínima del registro de pagadas.
   eq([...F.docs.keys()].join(","), "plantilla/BLVD,pagadas/f-0447000000001-3404", "del pago solo queda su ficha de pagada");
-  eq(Object.keys(F.docs.get("pagadas/f-0447000000001-3404")).sort().join(","), "cuenta,empresa,factura,fecha,id,monto,nombre,proveedor,ts", "sin foto");
+  eq(Object.keys(F.docs.get("pagadas/f-0447000000001-3404")).sort().join(","), "cuenta,empresa,factura,fecha,id,junto,linea,monto,nombre,proveedor,ts", "sin foto (junto y linea: si salió en un solo pago con otras)");
   ppCerrarBase();
 });
 /* Pedido de Diba (17-nov-2026): lo que ya pasó la verificación no se queda en «Facturas por revisar».
@@ -7071,6 +7071,35 @@ testAsync("las fichas de pagadas vencen a los 12 meses y se borran solas", async
   await ppAbrirConBase(F); await ppTic();
   eq(ppPagadas().map(r => r.factura).join(","), "2", "la vencida y la rara no cuentan");
   eq(F.docs.has("pagadas/f-0447000000001-1"), false, "la vencida se borra de la base");
+  ppCerrarBase();
+});
+/* Pedido de Diba (19-nov-2026): varias facturas al mismo proveedor van en UN solo pago de la plantilla,
+   y el registro de pagadas guarda cuáles fueron juntas. */
+test("varias facturas al mismo beneficiario salen en una sola línea, con la suma y los números", () => {
+  const a = ppPago({ id: "a", factura: "3404", monto: "15.00" }), b = ppPago({ id: "b", factura: "3405", monto: "20.10" }),
+        c = ppPago({ id: "c", factura: "0007", monto: "9.95", nombre: "Rosy Miranda Transporte Kalir, S.A." }),
+        otro = ppPago({ id: "d", cuenta: "0430000000077", nombre: "JORGE ARAUZ", factura: "88", monto: "5.00" });
+  eq(ppArchivoDePago([a, otro, b, c]),
+     "0447000000001,ROSY MIRANDA TRANSPORTE KALIR 3404 3405 0007,45.05\r\n0430000000077,JORGE ARAUZ 88,5.00",
+     "la suma en centavos, el orden en que se cargaron, y el nombre escrito distinto es el mismo beneficiario");
+  eq(ppArchivoDePago([a]), ppLineaDePago(a), "con una sola factura la línea es la de siempre");
+  // la misma cuenta con OTRA persona no se junta: PRESTA PANAMA cobra lo de ocho empleados en una cuenta
+  const p1 = ppPago({ id: "p1", cuenta: "0100000000009", nombre: "PRESTA PANAMA ANA RIOS", factura: "1", monto: "10.00" }),
+        p2 = ppPago({ id: "p2", cuenta: "0100000000009", nombre: "PRESTA PANAMA LUIS PAZ", factura: "2", monto: "10.00" });
+  eq(ppArchivoDePago([p1, p2]).split("\r\n").length, 2);
+});
+testAsync("al generarse, cada factura del pago unificado queda en pagadas con las que fueron juntas", async () => {
+  const F = baseFalsa({ "plantilla/BLVD": ppDocBLVD() });
+  await ppAbrirConBase(F);
+  const fila = ppFilas().filter(f => f.cuenta === "0447000000001")[0];
+  ["3404", "3405"].forEach((fac, i) => { const r = ppNuevoPago(ppPagos(), "BLVD", fila, fac, i ? "30.00" : "15.00"); r.pago.confirmado = true; ppPagos().push(r.pago); });
+  ppGuardarPagos(); await ppTic();
+  eq(/2 facturas de ROSY MIRANDA TRANSPORTE KALIR van en un solo pago/.test(store.pagosArea4.innerHTML), true, "la pantalla lo dice antes de bajar");
+  ppMarcarGenerada("BLVD"); ppGuardarPagos(); await ppTic();
+  const a = F.docs.get("pagadas/f-0447000000001-3404"), b = F.docs.get("pagadas/f-0447000000001-3405");
+  eq(a.monto + "|" + a.junto + "|" + a.linea, "15.00|3405|45.00");
+  eq(b.monto + "|" + b.junto + "|" + b.linea, "30.00|3404|45.00");
+  eq(!!ppNuevoPago(ppPagos(), "BLVD", fila, "3405", "30.00").error, true, "y cada una sigue bloqueada por separado");
   ppCerrarBase();
 });
 testAsync("una factura de WhatsApp con datos raros no rompe la pantalla ni carga una imagen de afuera", async () => {

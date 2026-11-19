@@ -612,7 +612,7 @@ function plegarPaso(key, valor){
 }
 
 /* ---------------- Utilidades ---------------- */
-var APP_VERSION = "2026.11.16";
+var APP_VERSION = "2026.11.17";
 // Escapa texto que viene de un ARCHIVO o de un input antes de meterlo en innerHTML. Sin esto, una celda del
 // Excel con "<svg onload=...>" se ejecuta como HTML en el navegador de quien abre el reporte.
 function esc(s){
@@ -8617,8 +8617,27 @@ function ppLineaDePago(p){
 function ppPagosListos(pagos, empresa){
   return (pagos||[]).filter(function(p){ return p.empresa===empresa && p.confirmado && !ppProblemasDePago(p).length; });
 }
+/* Las facturas al mismo beneficiario van en UN solo pago, pedido de Diba (19-nov-2026): una línea por
+   beneficiario con la suma de los montos y los números de factura uno detrás de otro
+   ("ROSY MIRANDA 3404 3405,45.00"). El beneficiario es la LÍNEA de la plantilla (cuenta + nombre), no la
+   cuenta sola: PRESTA PANAMA cobra en una cuenta lo de ocho empleados y cada uno es un pago distinto.
+   En pendientes y en el registro de pagadas cada factura sigue siendo una ficha propia: lo que se junta
+   es solo la línea del archivo. → [{ cuenta, nombre, pagos:[…], facturas:[…], monto:"45.00" }] */
+function ppAgruparPagos(pagos){
+  var grupos = [], porClave = {};
+  (pagos||[]).forEach(function(p){
+    if(ppProblemasDePago(p).length) return;
+    var k = p.cuenta+"|"+ppClaveNombre(p.nombre), g = porClave[k];
+    if(!g){ g = porClave[k] = { cuenta:p.cuenta, nombre:ppLimpio(String(p.nombre).replace(/,/g," ")), pagos:[], facturas:[], centavos:0 }; grupos.push(g); }
+    g.pagos.push(p); g.facturas.push(ppFacturaArchivo(p.factura));
+    g.centavos += Math.round(parseFloat(ppMontoArchivo(p.monto))*100);
+  });
+  grupos.forEach(function(g){ g.monto = (g.centavos/100).toFixed(2); });
+  return grupos;
+}
+function ppLineaDeGrupo(g){ return g.cuenta + "," + g.nombre + " " + g.facturas.join(" ") + "," + g.monto; }
 function ppArchivoDePago(pagos){
-  return (pagos||[]).map(ppLineaDePago).filter(Boolean).join("\r\n");
+  return ppAgruparPagos(pagos).map(ppLineaDeGrupo).join("\r\n");
 }
 // Un archivo por empresa, con su nombre y la fecha del día en que se genera:
 // "pago proveedores STG BLVD 16 de noviembre 2026.txt" (STG: el archivo es solo para St. Georges Bank).
@@ -8654,14 +8673,19 @@ function ppRegistroGuardable(x){
   if(!x || typeof x!=="object") return null;
   var r = { id:"", cuenta:String(x.cuenta||"").replace(/[^0-9]/g,""), factura:ppLimpio(x.factura||""), monto:ppLimpio(x.monto||""),
             empresa:ppLimpio(x.empresa||""), nombre:ppLimpio(x.nombre||""), proveedor:ppLimpio(x.proveedor||""),
-            fecha:/^\d{4}-\d{2}-\d{2}$/.test(String(x.fecha||"")) ? String(x.fecha) : "", ts:Number(x.ts)||0 };
+            fecha:/^\d{4}-\d{2}-\d{2}$/.test(String(x.fecha||"")) ? String(x.fecha) : "", ts:Number(x.ts)||0,
+            junto:ppLimpio(x.junto||""), linea:ppLimpio(x.linea||"") };
   if(!r.cuenta || !ppClaveFactura(r.factura)) return null;
   r.id = ppIdPagada(r.cuenta, r.factura);
   return r;
 }
-function ppRegistroDePago(p, ahora){
+// La ficha de un pago. Si salió junto con otras facturas del mismo beneficiario, guarda cuáles (`junto`)
+// y el total de esa línea del archivo (`linea`), para saber después en qué pago fue.
+function ppRegistroDePago(p, ahora, grupo){
+  var otras = grupo ? grupo.facturas.filter(function(f, i){ return grupo.pagos[i]!==p; }) : [];
   return ppRegistroGuardable({ cuenta:p.cuenta, factura:p.factura, monto:p.monto, empresa:p.empresa, nombre:p.nombre,
-                               proveedor:p.enLaFoto||"", fecha:ppHoyISO(ahora ? new Date(ahora) : null), ts:ahora||Date.now() });
+                               proveedor:p.enLaFoto||"", fecha:ppHoyISO(ahora ? new Date(ahora) : null), ts:ahora||Date.now(),
+                               junto:otras.join(" "), linea:otras.length ? grupo.monto : "" });
 }
 function ppPagadas(){
   var m = STATE.mod4;
@@ -8703,7 +8727,7 @@ function ppPagadasHtml(){
       (vis.length ? '<div class="lm-scroll"><table class="ret-tabla pp-tabla pp-pagadas-tbl"><thead><tr><th>Fecha</th><th>Empresa</th><th>Beneficiario</th><th>Factura</th><th>Monto</th><th></th></tr></thead><tbody>' +
         vis.slice(0, 300).map(function(r){
           return '<tr><td>'+esc(r.fecha)+'</td><td>'+esc(r.empresa)+'</td><td>'+esc(r.nombre)+(r.proveedor && ppClaveNombre(r.proveedor)!==ppClaveNombre(r.nombre) ? '<div class="sub">factura: '+esc(r.proveedor)+'</div>' : '')+'</td>' +
-            '<td>'+esc(r.factura)+'</td><td>'+(r.monto ? fmt(r.monto) : '')+'</td>' +
+            '<td>'+esc(r.factura)+(r.junto ? '<div class="sub">en un solo pago con '+esc(r.junto)+(r.linea ? ' · B/ '+fmt(r.linea) : '')+'</div>' : '')+'</td><td>'+(r.monto ? fmt(r.monto) : '')+'</td>' +
             '<td><button class="sidet-del2 pp-pagada-quitar" data-id="'+esc(r.id)+'" title="El pago no salió del banco: quitarlo de la lista">✕</button></td></tr>';
         }).join("") + '</tbody></table></div>' + (vis.length>300 ? '<p class="cg-note">Se muestran las 300 más recientes: usá la búsqueda para encontrar otras.</p>' : '')
         : '<p class="cg-note">'+(lista.length ? 'Ninguna coincide con la búsqueda.' : 'Todavía no hay plantillas generadas.')+'</p>') +
@@ -8831,7 +8855,10 @@ function ppBloqueEmpresaHtml(empresa){
         '<td><label class="pp-ok"><input type="checkbox" class="pp-conf-ck" data-id="'+esc(p.id)+'"'+(p.confirmado?' checked':'')+(pr.length?' disabled':'')+'> cuenta y monto</label></td>' +
         '<td><button class="sidet-del2 pp-quitar" data-id="'+esc(p.id)+'" title="Quitar este pago">✕</button></td></tr>';
     }).join("") + '</tbody></table>' +
-    (texto ? '<div class="pp-pre-t">Así queda el archivo:</div><pre class="pp-pre">'+esc(texto)+'</pre>' : '') +
+    (texto ? '<div class="pp-pre-t">Así queda el archivo'+(function(){
+        var juntas = ppAgruparPagos(listos).filter(function(g){ return g.pagos.length>1; });
+        return juntas.length ? ' — '+juntas.map(function(g){ return g.pagos.length+' facturas de '+esc(g.nombre)+' van en un solo pago'; }).join('; ') : '';
+      })()+':</div><pre class="pp-pre">'+esc(texto)+'</pre>' : '') +
     '<div class="pp-acciones">' +
       '<button class="btn-export pp-bajar" data-emp="'+esc(empresa)+'"'+(texto?'':' disabled')+'>Descargar '+esc(ppNombreArchivo(empresa))+'</button>' +
       '<button class="btn-export pp-generada" data-emp="'+esc(empresa)+'"'+(descargado?'':' disabled')+'>Plantilla generada · borrar '+(listos.length===1?'este pago':'estos '+listos.length+' pagos')+'</button>' +
@@ -8915,15 +8942,16 @@ function renderPagosMod4(){
     b.onclick = function(){
       var emp = b.getAttribute("data-emp"), listos = ppPagosListos(pagos, emp);
       if(!listos.length || m.descargas[emp]!==ppArchivoDePago(listos)) return;
-      confirmar((listos.length===1 ? "Se va a borrar el pago de "+emp+" que está" : "Se van a borrar los "+listos.length+" pagos de "+emp+" que están")+" en el archivo descargado. No queda historial. ¿Continuar?").then(function(ok){
+      confirmar((listos.length===1 ? "Se va a borrar el pago de "+emp+" que está" : "Se van a borrar los "+listos.length+" pagos de "+emp+" que están")+" en el archivo descargado. Cada factura queda anotada en «Facturas pagadas» para no pagarla dos veces. ¿Continuar?").then(function(ok){
         if(ok){ ppMarcarGenerada(emp); redibujar(); } });
     };
   });
 }
 // Borra de los pendientes lo que entró al archivo de esa empresa. Lo no confirmado se queda.
 function ppMarcarGenerada(empresa){
-  var m = STATE.mod4, pagos = ppPagos(), listos = ppPagosListos(pagos, empresa), ahora = Date.now();
-  ppAnotarPagadas(listos.map(function(p){ return ppRegistroDePago(p, ahora); }));
+  var m = STATE.mod4, pagos = ppPagos(), listos = ppPagosListos(pagos, empresa), ahora = Date.now(), regs = [];
+  ppAgruparPagos(listos).forEach(function(g){ g.pagos.forEach(function(p){ regs.push(ppRegistroDePago(p, ahora, g)); }); });
+  ppAnotarPagadas(regs);
   listos.forEach(function(p){ pagos.splice(pagos.indexOf(p), 1); });
   delete m.descargas[empresa];
   return listos.length;
